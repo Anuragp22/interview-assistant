@@ -115,7 +115,7 @@ const AuthForm = ({ type }: { type: FormType }) => {
           <h2 className="text-primary-100">JobVoice</h2>
         </div>
 
-        <h3>Practice job interviews with AI</h3>
+        <h3 className="text-center">Practice job interviews with AI</h3>
 
         <Form {...form}>
           <form
