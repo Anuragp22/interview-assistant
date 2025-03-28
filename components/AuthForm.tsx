@@ -1,24 +1,26 @@
 "use client";
 
+import { useState } from "react";
 import { z } from "zod";
 import Link from "next/link";
 import Image from "next/image";
 import { toast } from "sonner";
-import { auth } from "@/firebase/client";
 import { useForm } from "react-hook-form";
 import { useRouter } from "next/navigation";
 import { zodResolver } from "@hookform/resolvers/zod";
-
 import {
   createUserWithEmailAndPassword,
   signInWithEmailAndPassword,
 } from "firebase/auth";
+import { Eye, EyeOff } from "lucide-react"; // 👁️ Icons
 
+import { auth } from "@/firebase/client";
 import { Form } from "@/components/ui/form";
 import { Button } from "@/components/ui/button";
-
 import { signIn, signUp } from "@/lib/actions/auth.action";
 import FormField from "@/components/FormField";
+import { Loader2 } from "lucide-react"; // Add this to your imports
+
 
 const authFormSchema = (type: FormType) => {
   return z.object({
@@ -30,6 +32,8 @@ const authFormSchema = (type: FormType) => {
 
 const AuthForm = ({ type }: { type: FormType }) => {
   const router = useRouter();
+  const [showPassword, setShowPassword] = useState(false); // 👁️ State for password
+  const [loading, setLoading] = useState(false);
 
   const formSchema = authFormSchema(type);
   const form = useForm<z.infer<typeof formSchema>>({
@@ -41,11 +45,16 @@ const AuthForm = ({ type }: { type: FormType }) => {
     },
   });
 
+  const togglePasswordVisibility = () => {
+    setShowPassword((prev) => !prev);
+  };
+
   const onSubmit = async (data: z.infer<typeof formSchema>) => {
+
+    setLoading(true); // 🔄 Start loading
     try {
       if (type === "sign-up") {
         const { name, email, password } = data;
-
         const userCredential = await createUserWithEmailAndPassword(
           auth,
           email,
@@ -68,7 +77,6 @@ const AuthForm = ({ type }: { type: FormType }) => {
         router.push("/sign-in");
       } else {
         const { email, password } = data;
-
         const userCredential = await signInWithEmailAndPassword(
           auth,
           email,
@@ -91,7 +99,9 @@ const AuthForm = ({ type }: { type: FormType }) => {
       }
     } catch (error) {
       console.log(error);
-      toast.error(`There was an error: ${error}`);
+      toast.error("There was an error. Please try again.");
+    } finally {
+      setLoading(false); // ✅ Stop loading
     }
   };
 
@@ -130,17 +140,29 @@ const AuthForm = ({ type }: { type: FormType }) => {
               type="email"
             />
 
-            <FormField
-              control={form.control}
-              name="password"
-              label="Password"
-              placeholder="Enter your password"
-              type="password"
-            />
+            {/* Password Field with toggle */}
+            <div className="relative">
+              <FormField
+                control={form.control}
+                name="password"
+                label="Password"
+                placeholder="Enter your password"
+                type={showPassword ? "text" : "password"}
+              />
+              <button
+                type="button"
+                onClick={togglePasswordVisibility}
+                className="absolute cursor-pointer right-5 top-[42px] text-light-100 hover:text-primary-200 transition"
+              >
+                {showPassword ? <EyeOff size={20} /> : <Eye size={20} />}
+              </button>
+            </div>
 
-            <Button className="btn" type="submit">
-              {isSignIn ? "Sign In" : "Create an Account"}
+            <Button className="btn flex items-center gap-2 justify-center" type="submit" disabled={loading}>
+              {loading && <Loader2 className="animate-spin w-4 h-4" />}
+              {loading ? (isSignIn ? "Signing in..." : "Creating...") : isSignIn ? "Sign In" : "Create an Account"}
             </Button>
+
           </form>
         </Form>
 
