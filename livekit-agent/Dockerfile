@@ -12,11 +12,13 @@ RUN apt-get update \
 
 WORKDIR /app
 
-COPY pyproject.toml uv.lock ./
-RUN uv pip install --system --no-cache .
-
+# Copy everything the package needs to install (pyproject + lock + source) BEFORE
+# running the install. This keeps `uv pip install .` correct even with hatchling's
+# src/ layout requiring src/interview_agent/ to be present at install time.
+COPY pyproject.toml uv.lock .python-version ./
 COPY src ./src
-COPY .python-version ./
+
+RUN uv pip install --system --no-cache .
 
 # Pre-download Silero VAD weights so the first dispatch isn't slow.
 RUN python -c "from livekit.plugins import silero; silero.VAD.load()"
