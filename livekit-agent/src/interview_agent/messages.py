@@ -8,8 +8,8 @@ kinds without breaking existing clients.
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass
-from typing import Literal, Union
+from dataclasses import dataclass
+from typing import Literal, Union, get_args
 
 Role = Literal["user", "assistant"]
 StatusState = Literal[
@@ -27,28 +27,18 @@ class TurnMessage:
     content: str
     index: int
 
-    type: Literal["turn"] = "turn"
-
 
 @dataclass(frozen=True)
 class StatusMessage:
     state: StatusState
     at: float
 
-    type: Literal["status"] = "status"
-
 
 RoomMessage = Union[TurnMessage, StatusMessage]
 
 
-_VALID_ROLES = {"user", "assistant"}
-_VALID_STATES = {
-    "interview_started",
-    "agent_thinking",
-    "agent_speaking",
-    "user_speaking",
-    "interview_ended",
-}
+_VALID_ROLES = set(get_args(Role))
+_VALID_STATES = set(get_args(StatusState))
 
 
 def encode_message(message: RoomMessage) -> bytes:
@@ -79,18 +69,54 @@ def decode_message(payload: bytes) -> RoomMessage:
     """
     parsed = json.loads(payload.decode("utf-8"))
     msg_type = parsed.get("type")
-    body = parsed.get("payload") or {}
+    body = parsed.get("payload")
+
+    if not isinstance(body, dict):
+        raise ValueError(f"payload must be an object, got {type(body).__name__}")
 
     if msg_type == "turn":
-        role = body.get("role")
+        for field in ("role", "content", "index"):
+            if field not in body:
+                raise ValueError(f"turn payload missing field: {field}")
+
+        role = body["role"]
+        content = body["content"]
+        index = body["index"]
+
+        if not isinstance(role, str):
+            raise ValueError(f"turn role must be a string, got {type(role).__name__}")
         if role not in _VALID_ROLES:
             raise ValueError(f"Invalid turn role: {role!r}")
-        return TurnMessage(role=role, content=body["content"], index=int(body["index"]))
+        if not isinstance(content, str):
+            raise ValueError(
+                f"turn content must be a string, got {type(content).__name__}"
+            )
+        if not isinstance(index, int) or isinstance(index, bool):
+            raise ValueError(
+                f"turn index must be an int, got {type(index).__name__}"
+            )
+
+        return TurnMessage(role=role, content=content, index=index)
 
     if msg_type == "status":
-        state = body.get("state")
+        for field in ("state", "at"):
+            if field not in body:
+                raise ValueError(f"status payload missing field: {field}")
+
+        state = body["state"]
+        at = body["at"]
+
+        if not isinstance(state, str):
+            raise ValueError(
+                f"status state must be a string, got {type(state).__name__}"
+            )
         if state not in _VALID_STATES:
             raise ValueError(f"Invalid status state: {state!r}")
-        return StatusMessage(state=state, at=float(body["at"]))
+        if isinstance(at, bool) or not isinstance(at, (int, float)):
+            raise ValueError(
+                f"status at must be a number, got {type(at).__name__}"
+            )
+
+        return StatusMessage(state=state, at=float(at))
 
     raise ValueError(f"Unknown message type: {msg_type!r}")

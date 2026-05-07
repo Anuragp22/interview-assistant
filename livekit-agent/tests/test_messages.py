@@ -47,3 +47,53 @@ def test_decode_invalid_role_raises():
     ).encode("utf-8")
     with pytest.raises(ValueError):
         decode_message(payload)
+
+
+def test_decode_missing_field_raises_value_error():
+    payload = json.dumps({"type": "turn", "payload": {"role": "user", "index": 0}}).encode("utf-8")
+    with pytest.raises(ValueError) as exc:
+        decode_message(payload)
+    assert "content" in str(exc.value)
+
+
+def test_decode_string_index_raises_value_error():
+    payload = json.dumps({"type": "turn", "payload": {"role": "user", "content": "x", "index": "0"}}).encode("utf-8")
+    with pytest.raises(ValueError):
+        decode_message(payload)
+
+
+def test_decode_non_string_content_raises_value_error():
+    payload = json.dumps({"type": "turn", "payload": {"role": "user", "content": 123, "index": 0}}).encode("utf-8")
+    with pytest.raises(ValueError):
+        decode_message(payload)
+
+
+def test_decode_bool_index_raises_value_error():
+    # Python: bool is a subclass of int; exclude it explicitly.
+    payload = json.dumps({"type": "turn", "payload": {"role": "user", "content": "x", "index": True}}).encode("utf-8")
+    with pytest.raises(ValueError):
+        decode_message(payload)
+
+
+def test_decode_non_dict_payload_raises_value_error():
+    payload = json.dumps({"type": "turn", "payload": [1, 2, 3]}).encode("utf-8")
+    with pytest.raises(ValueError) as exc:
+        decode_message(payload)
+    assert "payload" in str(exc.value).lower()
+
+
+def test_decode_invalid_state_raises_value_error():
+    payload = json.dumps({"type": "status", "payload": {"state": "running", "at": 1.0}}).encode("utf-8")
+    with pytest.raises(ValueError):
+        decode_message(payload)
+
+
+def test_turn_message_constructed_without_type_field():
+    # Ensures type field is not part of the dataclass anymore.
+    msg = TurnMessage(role="user", content="hi", index=0)
+    assert not hasattr(msg, "type")
+
+
+def test_status_message_constructed_without_type_field():
+    msg = StatusMessage(state="agent_speaking", at=1.0)
+    assert not hasattr(msg, "type")
