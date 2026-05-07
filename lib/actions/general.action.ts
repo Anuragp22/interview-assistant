@@ -7,14 +7,29 @@ import { db } from '@/firebase/admin';
 import { feedbackSchema } from '@/constants';
 
 export async function createFeedback(params: CreateFeedbackParams) {
-  const { interviewId, userId, transcript, feedbackId } = params;
+  const { interviewId, userId, feedbackId } = params;
 
   try {
-    const formattedTranscript = transcript
-      .map(
-        (sentence: { role: string; content: string }) =>
-          `- ${sentence.role}: ${sentence.content}\n`
-      )
+    const turnsSnap = await db
+      .collection('interviews')
+      .doc(interviewId)
+      .collection('turns')
+      .orderBy('index', 'asc')
+      .get();
+
+    if (turnsSnap.empty) {
+      console.error(
+        'createFeedback: no turns persisted for interview',
+        interviewId
+      );
+      return { success: false };
+    }
+
+    const formattedTranscript = turnsSnap.docs
+      .map((doc) => {
+        const data = doc.data() as { role: string; content: string };
+        return `- ${data.role}: ${data.content}\n`;
+      })
       .join('');
 
     const { object } = await generateObject({
@@ -37,8 +52,8 @@ export async function createFeedback(params: CreateFeedbackParams) {
     });
 
     const feedback = {
-      interviewId: interviewId,
-      userId: userId,
+      interviewId,
+      userId,
       totalScore: object.totalScore,
       categoryScores: object.categoryScores,
       strengths: object.strengths,
@@ -47,13 +62,9 @@ export async function createFeedback(params: CreateFeedbackParams) {
       createdAt: new Date().toISOString(),
     };
 
-    let feedbackRef;
-
-    if (feedbackId) {
-      feedbackRef = db.collection('feedback').doc(feedbackId);
-    } else {
-      feedbackRef = db.collection('feedback').doc();
-    }
+    const feedbackRef = feedbackId
+      ? db.collection('feedback').doc(feedbackId)
+      : db.collection('feedback').doc();
 
     await feedbackRef.set(feedback);
 
