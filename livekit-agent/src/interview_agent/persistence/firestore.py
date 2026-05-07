@@ -28,7 +28,9 @@ def init_firebase() -> Any:
     The env var holds the base64-encoded JSON of the service account.
     Idempotent: returns an existing client if init has already happened.
     """
-    if not firebase_admin._apps:
+    try:
+        firebase_admin.get_app()
+    except ValueError:
         encoded = os.environ.get("FIREBASE_SERVICE_ACCOUNT_JSON")
         if not encoded:
             raise RuntimeError(
@@ -63,7 +65,8 @@ class TurnsRepository:
             self._client.collection("interviews")
             .document(ctx.interview_id)
             .collection("turns")
-            .add(doc)
+            .document(str(turn.index))
+            .set(doc)
         )
         logger.debug(
             "wrote turn role=%s index=%d interview=%s",

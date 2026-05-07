@@ -45,11 +45,12 @@ def test_append_turn_writes_to_correct_path():
 
 def test_append_turn_serializes_fields():
     client = MagicMock()
-    add_mock = (
+    set_mock = (
         client.collection.return_value
               .document.return_value
               .collection.return_value
-              .add
+              .document.return_value
+              .set
     )
     repo = TurnsRepository(client)
     ctx = _ctx()
@@ -59,7 +60,7 @@ def test_append_turn_serializes_fields():
 
     repo.append_turn(ctx, turn)
 
-    written = add_mock.call_args.args[0]
+    written = set_mock.call_args.args[0]
     assert written == {
         "role": "assistant",
         "content": "Hi there",
@@ -72,11 +73,12 @@ def test_append_turn_serializes_fields():
 
 def test_append_turn_preserves_metadata_dict():
     client = MagicMock()
-    add_mock = (
+    set_mock = (
         client.collection.return_value
               .document.return_value
               .collection.return_value
-              .add
+              .document.return_value
+              .set
     )
     repo = TurnsRepository(client)
     ctx = _ctx()
@@ -91,7 +93,7 @@ def test_append_turn_preserves_metadata_dict():
 
     repo.append_turn(ctx, turn)
 
-    written = add_mock.call_args.args[0]
+    written = set_mock.call_args.args[0]
     assert written["metadata"] == {"intent": "elaborate"}
 
 
@@ -109,3 +111,49 @@ def test_repository_rejects_negative_index():
 
     with pytest.raises(ValueError):
         repo.append_turn(ctx, turn)
+
+
+def test_append_turn_uses_index_as_doc_id():
+    """Idempotency: the leaf document id is `str(index)`, not auto-generated."""
+    client = MagicMock()
+    repo = TurnsRepository(client)
+    ctx = _ctx()
+    turn = Turn(
+        role="user",
+        content="hi",
+        started_at=datetime(2026, 5, 7, 10, 0, 0, tzinfo=timezone.utc),
+        ended_at=datetime(2026, 5, 7, 10, 0, 1, tzinfo=timezone.utc),
+        index=7,
+    )
+
+    repo.append_turn(ctx, turn)
+
+    turns_collection = client.collection.return_value.document.return_value.collection.return_value
+    turns_collection.document.assert_called_with("7")
+    turns_collection.document.return_value.set.assert_called_once()
+
+
+def test_append_turn_is_idempotent_on_retry():
+    """Same turn written twice -> same doc id, .set() invoked twice (overwrites)."""
+    client = MagicMock()
+    repo = TurnsRepository(client)
+    ctx = _ctx()
+    turn = Turn(
+        role="assistant",
+        content="x",
+        started_at=datetime.now(timezone.utc),
+        ended_at=datetime.now(timezone.utc),
+        index=3,
+    )
+
+    repo.append_turn(ctx, turn)
+    repo.append_turn(ctx, turn)
+
+    set_mock = (
+        client.collection.return_value
+        .document.return_value
+        .collection.return_value
+        .document.return_value
+        .set
+    )
+    assert set_mock.call_count == 2
