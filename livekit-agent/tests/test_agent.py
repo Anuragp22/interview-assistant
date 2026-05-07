@@ -4,8 +4,10 @@ Live behavior of entrypoint() is verified via the manual smoke described
 in the plan's Task 7 Step 2 and Task 18.
 """
 
+import asyncio
 import json
 from datetime import datetime, timezone
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -173,3 +175,32 @@ async def test_room_data_hook_publishes_status_ended():
     decoded = decode_message(payload)
     assert isinstance(decoded, StatusMessage)
     assert decoded.state == "interview_ended"
+
+
+@pytest.mark.asyncio
+async def test_hook_tasks_can_be_drained():
+    """Smoke test for the asyncio.gather drain pattern used in entrypoint.
+
+    We can't unit-test entrypoint() end-to-end, but we can verify that the
+    track+drain pattern correctly waits for in-flight tasks.
+    """
+    completed: list[int] = []
+    pending: set[asyncio.Task[None]] = set()
+
+    async def slow_write(i: int) -> None:
+        await asyncio.sleep(0.01)
+        completed.append(i)
+
+    def track(coro: Any) -> None:
+        task = asyncio.create_task(coro)
+        pending.add(task)
+        task.add_done_callback(pending.discard)
+
+    track(slow_write(0))
+    track(slow_write(1))
+    track(slow_write(2))
+
+    await asyncio.gather(*pending)
+
+    assert completed == [0, 1, 2]
+    assert pending == set()

@@ -950,11 +950,11 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "firebase-admin", specifier = ">=6.5" },
-    { name = "livekit-agents", specifier = ">=0.11" },
-    { name = "livekit-plugins-deepgram", specifier = ">=0.6" },
-    { name = "livekit-plugins-elevenlabs", specifier = ">=0.7" },
-    { name = "livekit-plugins-openai", specifier = ">=0.10" },
-    { name = "livekit-plugins-silero", specifier = ">=0.7" },
+    { name = "livekit-agents", specifier = ">=1.5,<2" },
+    { name = "livekit-plugins-deepgram", specifier = ">=1.5,<2" },
+    { name = "livekit-plugins-elevenlabs", specifier = ">=1.5,<2" },
+    { name = "livekit-plugins-openai", specifier = ">=1.5,<2" },
+    { name = "livekit-plugins-silero", specifier = ">=1.5,<2" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
     { name = "pytest-mock", marker = "extra == 'dev'", specifier = ">=3.12" },

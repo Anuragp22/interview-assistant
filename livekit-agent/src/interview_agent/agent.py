@@ -145,6 +145,13 @@ async def entrypoint(job: JobContext) -> None:
     # Wire conversation events to hooks. In 1.x both user and agent turns
     # surface via `conversation_item_added`; we fan out by item.role.
     turn_index = 0
+    pending_hook_tasks: set[asyncio.Task[None]] = set()
+
+    def _track_task(coro: Any) -> None:
+        """Schedule a hook coroutine and track it so we can drain on shutdown."""
+        task = asyncio.create_task(coro)
+        pending_hook_tasks.add(task)
+        task.add_done_callback(pending_hook_tasks.discard)
 
     @session.on("conversation_item_added")
     def _on_item(event: ConversationItemAddedEvent) -> None:
@@ -161,11 +168,11 @@ async def entrypoint(job: JobContext) -> None:
         if item.role == "user":
             turn = Turn(role="user", content=text, started_at=now, ended_at=now, index=turn_index)
             turn_index += 1
-            asyncio.create_task(hooks.on_user_turn_committed(ctx, turn))
+            _track_task(hooks.on_user_turn_committed(ctx, turn))
         elif item.role == "assistant":
             turn = Turn(role="assistant", content=text, started_at=now, ended_at=now, index=turn_index)
             turn_index += 1
-            asyncio.create_task(hooks.on_assistant_turn_committed(ctx, turn))
+            _track_task(hooks.on_assistant_turn_committed(ctx, turn))
 
     # Wait-for-end signaling
     finished = asyncio.Event()
@@ -179,15 +186,35 @@ async def entrypoint(job: JobContext) -> None:
     def _on_room_dc(*_: Any) -> None:
         finished.set()
 
-    await hooks.on_interview_started(ctx)
-    await session.start(agent=agent, room=job.room)
-    await session.say(build_first_message(ctx), allow_interruptions=True)
+    async def _drain_hook_tasks() -> None:
+        """Await pending hook tasks so the last turn isn't lost on disconnect.
 
+        Uses gather without return_exceptions so persistence failures surface
+        in the worker log instead of being silently swallowed by asyncio's
+        default unhandled-task logger. Caller is responsible for ensuring
+        on_interview_ended and aclose still run even if this raises.
+        """
+        if not pending_hook_tasks:
+            return
+        try:
+            await asyncio.gather(*pending_hook_tasks)
+        except Exception:
+            logger.exception("hook task raised during drain")
+            raise
+
+    await hooks.on_interview_started(ctx)
     try:
+        await session.start(agent=agent, room=job.room)
+        await session.say(build_first_message(ctx), allow_interruptions=True)
         await finished.wait()
     finally:
-        await hooks.on_interview_ended(ctx)
-        await session.aclose()
+        try:
+            await _drain_hook_tasks()
+        finally:
+            # ALWAYS run on_interview_ended + aclose, even if start/say/drain raised,
+            # so subscribers see a terminating event after on_interview_started fired.
+            await hooks.on_interview_ended(ctx)
+            await session.aclose()
 
 
 async def _request(req: JobRequest) -> None:
