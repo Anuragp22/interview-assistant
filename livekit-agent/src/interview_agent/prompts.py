@@ -61,9 +61,15 @@ def build_first_message(ctx: InterviewContext) -> str:
 
 
 def voice_settings() -> dict:
-    """11labs Sarah voice settings — preserved from the original VAPI config."""
+    """11labs Sarah voice settings — preserved from the original VAPI config.
+
+    Note: VAPI accepted `'sarah'` as a friendly name and mapped it internally.
+    The LiveKit elevenlabs plugin (and ElevenLabs API directly) requires the
+    real voice ID. `EXAVITQu4vr4xnSDxMaL` is the public premade "Sarah" voice
+    on ElevenLabs. Override via env if you want a different voice.
+    """
     return {
-        "voice_id": "sarah",
+        "voice_id": "EXAVITQu4vr4xnSDxMaL",
         "stability": 0.4,
         "similarity_boost": 0.8,
         "speed": 0.9,

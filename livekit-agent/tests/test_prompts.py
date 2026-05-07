@@ -43,7 +43,7 @@ def test_first_message_uses_user_name():
 
 def test_voice_settings_match_spec():
     settings = voice_settings()
-    assert settings["voice_id"] == "sarah"
+    assert settings["voice_id"] == "EXAVITQu4vr4xnSDxMaL"
     assert settings["stability"] == 0.4
     assert settings["similarity_boost"] == 0.8
     assert settings["speed"] == 0.9

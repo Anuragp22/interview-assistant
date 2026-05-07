@@ -68,3 +68,16 @@ def test_build_agent_inlines_questions_into_instructions():
     ctx = _ctx()
     agent = build_agent(ctx)
     assert "What is React?" in agent.instructions
+
+
+def test_build_session_uses_provided_vad_instance():
+    """Pre-loaded VAD is reused without a fresh load."""
+    pre_loaded = silero.VAD.load()
+    session = build_session(vad=pre_loaded)
+    assert session.vad is pre_loaded
+
+
+def test_build_session_loads_vad_when_none_passed():
+    """Default behavior: factory loads its own VAD."""
+    session = build_session()
+    assert isinstance(session.vad, silero.VAD)

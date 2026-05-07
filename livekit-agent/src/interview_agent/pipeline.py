@@ -26,17 +26,21 @@ from interview_agent.persistence.models import InterviewContext
 from interview_agent.prompts import build_system_prompt, voice_settings
 
 
-def build_session() -> AgentSession:
+def build_session(*, vad: silero.VAD | None = None) -> AgentSession:
     """Construct the provider-bound AgentSession.
 
     Provider-only — the system prompt and chat context live on the Agent
     (see build_agent). The session is started by the worker via
     `await session.start(agent=agent, room=room, ...)`.
+
+    `vad` is an optional pre-loaded Silero VAD. The worker's prewarm
+    function should load the VAD once and pass it here on each dispatch
+    to avoid reloading per session (see T7 prewarm_fnc).
     """
     voice = voice_settings()
 
     return AgentSession(
-        vad=silero.VAD.load(),
+        vad=vad if vad is not None else silero.VAD.load(),
         stt=deepgram.STT(model="nova-2", language="en-US"),
         llm=openai.LLM(model="gpt-4"),
         tts=elevenlabs.TTS(
