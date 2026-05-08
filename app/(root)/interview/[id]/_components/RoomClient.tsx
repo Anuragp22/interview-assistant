@@ -15,6 +15,14 @@ import { mintInterviewRoomToken } from "@/lib/actions/interview.action";
 import { createFeedback } from "@/lib/actions/general.action";
 import { cn } from "@/lib/utils";
 
+// If the AI agent worker isn't running (or is misconfigured), the LiveKit
+// room connect still succeeds — the browser just sits in "Connected" with
+// no remote participant ever joining. 10s is comfortably above the cold-
+// start window for the Python agent dispatcher under normal conditions
+// while still being short enough that the user gets actionable feedback
+// instead of a silent stall.
+const AGENT_JOIN_TIMEOUT_MS = 10_000;
+
 type ConnectionState =
   | "idle"
   | "connecting"
@@ -41,6 +49,7 @@ export default function RoomClient({
   const router = useRouter();
   const roomRef = useRef<Room | null>(null);
   const audioElRef = useRef<HTMLAudioElement | null>(null);
+  const agentWatchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [connectionState, setConnectionState] = useState<ConnectionState>("idle");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -69,7 +78,28 @@ export default function RoomClient({
     const room = new Room({ adaptiveStream: true, dynacast: true });
     roomRef.current = room;
 
-    room.on(RoomEvent.Connected, () => setConnectionState("connected"));
+    room.on(RoomEvent.Connected, () => {
+      setConnectionState("connected");
+      // Watchdog: if the AI agent doesn't join within AGENT_JOIN_TIMEOUT_MS,
+      // surface an error. Without this, the user sees "Connected" forever
+      // when the Python agent worker isn't running.
+      agentWatchdogRef.current = setTimeout(() => {
+        setConnectionState("error");
+        setErrorMessage(
+          "AI interviewer did not join. The interview-agent worker may not be running. " +
+            "Try again in a moment or check the agent service logs.",
+        );
+        // Disconnect so we stop publishing mic audio.
+        roomRef.current?.disconnect();
+      }, AGENT_JOIN_TIMEOUT_MS);
+    });
+    room.on(RoomEvent.ParticipantConnected, () => {
+      // The agent (or any remote participant) joined — clear the watchdog.
+      if (agentWatchdogRef.current) {
+        clearTimeout(agentWatchdogRef.current);
+        agentWatchdogRef.current = null;
+      }
+    });
     room.on(RoomEvent.Reconnecting, () => setConnectionState("reconnecting"));
     room.on(RoomEvent.Reconnected, () => setConnectionState("connected"));
     room.on(RoomEvent.Disconnected, () =>
@@ -115,6 +145,10 @@ export default function RoomClient({
   }
 
   async function endCall() {
+    if (agentWatchdogRef.current) {
+      clearTimeout(agentWatchdogRef.current);
+      agentWatchdogRef.current = null;
+    }
     const room = roomRef.current;
     if (room) {
       await room.disconnect();
@@ -136,6 +170,9 @@ export default function RoomClient({
 
   useEffect(() => {
     return () => {
+      if (agentWatchdogRef.current) {
+        clearTimeout(agentWatchdogRef.current);
+      }
       roomRef.current?.disconnect();
     };
   }, []);
