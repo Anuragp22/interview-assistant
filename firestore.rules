@@ -17,7 +17,9 @@ service cloud.firestore {
 
     // Templates — only HR owns them; only the owner can read/write
     match /templates/{templateId} {
-      allow read, write: if hasRole('hr')
+      allow read: if hasRole('hr')
+        && resource.data.hrUid == request.auth.uid;
+      allow update, delete: if hasRole('hr')
         && resource.data.hrUid == request.auth.uid;
       allow create: if hasRole('hr')
         && request.resource.data.hrUid == request.auth.uid;
@@ -41,12 +43,15 @@ service cloud.firestore {
 
     // Turn data + reports — server-write only via Admin SDK.
     match /sessions/{sessionId}/turns/{turnId} {
-      allow read: if (isOwner(get(/databases/$(database)/documents/sessions/$(sessionId)).data.candidateUid))
-        || (hasRole('hr'));
+      allow read: if
+        isOwner(get(/databases/$(database)/documents/sessions/$(sessionId)).data.candidateUid)
+        || (hasRole('hr')
+            && get(/databases/$(database)/documents/sessions/$(sessionId)).data.hrUid == request.auth.uid);
       allow write: if false;
     }
     match /reports/{sessionId} {
-      allow read: if hasRole('hr');
+      allow read: if hasRole('hr')
+        && get(/databases/$(database)/documents/sessions/$(sessionId)).data.hrUid == request.auth.uid;
       allow write: if false;
     }
 
