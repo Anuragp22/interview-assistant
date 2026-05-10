@@ -34,7 +34,7 @@ The app is a thin Next.js surface around two AI flows. **Flow A (generation):** 
 ```
 app/
   layout.tsx                          Root layout — fonts, global CSS, theme
-  globals.css                         Tailwind layer + custom utility classes (.call-view, .card-*, .btn-call, etc.)
+  globals.css                         Design system tokens (surface-*, fg-*, accent, accent-soft, etc.) + a small set of reusable component classes (.card-border, .card-cta, .card-interview, .root-layout, .auth-layout, .interviews-section, .tech-tooltip)
   (auth)/                             Route group — unauthenticated pages
     layout.tsx                        Redirects authenticated users away
     sign-in/page.tsx
@@ -178,7 +178,7 @@ There is **no test runner, no formatter, and no typecheck script** for the Next.
 - **Ambient types.** `types/index.d.ts` declares `User`, `Interview`, `Feedback`, etc. globally. You don't import them — and don't co-locate domain types elsewhere unless you want the existing imports to break.
 - **Zod schema lives with constants.** `feedbackSchema` is in `constants/index.ts`. Update it there when adding/removing scoring categories — the generator and the feedback page both rely on it.
 - **Voice + interviewer prompt are in Python.** Don't search `constants/` for the voice config or system prompt — they're in `livekit-agent/src/interview_agent/prompts.py`. Hot-reload the agent (or restart it) after edits.
-- **Styling.** Tailwind 4 + bespoke utility classes in `app/globals.css` (`.call-view`, `.card-interviewer`, `.btn-call`, `.transcript-border`, etc.). Prefer adding a new utility there over inline duplication.
+- **Styling.** Tailwind 4 with a token-driven dark design system in `app/globals.css` (Modern SaaS direction — Linear/Vercel-style hairline borders, electric-blue accent, refined neutral surface ramp). Tokens: `surface-0..3`, `border-subtle/default/strong`, `fg-strong/default/muted/subtle`, `accent` + `accent-soft/-border/-hover`, `success-100/200`, `destructive-100/200`. shadcn-style aliases (`primary`, `secondary`, `muted`, `accent`, `destructive`, etc.) map to these tokens for `components/ui/*` consumers. A short set of reusable component classes lives in `@layer components` (`.card-border`, `.card-cta`, `.card-interview`, layouts) — most screen-level styling is inline against the tokens. The body paints a subtle dot grid + accent-tinted radial glow at the top.
 - **Route groups.** `(auth)` and `(root)` are Next.js route groups — they affect layout but not the URL. Auth gating happens in `(root)/layout.tsx`, not via middleware.
 - **Error handling is sparse.** Many actions return `{ success: false }` and `console.error` the cause. When debugging, server console > UI feedback.
 
