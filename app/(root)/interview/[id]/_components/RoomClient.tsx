@@ -10,6 +10,7 @@ import {
   type RemoteTrack,
   type RemoteTrackPublication,
 } from "livekit-client";
+import { toast } from "sonner";
 
 import { mintInterviewRoomToken } from "@/lib/actions/interview.action";
 import { createFeedback } from "@/lib/actions/general.action";
@@ -164,6 +165,17 @@ export default function RoomClient({
     if (result.success && result.feedbackId) {
       router.push(`/interview/${interviewId}/feedback`);
     } else {
+      // Surface why we're bouncing the user back to the dashboard instead of
+      // the feedback page. Common cause: no turns persisted (agent crashed,
+      // or call ended before any conversation happened) — see createFeedback
+      // in lib/actions/general.action.ts.
+      toast.error("Couldn't generate feedback for this interview.", {
+        description:
+          "We couldn't build a feedback report from this session. " +
+          "This usually means no conversation was captured. " +
+          "Try the interview again, or check your interview history.",
+        duration: 8000,
+      });
       router.push("/");
     }
   }
