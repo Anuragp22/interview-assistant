@@ -5,6 +5,7 @@ import { redirect } from "next/navigation";
 
 import { isAuthenticated } from "@/lib/actions/auth.action";
 import LogoutButton from "@/components/LogoutButton";
+import SettingsSheet from "@/components/SettingsSheet";
 
 const Layout = async ({ children }: { children: ReactNode }) => {
   const isUserAuthenticated = await isAuthenticated();
@@ -30,7 +31,10 @@ const Layout = async ({ children }: { children: ReactNode }) => {
               JobVoice
             </span>
           </Link>
-          <LogoutButton />
+          <div className="flex items-center gap-1">
+            <SettingsSheet />
+            <LogoutButton />
+          </div>
         </div>
       </nav>
 
