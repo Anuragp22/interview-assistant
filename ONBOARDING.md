@@ -15,7 +15,7 @@ A developer-focused companion to `README.md`. The README explains *what* the app
 | **Datastore** | Firebase Firestore (collections: `users`, `interviews`, `interviews/{id}/turns`, `feedback`) |
 | **Auth** | Firebase Auth on the client → ID token → server creates a `session` cookie via Admin SDK |
 | **Voice pipeline** | LiveKit Cloud (WebRTC SFU) + a **Python agent worker** under `livekit-agent/` that wires Deepgram STT → Groq Llama-3.3 70B (OpenAI-compatible endpoint) → 11labs TTS |
-| **AI** | `@ai-sdk/google` (Gemini 2.0 Flash) for question generation + structured post-call feedback |
+| **AI** | `@ai-sdk/groq` (Llama-3.3 70B) for question generation + structured post-call feedback |
 | **Forms** | react-hook-form + zod via `@hookform/resolvers` |
 | **UI primitives** | Radix Slot/Label, custom shadcn-style components in `components/ui/` |
 
@@ -25,7 +25,7 @@ The repo is two cooperating services: the Next.js app (this directory) and the P
 
 ## 2. Mental model in one paragraph
 
-The app is a thin Next.js surface around two AI flows. **Flow A (generation):** the user fills the multi-step `InterviewForm` (`app/(root)/interview/_components/InterviewForm.tsx`) which calls `POST /api/interviews/generate`; the route asks Gemini for N questions, persists an `interviews` document, and returns its ID. **Flow B (interview + feedback):** on the interview page, `RoomClient.tsx` calls the `mintInterviewRoomToken` server action to get a LiveKit JWT (with interview metadata baked in), then joins a LiveKit room via `livekit-client`. As soon as the participant joins, **LiveKit Cloud auto-dispatches the Python agent worker** (running separately from `livekit-agent/`) into the same room. Inside the agent, Deepgram transcribes user speech, Groq Llama-3.3 70B (called through `livekit-plugins-openai` against Groq's OpenAI-compatible endpoint) generates the interviewer's reply against the system prompt + question list, and 11labs synthesises Sarah's voice back to the room. The agent writes each completed user/assistant exchange to `interviews/{id}/turns` in Firestore in real time. When the call ends, `createFeedback` (server action) reads the turns subcollection, asks Gemini 2.0 Flash to score the transcript via `generateObject` against `feedbackSchema`, and writes a `feedback/{id}` document. The user is routed to `/interview/[id]/feedback`. Everything else (auth, lists, history) is plumbing around those two flows.
+The app is a thin Next.js surface around two AI flows. **Flow A (generation):** the user fills the multi-step `InterviewForm` (`app/(root)/interview/_components/InterviewForm.tsx`) which calls `POST /api/interviews/generate`; the route asks Groq Llama-3.3 70B for N questions, persists an `interviews` document, and returns its ID. **Flow B (interview + feedback):** on the interview page, `RoomClient.tsx` calls the `mintInterviewRoomToken` server action to get a LiveKit JWT (with interview metadata baked in), then joins a LiveKit room via `livekit-client`. As soon as the participant joins, **LiveKit Cloud auto-dispatches the Python agent worker** (running separately from `livekit-agent/`) into the same room. Inside the agent, Deepgram transcribes user speech, Groq Llama-3.3 70B (called through `livekit-plugins-openai` against Groq's OpenAI-compatible endpoint) generates the interviewer's reply against the system prompt + question list, and 11labs synthesises Sarah's voice back to the room. The agent writes each completed user/assistant exchange to `interviews/{id}/turns` in Firestore in real time. When the call ends, `createFeedback` (server action) reads the turns subcollection, runs `generateObject` against `feedbackSchema` on Groq Llama-3.3 70B (via `@ai-sdk/groq`), and writes a `feedback/{id}` document. The user is routed to `/interview/[id]/feedback`. Everything else (auth, lists, history) is plumbing around those two flows.
 
 ---
 
@@ -51,7 +51,7 @@ app/
                                       connection state, kicks off feedback generation on disconnect
     interview/[id]/feedback/page.tsx  Display structured feedback for one interview
   api/
-    interviews/generate/route.ts      POST: Gemini → questions → Firestore (returns new interviewId).
+    interviews/generate/route.ts      POST: Groq Llama-3.3 70B → questions → Firestore (returns new interviewId).
                                       GET: health ping.
 
 components/
@@ -71,7 +71,7 @@ lib/
                                       setSessionCookie
     interview.action.ts               mintInterviewRoomToken — verifies the user owns the interview, then
                                       delegates to lib/livekit.ts to issue a JWT for that room.
-    general.action.ts                 createFeedback (reads turns subcollection, runs Gemini scoring),
+    general.action.ts                 createFeedback (reads turns subcollection, runs Groq Llama-3.3 70B scoring),
                                       getInterviewById, getFeedbackByInterviewId, getLatest/ByUserId
 
 livekit-agent/                        ── Separate Python service ──────────────────────────────────────
@@ -131,7 +131,7 @@ The interview happens inside a LiveKit room shared by the browser and the Python
 5. Inside the agent (`pipeline.py`): Deepgram Nova-2 transcribes user audio → Groq Llama-3.3 70B (system prompt built by `prompts.build_system_prompt`, called via `livekit-plugins-openai` against Groq's OpenAI-compatible endpoint) generates a reply → 11labs synthesises with `voice_settings()` → audio is sent back through LiveKit.
 6. After every user/assistant turn pair completes, `hooks.py` writes a document to `interviews/{interviewId}/turns` via `persistence/firestore.py`.
 7. When the participant leaves, the agent shuts down its session for that room, and `RoomClient` calls **`createFeedback`** (`lib/actions/general.action.ts`).
-8. `createFeedback` reads `interviews/{id}/turns` from Firestore, formats them into a transcript, runs `generateObject` against `feedbackSchema` on Gemini 2.0 Flash, and upserts `feedback/{id}`. The page then routes to `/interview/[id]/feedback`.
+8. `createFeedback` reads `interviews/{id}/turns` from Firestore, formats them into a transcript, runs `generateObject` against `feedbackSchema` on Groq Llama-3.3 70B (via `@ai-sdk/groq`), and upserts `feedback/{id}`. The page then routes to `/interview/[id]/feedback`.
 
 The Next.js process never touches Deepgram, OpenAI, or ElevenLabs at runtime. Those provider keys live in the Python agent's environment.
 
@@ -209,7 +209,7 @@ There is **no test runner, no formatter, and no typecheck script** for the Next.
 - **Connection state stuck on "connecting"** → check `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, and `NEXT_PUBLIC_LIVEKIT_URL` are set in the Next.js env. The first two are server-side; the URL must be the public `wss://...livekit.cloud` host.
 - **Agent never joins the room** → the Python worker isn't running, or didn't register with LK Cloud. Check `livekit-agent` logs for a `registered worker` line at startup. Confirm the agent's `LIVEKIT_URL`/`LIVEKIT_API_KEY`/`LIVEKIT_API_SECRET` point at the same project as the Next.js app.
 - **Per-turn transcripts not in Firestore** → the agent's Firebase credentials are missing or wrong. Verify `FIREBASE_SERVICE_ACCOUNT_JSON` in the agent's env and that it targets the same project as `FIREBASE_PROJECT_ID` on the web side. Tail agent logs for `firestore` errors.
-- **Feedback never appears after a call** → Two suspects: (1) `createFeedback` ran but found zero turns (room ended before any exchange completed) — check `interviews/{id}/turns` in the Firestore console; (2) Gemini structured-output parse failed — server log will show the zod error. Common cause: schema drift between `feedbackSchema` and the prompt.
+- **Feedback never appears after a call** → Two suspects: (1) `createFeedback` ran but found zero turns (room ended before any exchange completed) — check `interviews/{id}/turns` in the Firestore console; (2) Groq structured-output parse failed — server log will show the zod error. Common cause: schema drift between `feedbackSchema` and the prompt.
 - **Latest interviews list empty** → `getLatestInterviews` requires `finalized == true`, `userId != currentUser`, and an `orderBy('createdAt')` index. Firestore will print a "create index" link in server logs the first time.
 - **"User does not exist" on sign-in** → Firebase Auth user exists but no `users` doc was created (sign-up flow writes that). Inspect Firestore → `users/{uid}`.
 
@@ -222,7 +222,7 @@ These are not landmines — just places I'd check carefully before assuming the 
 - `signIn` in `auth.action.ts` does not return a result on the success path (no `return { success: true }`). Callers should look at the absence of `success: false`, which is brittle.
 - `getRandomInterviewCover` in `lib/utils.ts` is the source of cover art — verify the file list there is in sync with `public/covers/`.
 - The room data protocol is a hand-written envelope mirrored across `types/livekit.d.ts` and `livekit-agent/src/interview_agent/messages.py`. There is no codegen — drift is silent until runtime.
-- `generateObject` for feedback may be configured with `structuredOutputs: false`, which means Gemini's response is parsed loosely against the zod schema. Tighter validation requires flipping that flag and may need prompt tweaks.
+- `generateObject` for feedback parses Groq's response against the zod schema. Groq's JSON mode is reliable for the current `feedbackSchema` shape but isn't strict-schema-validated like OpenAI's `structuredOutputs:true` mode — if the model drifts, the zod parse throws and we surface the failure via the toast.
 - No CI, no tests. Be diligent with manual verification of both flows after non-trivial changes — and remember that "manual verification" requires both the Next.js dev server **and** the Python agent worker running.
 
 ---

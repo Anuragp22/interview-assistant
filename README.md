@@ -26,7 +26,7 @@ Interview Assistant creates a realistic interview environment by leveraging mult
 - **Speech-to-Text**: Deepgram Nova-2 (driven by the agent, not a hosted service)
 - **Text-to-Speech**: 11labs "Sarah" voice (driven by the agent)
 - **Conversation AI**: Groq Llama-3.3 70B (called via the OpenAI-compatible client; driven by the agent)
-- **Feedback AI**: Google Gemini 2.0 Flash (server action, post-call)
+- **Feedback AI**: Groq Llama-3.3 70B via `@ai-sdk/groq` (server action, post-call; same provider used for question generation and the live conversation)
 - **UI Components**: Radix UI, Lucide React icons
 - **Form Handling**: React Hook Form with Zod validation
 
@@ -39,7 +39,7 @@ The application uses **LiveKit Cloud** as the WebRTC SFU and a **Python agent** 
 3. **LiveKit Cloud dispatches the Python agent** to the room as soon as the user appears.
 4. **Inside the agent:** Deepgram transcribes user speech → Groq Llama-3.3 70B generates the interviewer's reply → 11labs converts the reply to Sarah's voice → audio is sent back through LiveKit.
 5. **Per-turn:** the agent writes each completed exchange to `interviews/{id}/turns` in Firestore.
-6. **End of call:** a server action reads the turns, asks Gemini 2.0 Flash to score the interview, and writes a `feedback/{id}` document.
+6. **End of call:** a server action reads the turns, asks Groq Llama-3.3 70B to score the interview against `feedbackSchema`, and writes a `feedback/{id}` document.
 
 ## Getting Started
 
@@ -52,7 +52,6 @@ The application uses **LiveKit Cloud** as the WebRTC SFU and a **Python agent** 
 - Groq API key (https://console.groq.com/keys)
 - Deepgram API key
 - ElevenLabs API key
-- Google AI Studio account
 
 ### Environment Variables
 
@@ -73,8 +72,15 @@ FIREBASE_PROJECT_ID=your_firebase_project_id
 FIREBASE_CLIENT_EMAIL=your_firebase_client_email
 FIREBASE_PRIVATE_KEY=your_firebase_private_key
 
-# Google Generative AI (Gemini) — used for question generation + post-call feedback
-GOOGLE_GENERATIVE_AI_API_KEY=your_gemini_api_key
+# Groq — drives question generation, live interview LLM, and post-call feedback
+GROQ_API_KEY=your_groq_api_key
+# Optional override (defaults to llama-3.3-70b-versatile)
+# GROQ_MODEL=llama-3.3-70b-versatile
+
+# Speech / TTS providers (used by the Python agent — read here too because
+# the agent loads this same .env.local in dev)
+DEEPGRAM_API_KEY=your_deepgram_api_key
+ELEVEN_API_KEY=your_elevenlabs_api_key
 
 # LiveKit
 LIVEKIT_API_KEY=
@@ -90,7 +96,7 @@ The Python agent under `livekit-agent/` has its own `.env` with provider keys �
 You can obtain these keys by:
 
 1. Creating a Firebase project at [Firebase Console](https://console.firebase.google.com/)
-2. Setting up a Google AI Studio account for the Gemini API key
+2. ~~Setting up a Google AI Studio account for the Gemini API key~~ — removed; Groq covers all LLM workloads now
 3. Getting a Groq API key at [console.groq.com/keys](https://console.groq.com/keys)
 4. Registering at [LiveKit Cloud](https://livekit.io/) for a project URL, API key, and secret
 5. Creating accounts at [Deepgram](https://deepgram.com/) and [ElevenLabs](https://elevenlabs.io/) for the agent
@@ -189,7 +195,7 @@ interview-assistant/
 │   ├── (auth)/                    # Authentication pages
 │   ├── (root)/                    # Main application pages
 │   │   └── interview/             # Interview generation + live room + feedback
-│   ├── api/interviews/generate/   # POST: Gemini → questions → Firestore
+│   ├── api/interviews/generate/   # POST: Groq Llama-3.3 70B → questions → Firestore
 │   └── globals.css                # Global styles
 ├── components/                    # Shared React components (auth form, cards, icons)
 ├── lib/

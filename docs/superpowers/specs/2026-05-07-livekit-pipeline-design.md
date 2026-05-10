@@ -13,7 +13,7 @@
 ### Goals
 
 1. Replace VAPI as the voice transport and AI pipeline orchestrator with **LiveKit Cloud** (SFU) plus a self-owned **Python agent** built on the LiveKit Agents SDK.
-2. Preserve the candidate-facing audio behavior: 11labs "Sarah" voice, Deepgram STT, Groq Llama-3.3 70B conversation (via OpenAI-compatible endpoint), and the existing post-call feedback flow (Gemini 2.0 Flash, current `feedbackSchema`).
+2. Preserve the candidate-facing audio behavior: 11labs "Sarah" voice, Deepgram STT, Groq Llama-3.3 70B conversation (via OpenAI-compatible endpoint), and the existing post-call feedback flow (now also Groq Llama-3.3 70B via `@ai-sdk/groq`, current `feedbackSchema`).
 3. Provide **interrupt / barge-in handling** with configurable thresholds via the LiveKit Agents pipeline.
 4. Replace the VAPI-driven generate flow with a **multi-step form** (better UX than today's voice-driven prompt collection).
 5. Establish three **forward seams** so future sub-projects don't require re-architecture:
@@ -84,7 +84,7 @@
 
 5. **Firestore.** Same primary collections (`users`, `interviews`, `feedback`). One **new** subcollection `interviews/{id}/turns` for live per-turn transcript writes. The agent writes turns directly via the Python `firebase-admin` SDK using the same service account already used by `firebase/admin.ts`.
 
-6. **AI providers.** Unchanged: Deepgram, 11labs, OpenAI, Gemini. The agent process holds keys for Deepgram, 11labs, and OpenAI. Gemini stays in the Next.js server action `createFeedback`.
+6. **AI providers.** Deepgram (STT), 11labs (TTS), Groq (LLM — used by the live conversation in the agent, by question generation in `/api/interviews/generate`, and by `createFeedback` for structured scoring). Gemini was retired in favour of a single LLM provider.
 
 **Why the Python agent writes to Firestore directly (vs. calling a Next.js webhook):** lower latency, simpler ops (no public webhook surface to secure), and the agent already needs Firebase service-account credentials. Cost: Firestore knowledge spans two services. Mitigated by keeping all writes behind a thin `interviews_repository.py` module that mirrors the relevant parts of `lib/actions/general.action.ts`.
 
@@ -100,7 +100,7 @@
 - **`lib/actions/interview.action.ts`** — `mintInterviewRoomToken(interviewId)` server action: verifies session, loads the interview, signs a JWT with metadata, returns `{ token, wsUrl, roomName }`.
 - **`app/(root)/interview/_components/InterviewForm.tsx`** — multi-step form replacing the VAPI generate workflow. See §6.
 - **`app/(root)/interview/[id]/_components/RoomClient.tsx`** — the new live-interview client. Replaces the VAPI parts of today's `Agent.tsx`.
-- **`app/api/interviews/generate/route.ts`** — renamed from `app/api/vapi/generate/route.ts`. Same Gemini-backed logic, with one contract change: now returns `{ success: true, interviewId: string }` (the new Firestore doc id) so the form can route to `/interview/{interviewId}` on success. Today's route returns only `{ success: true }`.
+- **`app/api/interviews/generate/route.ts`** — renamed from `app/api/vapi/generate/route.ts`. Same question-generation logic but driven by Groq Llama-3.3 70B (`@ai-sdk/groq`) instead of Gemini, with one contract change: now returns `{ success: true, interviewId: string }` (the new Firestore doc id) so the form can route to `/interview/{interviewId}` on success. Today's route returns only `{ success: true }`.
 
 ### 3.2 Added (new Python service, repo path `livekit-agent/`)
 
@@ -186,7 +186,7 @@ Browser                  Next.js                LiveKit Cloud           Python A
 - Either side disconnects (button click → `room.disconnect()`, or tab close → LK fires `participant_left`).
 - Agent's `on_interview_ended` hook runs, writes any final summary turn if needed, exits.
 - Frontend triggers `createFeedback({interviewId, userId, feedbackId})` server action.
-- Server action reads `interviews/{id}/turns` ordered by `index`, formats the transcript, runs Gemini `generateObject` against the existing `feedbackSchema`, writes `feedback/{feedbackId}` exactly as today.
+- Server action reads `interviews/{id}/turns` ordered by `index`, formats the transcript, runs Groq Llama-3.3 70B via `generateObject` against the existing `feedbackSchema` (using `@ai-sdk/groq`), writes `feedback/{feedbackId}` exactly as today.
 
 ---
 
@@ -235,7 +235,7 @@ class InterviewHooks:
 3. **Interview type + length.** Segmented control (Technical / Behavioral / Mixed). Question count slider, range 3–15, default 7.
 4. **Review + create.** Summary card. "Create interview" button → `POST /api/interviews/generate` → on success, route to `/interview/{newId}`.
 
-Form state is local; no draft persistence (YAGNI). Validation runs both client-side (zod) and server-side (same schema imported in the route handler). The route handler keeps its current Gemini-driven question-generation logic; only the call site changes.
+Form state is local; no draft persistence (YAGNI). Validation runs both client-side (zod) and server-side (same schema imported in the route handler). The route handler runs Groq Llama-3.3 70B for question generation; only the call site changes from the original Gemini-backed implementation.
 
 ---
 
