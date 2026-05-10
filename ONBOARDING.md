@@ -210,7 +210,7 @@ There is **no test runner, no formatter, and no typecheck script** for the Next.
 - **Agent never joins the room** → the Python worker isn't running, or didn't register with LK Cloud. Check `livekit-agent` logs for a `registered worker` line at startup. Confirm the agent's `LIVEKIT_URL`/`LIVEKIT_API_KEY`/`LIVEKIT_API_SECRET` point at the same project as the Next.js app.
 - **Per-turn transcripts not in Firestore** → the agent's Firebase credentials are missing or wrong. Verify `FIREBASE_SERVICE_ACCOUNT_JSON` in the agent's env and that it targets the same project as `FIREBASE_PROJECT_ID` on the web side. Tail agent logs for `firestore` errors.
 - **Feedback never appears after a call** → Two suspects: (1) `createFeedback` ran but found zero turns (room ended before any exchange completed) — check `interviews/{id}/turns` in the Firestore console; (2) Groq structured-output parse failed — server log will show the zod error. Common cause: schema drift between `feedbackSchema` and the prompt.
-- **Latest interviews list empty** → `getLatestInterviews` requires `finalized == true`, `userId != currentUser`, and an `orderBy('createdAt')` index. Firestore will print a "create index" link in server logs the first time.
+- **Recent interviews list empty** → `getInterviewsByUserId` filters by the current user's id and orders by createdAt. If a returning user sees nothing, double-check the `userId` field on the documents matches the Firebase Auth uid.
 - **"User does not exist" on sign-in** → Firebase Auth user exists but no `users` doc was created (sign-up flow writes that). Inspect Firestore → `users/{uid}`.
 
 ---

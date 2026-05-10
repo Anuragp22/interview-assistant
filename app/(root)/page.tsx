@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
-import { ArrowRight, Mic, Sparkles } from "lucide-react";
+import { ArrowRight, Mic, Plus } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import InterviewCard from "@/components/InterviewCard";
@@ -9,7 +9,6 @@ import ScoreProgressCard from "@/components/ScoreProgressCard";
 import { getCurrentUser } from "@/lib/actions/auth.action";
 import {
   getInterviewsByUserId,
-  getLatestInterviews,
   getUserScoreHistory,
 } from "@/lib/actions/general.action";
 
@@ -17,58 +16,48 @@ async function Home() {
   const user = await getCurrentUser();
   if (!user) redirect("/sign-in");
 
-  const [userInterviews, allInterview, scoreHistory] = await Promise.all([
+  const [userInterviews, scoreHistory] = await Promise.all([
     getInterviewsByUserId(user.id),
-    getLatestInterviews({ userId: user.id }),
     getUserScoreHistory(user.id),
   ]);
 
   const hasPastInterviews = (userInterviews?.length ?? 0) > 0;
-  const hasUpcomingInterviews = (allInterview?.length ?? 0) > 0;
+  const firstName = user.name.split(" ")[0];
 
   return (
     <>
-      {/* Hero */}
-      <section className="card-cta">
-        <div className="relative z-10 flex flex-col gap-4 max-w-lg">
-          <span className="inline-flex items-center gap-1.5 self-start text-xs font-medium px-2.5 py-1 rounded-full bg-accent-soft border border-accent-border text-fg-strong">
-            <Sparkles className="size-3" />
-            Powered by Groq Llama-3.3 70B
-          </span>
-          <h1 className="font-display text-4xl md:text-5xl lg:text-[3.5rem] tracking-tight text-fg-strong leading-[1.05]">
-            Practice interviews with an AI that{" "}
-            <em className="italic">listens</em>, asks, and{" "}
-            <em className="italic">scores</em> you.
+      {/* Top row: greeting + primary CTA. Tight, like a Linear inbox header,
+          not a marketing landing. */}
+      <section className="flex flex-col sm:flex-row gap-4 sm:items-end sm:justify-between">
+        <div className="flex flex-col gap-1">
+          <h1 className="text-2xl md:text-3xl font-semibold tracking-tight text-fg-strong">
+            {hasPastInterviews ? `Welcome back, ${firstName}` : `Hi ${firstName}`}
           </h1>
-          <p className="text-fg-muted">
-            Generate a role-specific interview, talk to it live, and get
-            structured feedback in seconds.
+          <p className="text-sm text-fg-muted">
+            {hasPastInterviews
+              ? "Pick up where you left off, or set up a new one."
+              : "Set up your first mock interview to get started."}
           </p>
-          <Button
-            asChild
-            size="lg"
-            className="self-start gap-2 mt-1"
-          >
-            <Link href="/interview">
-              <Mic className="size-4" />
-              Start an interview
-            </Link>
-          </Button>
         </div>
+        <Button asChild size="lg" className="gap-2 sm:self-end">
+          <Link href="/interview">
+            <Plus className="size-4" />
+            New interview
+          </Link>
+        </Button>
       </section>
 
-      {/* Score progression — only renders when 2+ scored interviews exist */}
+      {/* Progression — renders only when ≥2 scored interviews. */}
       <ScoreProgressCard history={scoreHistory} />
 
-      {/* Your interviews */}
-      <section className="flex flex-col gap-5">
-        <SectionHeader
-          title="Your interviews"
-          subtitle="Interviews you've generated. Tap one to take it or to view feedback."
-        />
-        <div className="interviews-section">
-          {hasPastInterviews ? (
-            userInterviews!.map((interview) => (
+      {/* Recent interviews */}
+      <section className="flex flex-col gap-4">
+        <h2 className="text-base font-semibold tracking-tight text-fg-default">
+          Recent interviews
+        </h2>
+        {hasPastInterviews ? (
+          <div className="interviews-section">
+            {userInterviews!.map((interview) => (
               <InterviewCard
                 key={interview.id}
                 userId={user.id}
@@ -78,76 +67,32 @@ async function Home() {
                 techstack={interview.techstack}
                 createdAt={interview.createdAt}
               />
-            ))
-          ) : (
-            <EmptyState
-              title="No interviews yet"
-              description="Generate your first interview from the button above."
-            />
-          )}
-        </div>
-      </section>
-
-      {/* Take from others */}
-      <section className="flex flex-col gap-5">
-        <SectionHeader
-          title="Browse interviews"
-          subtitle="Interviews other people have generated. Take any of them as a fresh practice run."
-        />
-        <div className="interviews-section">
-          {hasUpcomingInterviews ? (
-            allInterview!.map((interview) => (
-              <InterviewCard
-                key={interview.id}
-                userId={user.id}
-                interviewId={interview.id}
-                role={interview.role}
-                type={interview.type}
-                techstack={interview.techstack}
-                createdAt={interview.createdAt}
-              />
-            ))
-          ) : (
-            <EmptyState
-              title="Nothing to browse yet"
-              description="When other users generate interviews, they'll show up here."
-            />
-          )}
-        </div>
+            ))}
+          </div>
+        ) : (
+          <EmptyState />
+        )}
       </section>
     </>
   );
 }
 
-function SectionHeader({
-  title,
-  subtitle,
-}: {
-  title: string;
-  subtitle: string;
-}) {
+function EmptyState() {
   return (
-    <div className="flex flex-col gap-1">
-      <h2 className="text-xl md:text-2xl font-semibold tracking-tight text-fg-strong">
-        {title}
-      </h2>
-      <p className="text-fg-muted text-sm">{subtitle}</p>
-    </div>
-  );
-}
-
-function EmptyState({
-  title,
-  description,
-}: {
-  title: string;
-  description: string;
-}) {
-  return (
-    <div className="col-span-full rounded-xl border border-dashed border-border-default bg-surface-1/40 px-6 py-10 flex flex-col items-center justify-center gap-2 text-center">
-      <h3 className="text-base font-semibold text-fg-strong">{title}</h3>
-      <p className="text-sm text-fg-muted max-w-md">{description}</p>
-      <Button asChild size="sm" variant="ghost" className="mt-2 gap-1.5">
+    <div className="rounded-xl border border-dashed border-border-default bg-surface-1/40 px-6 py-10 flex flex-col items-center justify-center gap-3 text-center">
+      <div className="size-10 rounded-full bg-accent-soft border border-accent-border flex items-center justify-center">
+        <Mic className="size-4 text-accent" />
+      </div>
+      <div className="flex flex-col gap-1 max-w-sm">
+        <h3 className="text-sm font-semibold text-fg-strong">
+          No interviews yet
+        </h3>
+        <p className="text-xs text-fg-muted">
+          Generate one tailored to a role and start practising. We&apos;ll
+          score it when you&apos;re done.
+        </p>
+      </div>
+      <Button asChild size="sm" variant="ghost" className="gap-1.5">
         <Link href="/interview">
           Generate one
           <ArrowRight className="size-3.5" />
