@@ -4,96 +4,101 @@
 
 @custom-variant dark (&:is(.dark *));
 
+/* =============================================================================
+   Design tokens
+   -----------------------------------------------------------------------------
+   Modern SaaS aesthetic (Linear / Vercel / Notion). Refined neutral surface
+   ramp instead of pure black, electric-blue accent, hairline borders, generous
+   spacing. Always dark mode for now (matches the AI-tool category).
+
+   Legacy token names (primary-100/200, dark-100/200/300, light-100/400/...) are
+   preserved so existing components keep compiling — but their values are now
+   the new palette.
+   ============================================================================= */
+
 @theme {
-  --color-success-100: #49de50;
-  --color-success-200: #42c748;
-  --color-destructive-100: #f75353;
-  --color-destructive-200: #c44141;
+  /* ---------- Surfaces (deepest -> elevated) ---------- */
+  --color-surface-0: oklch(0.135 0.006 240); /* page background */
+  --color-surface-1: oklch(0.175 0.008 240); /* card / panel */
+  --color-surface-2: oklch(0.215 0.008 240); /* input / elevated */
+  --color-surface-3: oklch(0.255 0.008 240); /* hover / active */
 
-  --color-primary-100: #dddfff;
-  --color-primary-200: #cac5fe;
+  /* ---------- Borders (white at varying alpha) ---------- */
+  --color-border-subtle: oklch(1 0 0 / 6%);
+  --color-border-default: oklch(1 0 0 / 10%);
+  --color-border-strong: oklch(1 0 0 / 16%);
 
-  --color-light-100: #d6e0ff;
-  --color-light-400: #6870a6;
-  --color-light-600: #4f557d;
-  --color-light-800: #24273a;
+  /* ---------- Foreground ---------- */
+  --color-fg-strong: oklch(0.985 0 0); /* headings, key text */
+  --color-fg-default: oklch(0.86 0 0); /* body */
+  --color-fg-muted: oklch(0.65 0 0); /* labels, secondary */
+  --color-fg-subtle: oklch(0.50 0 0); /* placeholders, hints */
 
-  --color-dark-100: #020408;
-  --color-dark-200: #27282f;
-  --color-dark-300: #242633;
+  /* ---------- Accent: electric blue (Linear / OpenAI) ---------- */
+  --color-accent: oklch(0.62 0.20 256);
+  --color-accent-hover: oklch(0.68 0.20 256);
+  --color-accent-soft: oklch(0.62 0.20 256 / 14%);
+  --color-accent-border: oklch(0.62 0.20 256 / 32%);
+  --color-accent-fg: oklch(0.985 0 0);
+
+  /* ---------- Status ---------- */
+  --color-success-100: oklch(0.72 0.18 145);
+  --color-success-200: oklch(0.65 0.18 145);
+  --color-destructive-100: oklch(0.66 0.22 25);
+  --color-destructive-200: oklch(0.58 0.22 25);
+
+  /* ---------- Legacy aliases (preserve so existing classes keep working) ---------- */
+  /* primary-100/200 used to be purple; now they map to accent so old usages
+     instantly inherit the new direction. */
+  --color-primary-100: oklch(0.62 0.20 256);
+  --color-primary-200: oklch(0.68 0.20 256);
+
+  --color-light-100: oklch(0.86 0 0);   /* body */
+  --color-light-400: oklch(0.65 0 0);   /* muted */
+  --color-light-600: oklch(0.50 0 0);   /* subtle */
+  --color-light-800: oklch(0.30 0 0);   /* very dim */
+
+  --color-dark-100: oklch(0.135 0.006 240); /* surface-0 */
+  --color-dark-200: oklch(0.215 0.008 240); /* surface-2 */
+  --color-dark-300: oklch(0.175 0.008 240); /* surface-1 */
 
   --font-mona-sans: 'Mona Sans', sans-serif;
 
-  --bg-pattern: url('/pattern.png');
+  /* Subtle dot grid used as page background. Generated as data-uri so we
+     don't depend on a binary asset. */
+  --bg-dot-grid:
+    radial-gradient(oklch(1 0 0 / 4%) 1px, transparent 1px) 0 0 / 24px 24px;
 }
 
+/* =============================================================================
+   shadcn-style mapped tokens (consumed by components/ui/*)
+   ============================================================================= */
+
 :root {
-  --radius: 0.625rem;
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.205 0 0);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.97 0 0);
-  --accent-foreground: oklch(0.205 0 0);
-  --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
-  --chart-1: oklch(0.646 0.222 41.116);
-  --chart-2: oklch(0.6 0.118 184.704);
-  --chart-3: oklch(0.398 0.07 227.392);
-  --chart-4: oklch(0.828 0.189 84.429);
-  --chart-5: oklch(0.769 0.188 70.08);
-  --sidebar: oklch(0.985 0 0);
-  --sidebar-foreground: oklch(0.145 0 0);
-  --sidebar-primary: oklch(0.205 0 0);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.97 0 0);
-  --sidebar-accent-foreground: oklch(0.205 0 0);
-  --sidebar-border: oklch(0.922 0 0);
-  --sidebar-ring: oklch(0.708 0 0);
+  --radius: 0.625rem; /* 10px */
+  --background: var(--color-surface-0);
+  --foreground: var(--color-fg-strong);
+  --card: var(--color-surface-1);
+  --card-foreground: var(--color-fg-strong);
+  --popover: var(--color-surface-1);
+  --popover-foreground: var(--color-fg-strong);
+  --primary: var(--color-accent);
+  --primary-foreground: var(--color-accent-fg);
+  --secondary: var(--color-surface-2);
+  --secondary-foreground: var(--color-fg-strong);
+  --muted: var(--color-surface-2);
+  --muted-foreground: var(--color-fg-muted);
+  --accent: var(--color-surface-3);
+  --accent-foreground: var(--color-fg-strong);
+  --destructive: var(--color-destructive-100);
+  --border: var(--color-border-default);
+  --input: var(--color-border-default);
+  --ring: var(--color-accent);
 }
 
 .dark {
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.922 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: var(--light-100);
-  --accent: oklch(0.269 0 0);
-  --accent-foreground: oklch(0.985 0 0);
-  --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.556 0 0);
-  --chart-1: oklch(0.488 0.243 264.376);
-  --chart-2: oklch(0.696 0.17 162.48);
-  --chart-3: oklch(0.769 0.188 70.08);
-  --chart-4: oklch(0.627 0.265 303.9);
-  --chart-5: oklch(0.645 0.246 16.439);
-  --sidebar: oklch(0.205 0 0);
-  --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.269 0 0);
-  --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.556 0 0);
+  /* We always run in dark; .dark on <html> just makes shadcn dark-variant
+     selectors fire correctly. Tokens above already encode the dark palette. */
 }
 
 @theme inline {
@@ -101,6 +106,7 @@
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
   --radius-xl: calc(var(--radius) + 4px);
+
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --color-card: var(--card);
@@ -119,213 +125,330 @@
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
-  --color-chart-1: var(--chart-1);
-  --color-chart-2: var(--chart-2);
-  --color-chart-3: var(--chart-3);
-  --color-chart-4: var(--chart-4);
-  --color-chart-5: var(--chart-5);
-  --color-sidebar: var(--sidebar);
-  --color-sidebar-foreground: var(--sidebar-foreground);
-  --color-sidebar-primary: var(--sidebar-primary);
-  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
-  --color-sidebar-accent: var(--sidebar-accent);
-  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
-  --color-sidebar-border: var(--sidebar-border);
-  --color-sidebar-ring: var(--sidebar-ring);
 }
+
+/* =============================================================================
+   Base layer
+   ============================================================================= */
 
 @layer base {
   * {
-    @apply border-border outline-ring/50;
+    @apply border-border-default outline-ring/50;
   }
+
+  html, body {
+    @apply bg-surface-0 text-fg-default;
+    font-feature-settings: 'cv11', 'ss01', 'ss03';
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* Subtle dot-grid + radial-glow on the page so the background isn't a flat
+     dead surface but isn't busy either. Linear/Vercel use this trick. */
   body {
-    @apply bg-background text-foreground;
+    background-image:
+      radial-gradient(
+        ellipse 80% 50% at 50% -10%,
+        oklch(0.62 0.20 256 / 8%),
+        transparent
+      ),
+      var(--bg-dot-grid);
+    background-attachment: fixed;
   }
-  p {
-    @apply text-light-100;
+
+  h1 { @apply text-3xl md:text-4xl font-semibold tracking-tight text-fg-strong; }
+  h2 { @apply text-2xl md:text-3xl font-semibold tracking-tight text-fg-strong; }
+  h3 { @apply text-lg md:text-xl font-semibold text-fg-strong; }
+  h4 { @apply text-base font-semibold text-fg-strong; }
+
+  p { @apply text-fg-default leading-relaxed; }
+  small { @apply text-fg-muted text-sm; }
+
+  ul { @apply list-disc list-inside; }
+  li { @apply text-fg-default; }
+
+  ::selection {
+    background: var(--color-accent-soft);
+    color: var(--color-fg-strong);
   }
-  h2 {
-    @apply text-3xl font-semibold;
-  }
-  h3 {
-    @apply text-2xl font-semibold;
-  }
-  ul {
-    @apply list-disc list-inside;
-  }
-  li {
-    @apply text-light-100;
+
+  /* Focus ring that matches the accent — keep it visible for a11y */
+  :focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
   }
 }
 
-@layer components {
-  .btn-call {
-    @apply inline-block px-7 py-3 font-bold text-sm leading-5 text-white transition-colors duration-150 bg-success-100 border border-transparent rounded-full shadow-sm focus:outline-none focus:shadow-2xl active:bg-success-200 hover:bg-success-200 min-w-28 cursor-pointer items-center justify-center overflow-visible;
+/* =============================================================================
+   Component classes (used across the app)
+   ============================================================================= */
 
-    .span {
-      @apply bg-success-100 h-[85%] w-[65%];
-    }
+@layer components {
+  /* ---------- Buttons ---------- */
+
+  .btn-call {
+    @apply inline-flex items-center justify-center gap-2 px-7 py-3 text-sm font-semibold leading-5
+           text-white bg-success-200 rounded-full transition-all
+           hover:bg-success-100 active:scale-[0.98]
+           focus-visible:ring-2 focus-visible:ring-success-100 focus-visible:ring-offset-2
+           focus-visible:ring-offset-surface-0
+           shadow-[0_0_0_1px_oklch(0.65_0.18_145_/_30%),0_8px_24px_-8px_oklch(0.65_0.18_145_/_50%)]
+           min-w-32 cursor-pointer;
   }
 
   .btn-disconnect {
-    @apply inline-block px-7 py-3 text-sm font-bold leading-5 text-white transition-colors duration-150 bg-destructive-100 border border-transparent rounded-full shadow-sm focus:outline-none focus:shadow-2xl active:bg-destructive-200 hover:bg-destructive-200 min-w-28;
+    @apply inline-flex items-center justify-center gap-2 px-7 py-3 text-sm font-semibold leading-5
+           text-white bg-destructive-200 rounded-full transition-all
+           hover:bg-destructive-100 active:scale-[0.98]
+           focus-visible:ring-2 focus-visible:ring-destructive-100 focus-visible:ring-offset-2
+           focus-visible:ring-offset-surface-0
+           shadow-[0_0_0_1px_oklch(0.66_0.22_25_/_30%),0_8px_24px_-8px_oklch(0.66_0.22_25_/_50%)]
+           min-w-32 cursor-pointer;
   }
 
-  .btn-upload {
-    @apply flex min-h-14 w-full items-center justify-center gap-1.5 rounded-md;
-  }
   .btn-primary {
-    @apply w-fit !bg-primary-200 !text-dark-100 hover:!bg-primary-200/80 !rounded-full !font-bold px-5 cursor-pointer min-h-10;
+    @apply inline-flex items-center justify-center gap-2 px-5 py-2.5 text-sm font-semibold
+           !text-accent-fg !bg-accent rounded-md transition-all
+           hover:!bg-accent-hover active:scale-[0.98]
+           focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2
+           focus-visible:ring-offset-surface-0
+           cursor-pointer min-h-10;
   }
+
   .btn-secondary {
-    @apply w-fit !bg-dark-200 !text-primary-200 hover:!bg-dark-200/80 !rounded-full !font-bold px-5 cursor-pointer min-h-10;
+    @apply inline-flex items-center justify-center gap-2 px-5 py-2.5 text-sm font-semibold
+           !text-fg-strong !bg-surface-2 rounded-md transition-all
+           hover:!bg-surface-3 active:scale-[0.98]
+           border border-border-default
+           focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2
+           focus-visible:ring-offset-surface-0
+           cursor-pointer min-h-10;
   }
 
   .btn-upload {
-    @apply bg-dark-200 rounded-full min-h-12 px-5 cursor-pointer border border-input  overflow-hidden;
+    @apply flex items-center justify-center gap-1.5 min-h-12 w-full px-5 rounded-md
+           bg-surface-2 border border-border-default cursor-pointer overflow-hidden
+           hover:bg-surface-3 transition-colors;
   }
 
+  /* ---------- Cards ---------- */
+
+  /* Hairline-bordered card on surface-1 — the new default. Replaces the old
+     gradient-bordered look. */
   .card-border {
-    @apply border-gradient p-0.5 rounded-2xl w-fit;
+    @apply rounded-xl bg-surface-1 border border-border-default;
   }
 
   .card {
-    @apply dark-gradient rounded-2xl min-h-full;
+    @apply rounded-xl bg-surface-1 border border-border-default;
   }
+
+  .card-content {
+    @apply flex flex-col p-6;
+  }
+
+  /* ---------- Forms ---------- */
 
   .form {
     @apply w-full;
 
     .label {
-      @apply !text-light-100 !font-normal;
+      @apply !text-fg-muted !font-medium !text-sm;
     }
 
     .input {
-      @apply !bg-dark-200 !rounded-full !min-h-12 !px-5 placeholder:!text-light-100;
+      @apply !bg-surface-2 !rounded-md !min-h-11 !px-4 !text-fg-strong
+             !border !border-border-default
+             placeholder:!text-fg-subtle
+             focus-visible:!border-accent;
     }
 
     .btn {
-      @apply !w-full !bg-primary-200 !text-dark-100 hover:!bg-primary-200/80 !rounded-full !min-h-10 !font-bold !px-5 cursor-pointer;
+      @apply !w-full !bg-accent !text-accent-fg hover:!bg-accent-hover
+             !rounded-md !min-h-11 !font-semibold !px-5 cursor-pointer
+             active:scale-[0.99] transition-all;
     }
   }
 
+  /* ---------- Interview room (call view) ---------- */
+
   .call-view {
-    @apply flex sm:flex-row flex-col gap-10 items-center justify-between w-full;
+    @apply grid grid-cols-1 sm:grid-cols-2 gap-6 w-full;
 
     h3 {
-      @apply text-center text-primary-100 mt-5;
+      @apply text-center text-fg-strong mt-5 text-base font-medium;
     }
 
     .card-interviewer {
-      @apply flex-center flex-col gap-2 p-7 h-[400px] blue-gradient-dark rounded-lg border-2 border-primary-200/50 flex-1 sm:basis-1/2 w-full;
+      @apply flex flex-col items-center justify-center gap-3 p-7 h-[420px]
+             rounded-xl bg-surface-1 border border-border-default
+             relative overflow-hidden;
+    }
+
+    .card-interviewer::before {
+      content: '';
+      @apply absolute inset-0 pointer-events-none;
+      background: radial-gradient(
+        ellipse 60% 40% at 50% 0%,
+        var(--color-accent-soft),
+        transparent
+      );
     }
 
     .avatar {
-      @apply z-10 flex items-center justify-center blue-gradient rounded-full size-[120px] relative;
+      @apply relative z-10 flex items-center justify-center rounded-full
+             size-[120px] bg-surface-2 border border-border-strong overflow-hidden;
+    }
 
-      .animate-speak {
-        @apply absolute inline-flex size-5/6 animate-ping rounded-full bg-primary-200 opacity-75;
-      }
+    .avatar .animate-speak {
+      @apply absolute inline-flex size-full animate-ping rounded-full
+             bg-accent opacity-40;
     }
 
     .card-border {
-      @apply border-gradient p-0.5 rounded-2xl flex-1 sm:basis-1/2 w-full h-[400px] max-md:hidden;
-    }
-
-    .card-content {
-      @apply flex flex-col gap-2 justify-center items-center p-7 dark-gradient rounded-2xl min-h-full;
+      @apply rounded-xl bg-surface-1 border border-border-default
+             flex flex-col items-center justify-center gap-3 p-7 h-[420px]
+             max-md:hidden;
     }
   }
 
   .transcript-border {
-    @apply border-gradient p-0.5 rounded-2xl w-full;
+    @apply rounded-xl bg-surface-1 border border-border-default w-full;
 
     .transcript {
-      @apply dark-gradient rounded-2xl  min-h-12 px-5 py-3 flex items-center justify-center;
+      @apply rounded-xl px-6 py-4 flex items-center justify-center min-h-14;
 
       p {
-        @apply text-lg text-center text-white;
+        @apply text-base md:text-lg text-center text-fg-strong leading-relaxed;
       }
     }
   }
 
-  .section-feedback {
-    @apply flex flex-col gap-8 max-w-5xl mx-auto max-sm:px-4 text-lg leading-7;
-
-    .buttons {
-      @apply flex w-full justify-evenly gap-4 max-sm:flex-col max-sm:items-center;
-    }
-  }
+  /* ---------- Layouts ---------- */
 
   .auth-layout {
-    @apply flex items-center justify-center mx-auto max-w-7xl min-h-screen max-sm:px-4 max-sm:py-8;
+    @apply flex items-center justify-center mx-auto max-w-7xl min-h-screen
+           px-4 py-8;
   }
 
   .root-layout {
-    @apply flex mx-auto max-w-7xl flex-col gap-12 my-12 px-16 max-sm:px-4 max-sm:my-8;
+    @apply flex mx-auto max-w-6xl flex-col gap-10 my-10 px-6 sm:px-8 max-sm:my-6;
   }
+
+  /* ---------- Dashboard hero ---------- */
 
   .card-cta {
-    @apply flex flex-row blue-gradient-dark rounded-3xl px-16 py-6 items-center justify-between max-sm:px-4;
+    @apply relative overflow-hidden flex flex-row items-center justify-between gap-8
+           rounded-2xl bg-surface-1 border border-border-default
+           px-8 sm:px-12 py-8 max-sm:flex-col max-sm:text-center max-sm:px-6;
   }
+
+  .card-cta::before {
+    content: '';
+    @apply absolute inset-0 pointer-events-none;
+    background: radial-gradient(
+      ellipse 50% 80% at 0% 50%,
+      var(--color-accent-soft),
+      transparent
+    );
+  }
+
+  /* ---------- Interview cards grid ---------- */
 
   .interviews-section {
-    @apply flex flex-wrap gap-4 max-lg:flex-col w-full items-stretch;
-  }
-
-  .interview-text {
-    @apply text-lg text-center text-white;
-  }
-
-  .progress {
-    @apply h-1.5 text-[5px] font-bold bg-primary-200 rounded-full flex-center;
-  }
-
-  .tech-tooltip {
-    @apply absolute bottom-full mb-1 hidden group-hover:flex px-2 py-1 text-xs text-white bg-gray-700 rounded-md shadow-md;
+    @apply grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 w-full items-stretch;
   }
 
   .card-interview {
-    @apply dark-gradient rounded-2xl min-h-full flex flex-col p-6 relative overflow-hidden gap-10 justify-between;
+    @apply relative overflow-hidden flex flex-col justify-between gap-6 p-6
+           rounded-xl bg-surface-1 border border-border-default
+           hover:border-border-strong transition-all
+           hover:bg-surface-2/60;
 
     .badge-text {
-      @apply text-sm font-semibold capitalize;
+      @apply text-xs font-semibold capitalize;
     }
+  }
+
+  .interview-text {
+    @apply text-base text-fg-default leading-relaxed;
+  }
+
+  /* ---------- Feedback page ---------- */
+
+  .section-feedback {
+    @apply flex flex-col gap-8 max-w-4xl mx-auto px-4 text-base leading-relaxed;
+
+    .buttons {
+      @apply flex w-full justify-stretch gap-3 max-sm:flex-col;
+    }
+  }
+
+  /* ---------- Misc ---------- */
+
+  .progress {
+    @apply h-1.5 text-[5px] font-bold bg-accent rounded-full flex items-center justify-center;
+  }
+
+  .tech-tooltip {
+    @apply absolute bottom-full mb-1 hidden group-hover:flex
+           px-2 py-1 text-xs text-fg-strong bg-surface-3 rounded-md shadow-md
+           border border-border-default whitespace-nowrap z-10;
   }
 }
 
-@utility dark-gradient {
-  @apply bg-gradient-to-b from-[#1A1C20] to-[#08090D];
-}
-
-@utility border-gradient {
-  @apply bg-gradient-to-b from-[#4B4D4F] to-[#4B4D4F33];
-}
-
-@utility pattern {
-  @apply bg-[url('/pattern.png')] bg-top bg-no-repeat;
-}
-
-@utility blue-gradient-dark {
-  @apply bg-gradient-to-b from-[#171532] to-[#08090D];
-}
-
-@utility blue-gradient {
-  @apply bg-gradient-to-l from-[#FFFFFF] to-[#CAC5FE];
-}
+/* =============================================================================
+   Utility classes
+   ============================================================================= */
 
 @utility flex-center {
   @apply flex items-center justify-center;
 }
 
 @utility animate-fadeIn {
-  animation: fadeIn 0.3s ease-in-out;
+  animation: fadeIn 0.3s ease-out;
+}
+
+/* Kept for backwards compatibility — both gradients are now subtle, not loud */
+@utility dark-gradient {
+  background: linear-gradient(
+    180deg,
+    var(--color-surface-1) 0%,
+    var(--color-surface-0) 100%
+  );
+}
+
+@utility blue-gradient-dark {
+  background: linear-gradient(
+    180deg,
+    color-mix(in oklch, var(--color-accent) 8%, var(--color-surface-1)) 0%,
+    var(--color-surface-0) 100%
+  );
+}
+
+@utility blue-gradient {
+  background: linear-gradient(
+    135deg,
+    color-mix(in oklch, var(--color-accent) 25%, var(--color-surface-2)) 0%,
+    var(--color-surface-2) 100%
+  );
+}
+
+@utility border-gradient {
+  /* Old utility used to render a pseudo-double-border; we now use a flat
+     border on .card-border so this is essentially a no-op for layout. Kept so
+     legacy markup doesn't look weird. */
+  background: var(--color-surface-1);
+}
+
+@utility pattern {
+  /* No-op now — body already paints the dot grid + glow. */
 }
 
 @keyframes fadeIn {
   from {
     opacity: 0;
-    transform: translateY(5px);
+    transform: translateY(4px);
   }
   to {
     opacity: 1;
