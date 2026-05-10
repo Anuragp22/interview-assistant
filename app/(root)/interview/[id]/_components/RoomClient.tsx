@@ -6,6 +6,7 @@ import {
   Room,
   RoomEvent,
   Track,
+  type DisconnectReason,
   type RemoteParticipant,
   type RemoteTrack,
   type RemoteTrackPublication,
@@ -51,11 +52,44 @@ export default function RoomClient({
   const roomRef = useRef<Room | null>(null);
   const audioElRef = useRef<HTMLAudioElement | null>(null);
   const agentWatchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Latches once we either start a feedback request or decide not to (e.g. the
+  // watchdog tripped). Both endCall() and the Disconnected event handler check
+  // this so the feedback flow can never run twice for the same session.
+  const feedbackAttemptedRef = useRef(false);
 
   const [connectionState, setConnectionState] = useState<ConnectionState>("idle");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [turns, setTurns] = useState<Turn[]>([]);
   const [agentSpeaking, setAgentSpeaking] = useState(false);
+
+  async function runFeedbackFlow() {
+    // Idempotent: only the first caller (endCall, Disconnected handler, etc.)
+    // wins. Subsequent calls bail out so we never double-fire createFeedback.
+    if (feedbackAttemptedRef.current) return;
+    feedbackAttemptedRef.current = true;
+
+    const result = await createFeedback({
+      interviewId,
+      userId,
+      feedbackId,
+    });
+    if (result.success && result.feedbackId) {
+      router.push(`/interview/${interviewId}/feedback`);
+    } else {
+      // Surface why we're bouncing the user back to the dashboard instead of
+      // the feedback page. Common cause: no turns persisted (agent crashed,
+      // or call ended before any conversation happened) — see createFeedback
+      // in lib/actions/general.action.ts.
+      toast.error("Couldn't generate feedback for this interview.", {
+        description:
+          "We couldn't build a feedback report from this session. " +
+          "This usually means no conversation was captured. " +
+          "Try the interview again, or check your interview history.",
+        duration: 8000,
+      });
+      router.push("/");
+    }
+  }
 
   async function startCall() {
     if (
@@ -68,11 +102,16 @@ export default function RoomClient({
     setConnectionState("connecting");
     setErrorMessage(null);
     setTurns([]);
+    // New session → clear the latch so a fresh feedback attempt can run.
+    feedbackAttemptedRef.current = false;
 
     const result = await mintInterviewRoomToken(interviewId);
     if (!result.success) {
       setConnectionState("error");
       setErrorMessage(result.message);
+      // Token mint failed → no room → no possible feedback. Latch so a
+      // later cleanup-disconnect doesn't spuriously call createFeedback.
+      feedbackAttemptedRef.current = true;
       return;
     }
 
@@ -90,6 +129,11 @@ export default function RoomClient({
           "AI interviewer did not join. The interview-agent worker may not be running. " +
             "Try again in a moment or check the agent service logs.",
         );
+        // No agent ever joined → no conversation → no feedback to generate.
+        // Latch so the upcoming Disconnected event doesn't spuriously fire
+        // createFeedback (which would just hit Firestore, find zero turns,
+        // toast a confusing failure on top of the watchdog error).
+        feedbackAttemptedRef.current = true;
         // Disconnect so we stop publishing mic audio.
         roomRef.current?.disconnect();
       }, AGENT_JOIN_TIMEOUT_MS);
@@ -103,9 +147,23 @@ export default function RoomClient({
     });
     room.on(RoomEvent.Reconnecting, () => setConnectionState("reconnecting"));
     room.on(RoomEvent.Reconnected, () => setConnectionState("connected"));
-    room.on(RoomEvent.Disconnected, () =>
-      setConnectionState((s) => (s === "ended" ? s : "ended")),
-    );
+    room.on(RoomEvent.Disconnected, (reason?: DisconnectReason) => {
+      if (reason !== undefined) {
+        console.log("Room disconnected:", reason);
+      }
+      // Preserve "error" so the watchdog message keeps rendering; otherwise
+      // mark the call ended.
+      setConnectionState((s) =>
+        s === "error" || s === "ended" ? s : "ended",
+      );
+      // Best-effort feedback generation when the room ends without the user
+      // clicking "End" — covers server-side termination, network drops, and
+      // unmount-on-route-change. Tab close is a "best-effort" only: the
+      // server action gets fired but the redirect won't happen because the
+      // page is already going away.
+      if (feedbackAttemptedRef.current) return;
+      void runFeedbackFlow();
+    });
 
     room.on(
       RoomEvent.TrackSubscribed,
@@ -142,6 +200,9 @@ export default function RoomClient({
       console.error("Room connect failed:", err);
       setConnectionState("error");
       setErrorMessage(err instanceof Error ? err.message : "Connection failed.");
+      // Connect itself failed → no conversation possible. Latch so the
+      // teardown disconnect doesn't fire feedback against an empty room.
+      feedbackAttemptedRef.current = true;
     }
   }
 
@@ -156,28 +217,7 @@ export default function RoomClient({
       roomRef.current = null;
     }
     setConnectionState("ended");
-
-    const result = await createFeedback({
-      interviewId,
-      userId,
-      feedbackId,
-    });
-    if (result.success && result.feedbackId) {
-      router.push(`/interview/${interviewId}/feedback`);
-    } else {
-      // Surface why we're bouncing the user back to the dashboard instead of
-      // the feedback page. Common cause: no turns persisted (agent crashed,
-      // or call ended before any conversation happened) — see createFeedback
-      // in lib/actions/general.action.ts.
-      toast.error("Couldn't generate feedback for this interview.", {
-        description:
-          "We couldn't build a feedback report from this session. " +
-          "This usually means no conversation was captured. " +
-          "Try the interview again, or check your interview history.",
-        duration: 8000,
-      });
-      router.push("/");
-    }
+    await runFeedbackFlow();
   }
 
   useEffect(() => {
