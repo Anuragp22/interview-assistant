@@ -26,8 +26,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
@@ -55,7 +57,34 @@ from interview_agent.persistence.models import InterviewContext, Turn
 from interview_agent.pipeline import build_agent, build_session
 from interview_agent.prompts import build_first_message
 
-load_dotenv()
+
+def _load_env() -> None:
+    """Load env vars from both the agent's own ``.env`` and the repo-root
+    ``.env.local`` (the Next.js side's env file).
+
+    Sharing a single ``.env.local`` in dev means we don't maintain duplicate
+    Firebase / LiveKit secrets across two files. In a Docker deploy the root
+    ``.env.local`` won't exist and only ``livekit-agent/.env`` is loaded —
+    same code, no behavior change.
+
+    Also aliases ``NEXT_PUBLIC_LIVEKIT_URL`` → ``LIVEKIT_URL`` if only the
+    Next.js name is set. The livekit-agents framework reads ``LIVEKIT_URL``
+    for worker registration, but ``.env.local`` already exposes the same
+    value as ``NEXT_PUBLIC_LIVEKIT_URL`` for the browser SDK.
+    """
+    # The repo root is `livekit-agent/src/interview_agent/agent.py` → parents[3].
+    repo_root_env = Path(__file__).resolve().parents[3] / ".env.local"
+    if repo_root_env.exists():
+        load_dotenv(dotenv_path=repo_root_env)
+    # `.env` in CWD (typically livekit-agent/.env). Override-on-conflict so
+    # deploy-specific values win when both files set the same key.
+    load_dotenv(override=True)
+
+    if "LIVEKIT_URL" not in os.environ and "NEXT_PUBLIC_LIVEKIT_URL" in os.environ:
+        os.environ["LIVEKIT_URL"] = os.environ["NEXT_PUBLIC_LIVEKIT_URL"]
+
+
+_load_env()
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("interview-agent")
