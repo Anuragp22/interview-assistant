@@ -38,6 +38,17 @@ export async function createFeedback(params: CreateFeedbackParams) {
 
     const { object } = await generateObject({
       model: groq(FEEDBACK_MODEL),
+      // Groq's llama-3.3-70b-versatile doesn't support OpenAI-style
+      // `response_format: json_schema` (strict schema validation server-side).
+      // structuredOutputs:false flips @ai-sdk/groq to `json_object` mode
+      // (which the model does support) — the model returns valid JSON
+      // and the AI SDK validates the shape against feedbackSchema via Zod
+      // client-side. See https://ai-sdk.dev/providers/ai-sdk-providers/groq
+      providerOptions: {
+        groq: {
+          structuredOutputs: false,
+        },
+      },
       schema: feedbackSchema,
       prompt: `
         You are an AI interviewer analyzing a mock interview. Your task is to evaluate the candidate based on structured categories. Be thorough and detailed in your analysis. Don't be lenient with the candidate. If there are mistakes or areas for improvement, point them out.

@@ -132,6 +132,13 @@
     -webkit-font-smoothing: antialiased;
   }
 
+  /* Prevent fixed-position elements (e.g. the off-screen-translated
+     SettingsSheet) from creating a horizontal scrollbar. They shouldn't
+     contribute to layout flow but Chromium occasionally scrolls anyway. */
+  html, body {
+    overflow-x: hidden;
+  }
+
   /* Subtle dot-grid + radial-glow on the page so the background isn't a flat
      dead surface but isn't busy either. Linear/Vercel use this trick. */
   body {

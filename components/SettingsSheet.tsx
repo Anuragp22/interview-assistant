@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import { Camera, Gauge, Mic, Settings as SettingsIcon, X } from "lucide-react";
 
 import { cn } from "@/lib/utils";
@@ -8,19 +9,25 @@ import { cn } from "@/lib/utils";
 /**
  * Slide-in settings panel anchored from the right.
  *
- * Right now this is a forward-looking seam — we don't have any real
- * settings to expose yet. But the affordance ships now so the nav looks
- * right and we have a place to drop voice speed (sub-project A polish),
- * interruption sensitivity, and proctoring opt-in (sub-project C) when
- * those land. Everything inside a `<DisabledItem>` is wired to nothing
- * and shows a "Coming soon" hint.
+ * Forward-looking seam — no real settings wired yet. Sub-project A polish
+ * (voice speed, interruption sensitivity) and sub-project C (video
+ * proctoring opt-in) will land here without a nav-layout shift.
  *
- * Built without an extra @radix-ui/react-dialog dep — just a portal-less
- * fixed panel with Esc-to-close + backdrop-click-to-close + body scroll
- * lock while open. That's all this needs.
+ * The panel + backdrop are rendered into document.body via React portal,
+ * not inline. backdrop-filter, transform, and filter on ANY ancestor
+ * create a containing block for fixed-position descendants — without the
+ * portal, the "fixed" sheet ends up pinned inside the nav (Playwright
+ * caught this — the panel rendered as a 56px-tall stub).
  */
 export default function SettingsSheet() {
   const [open, setOpen] = useState(false);
+  const [mounted, setMounted] = useState(false);
+
+  // The portal target (document.body) is server-undefined; gate rendering
+  // on a client mount flag so SSR + hydration stay consistent.
+  useEffect(() => {
+    setMounted(true);
+  }, []);
 
   useEffect(() => {
     if (!open) return;
@@ -29,9 +36,8 @@ export default function SettingsSheet() {
     };
     window.addEventListener("keydown", onKey);
 
-    // Lock body scroll while the sheet is open. Restore the previous
-    // overflow value rather than hardcoding 'auto' so we don't trample
-    // styles set by other components.
+    // Lock body scroll while open; preserve the previous overflow so
+    // we don't stomp on whatever else sets it.
     const prevOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
 
@@ -57,9 +63,27 @@ export default function SettingsSheet() {
         <SettingsIcon className="size-4" />
       </button>
 
+      {mounted &&
+        createPortal(
+          <SheetPortalContent open={open} onClose={() => setOpen(false)} />,
+          document.body,
+        )}
+    </>
+  );
+}
+
+function SheetPortalContent({
+  open,
+  onClose,
+}: {
+  open: boolean;
+  onClose: () => void;
+}) {
+  return (
+    <>
       {/* Backdrop */}
       <div
-        onClick={() => setOpen(false)}
+        onClick={onClose}
         aria-hidden="true"
         className={cn(
           "fixed inset-0 z-40 bg-surface-0/60 backdrop-blur-sm transition-opacity duration-200",
@@ -73,14 +97,14 @@ export default function SettingsSheet() {
         aria-modal="true"
         aria-label="Settings"
         className={cn(
-          "fixed top-0 right-0 z-50 h-full w-full sm:w-96",
+          "fixed top-0 right-0 z-50 h-screen w-full sm:w-96 max-w-full",
           "bg-surface-1 border-l border-border-default",
           "flex flex-col",
           "transition-transform duration-300 ease-out",
           open ? "translate-x-0" : "translate-x-full",
         )}
       >
-        <header className="flex items-center justify-between gap-3 px-6 h-14 border-b border-border-subtle">
+        <header className="flex items-center justify-between gap-3 px-6 h-14 border-b border-border-subtle flex-shrink-0">
           <div className="flex items-center gap-2">
             <SettingsIcon className="size-4 text-fg-muted" />
             <h2 className="text-base font-semibold text-fg-strong">
@@ -89,7 +113,7 @@ export default function SettingsSheet() {
           </div>
           <button
             type="button"
-            onClick={() => setOpen(false)}
+            onClick={onClose}
             aria-label="Close settings"
             className={cn(
               "inline-flex items-center justify-center size-8 rounded-md",
