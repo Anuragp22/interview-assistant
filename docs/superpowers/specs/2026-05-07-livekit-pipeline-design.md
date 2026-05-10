@@ -129,7 +129,9 @@
 
 **Next.js:** `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, `NEXT_PUBLIC_LIVEKIT_URL`.
 
-**Agent service:** `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, `DEEPGRAM_API_KEY`, `ELEVENLABS_API_KEY`, `OPENAI_API_KEY`, `FIREBASE_SERVICE_ACCOUNT_JSON` (base64-encoded JSON).
+**Agent service:** `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, `DEEPGRAM_API_KEY`, `ELEVEN_API_KEY`, `OPENAI_API_KEY`, `FIREBASE_SERVICE_ACCOUNT_JSON` (base64-encoded JSON).
+
+> Note: the `livekit-agents` ElevenLabs plugin reads `ELEVEN_API_KEY` (not `ELEVENLABS_API_KEY`). Match that spelling in `.env` files and deploy configs.
 
 ---
 
