@@ -182,3 +182,12 @@ export const templateGenerationSchema = z.object({
   questions: z.array(z.string()).min(5).max(12),
   rubrics: z.array(rubricBaseSchema).min(5).max(12),
 });
+
+export const rubricGroundedSchema = rubricBaseSchema.extend({
+  cvReference: z.string().optional(),
+});
+
+export const groundingSchema = z.object({
+  questionsGrounded: z.array(z.string()).min(5).max(12),
+  rubricsGrounded: z.array(rubricGroundedSchema).min(5).max(12),
+});
