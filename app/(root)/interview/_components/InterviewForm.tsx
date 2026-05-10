@@ -5,6 +5,7 @@ import { useForm, Controller } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { useRouter } from "next/navigation";
+import { Loader2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -92,16 +93,20 @@ export default function InterviewForm({ userId }: Props) {
       if (!res.ok || !json.success) {
         throw new Error(json.error || "Failed to create interview.");
       }
+      // Keep the overlay up through router.push; the form unmounts when the
+      // /interview/{id} page mounts, which has its own loading.tsx for any
+      // remaining server-render time. Only flip submitting=false on error.
       router.push(`/interview/${json.interviewId}`);
     } catch (err) {
       setSubmitError(err instanceof Error ? err.message : "Failed.");
-    } finally {
       setSubmitting(false);
     }
   }
 
   return (
-    <form
+    <>
+      {submitting && <SubmittingOverlay role={values.role} amount={values.amount} />}
+      <form
       onSubmit={handleSubmit(onSubmit)}
       className="card-border max-w-xl mx-auto"
     >
@@ -235,12 +240,41 @@ export default function InterviewForm({ userId }: Props) {
             </Button>
           ) : (
             <Button type="submit" disabled={submitting}>
-              {submitting ? "Creating…" : "Create interview"}
+              {submitting ? (
+                <>
+                  <Loader2 className="size-4 mr-2 animate-spin" />
+                  Generating…
+                </>
+              ) : (
+                "Create interview"
+              )}
             </Button>
           )}
         </div>
       </div>
     </form>
+    </>
+  );
+}
+
+function SubmittingOverlay({ role, amount }: { role: string; amount: number }) {
+  return (
+    <div className="fixed inset-0 z-50 bg-dark-100/85 backdrop-blur-sm flex items-center justify-center">
+      <div className="card-border max-w-md w-full mx-4">
+        <div className="card-content gap-4 items-center text-center">
+          <Loader2 className="size-10 animate-spin text-primary-100" />
+          <h3 className="text-lg font-semibold">Generating your interview</h3>
+          <p className="text-sm opacity-70">
+            Asking Groq Llama-3.3 70B for {amount} interview questions tailored
+            to <span className="font-medium">{role || "your role"}</span>. This
+            usually takes 3–8 seconds.
+          </p>
+          <p className="text-xs opacity-50">
+            Don&apos;t close this tab.
+          </p>
+        </div>
+      </div>
+    </div>
   );
 }
 
