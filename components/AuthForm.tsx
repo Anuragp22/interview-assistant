@@ -12,15 +12,14 @@ import {
   createUserWithEmailAndPassword,
   signInWithEmailAndPassword,
 } from "firebase/auth";
-import { Eye, EyeOff } from "lucide-react"; // 👁️ Icons
+import { Eye, EyeOff, Loader2 } from "lucide-react";
 
 import { auth } from "@/firebase/client";
 import { Form } from "@/components/ui/form";
 import { Button } from "@/components/ui/button";
 import { signIn, signUp } from "@/lib/actions/auth.action";
 import FormField from "@/components/FormField";
-import { Loader2 } from "lucide-react"; // Add this to your imports
-
+import { cn } from "@/lib/utils";
 
 const authFormSchema = (type: FormType) => {
   return z.object({
@@ -32,33 +31,26 @@ const authFormSchema = (type: FormType) => {
 
 const AuthForm = ({ type }: { type: FormType }) => {
   const router = useRouter();
-  const [showPassword, setShowPassword] = useState(false); // 👁️ State for password
+  const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
 
   const formSchema = authFormSchema(type);
   const form = useForm<z.infer<typeof formSchema>>({
     resolver: zodResolver(formSchema),
-    defaultValues: {
-      name: "",
-      email: "",
-      password: "",
-    },
+    defaultValues: { name: "", email: "", password: "" },
   });
 
-  const togglePasswordVisibility = () => {
-    setShowPassword((prev) => !prev);
-  };
+  const togglePasswordVisibility = () => setShowPassword((prev) => !prev);
 
   const onSubmit = async (data: z.infer<typeof formSchema>) => {
-
-    setLoading(true); // 🔄 Start loading
+    setLoading(true);
     try {
       if (type === "sign-up") {
         const { name, email, password } = data;
         const userCredential = await createUserWithEmailAndPassword(
           auth,
           email,
-          password
+          password,
         );
 
         const result = await signUp({
@@ -73,108 +65,145 @@ const AuthForm = ({ type }: { type: FormType }) => {
           return;
         }
 
-        toast.success("Account created successfully. Please sign in.");
+        toast.success("Account created. Please sign in.");
         router.push("/sign-in");
       } else {
         const { email, password } = data;
         const userCredential = await signInWithEmailAndPassword(
           auth,
           email,
-          password
+          password,
         );
 
         const idToken = await userCredential.user.getIdToken();
         if (!idToken) {
-          toast.error("Sign in Failed. Please try again.");
+          toast.error("Sign in failed. Please try again.");
           return;
         }
 
-        await signIn({
-          email,
-          idToken,
-        });
+        await signIn({ email, idToken });
 
-        toast.success("Signed in successfully.");
+        toast.success("Welcome back.");
         router.push("/");
       }
     } catch (error) {
       console.log(error);
       toast.error("There was an error. Please try again.");
     } finally {
-      setLoading(false); // ✅ Stop loading
+      setLoading(false);
     }
   };
 
   const isSignIn = type === "sign-in";
 
   return (
-    <div className="card-border lg:min-w-[566px]">
-      <div className="flex flex-col gap-6 card py-14 px-10">
-        <div className="flex flex-row gap-2 justify-center">
-          <Image src="/logo.svg" alt="logo" height={32} width={38} />
-          <h2 className="text-primary-100">JobVoice</h2>
-        </div>
-
-        <h3 className="text-center">Practice job interviews with AI</h3>
-
-        <Form {...form}>
-          <form
-            onSubmit={form.handleSubmit(onSubmit)}
-            className="w-full space-y-6 mt-4 form"
-          >
-            {!isSignIn && (
-              <FormField
-                control={form.control}
-                name="name"
-                label="Name"
-                placeholder="Your Name"
-                type="text"
-              />
-            )}
-
-            <FormField
-              control={form.control}
-              name="email"
-              label="Email"
-              placeholder="Your email address"
-              type="email"
-            />
-
-            {/* Password Field with toggle */}
-            <div className="relative">
-              <FormField
-                control={form.control}
-                name="password"
-                label="Password"
-                placeholder="Enter your password"
-                type={showPassword ? "text" : "password"}
-              />
-              <button
-                type="button"
-                onClick={togglePasswordVisibility}
-                className="absolute cursor-pointer right-5 top-[42px] text-light-100 hover:text-primary-200 transition"
-              >
-                {showPassword ? <EyeOff size={20} /> : <Eye size={20} />}
-              </button>
-            </div>
-
-            <Button className="btn flex items-center gap-2 justify-center" type="submit" disabled={loading}>
-              {loading && <Loader2 className="animate-spin w-4 h-4" />}
-              {loading ? (isSignIn ? "Signing in..." : "Creating...") : isSignIn ? "Sign In" : "Create an Account"}
-            </Button>
-
-          </form>
-        </Form>
-
-        <p className="text-center">
-          {isSignIn ? "No account yet?" : "Have an account already?"}
+    <div className="w-full max-w-md mx-auto">
+      <div className="card-border">
+        <div className="flex flex-col gap-6 p-8 sm:p-10">
+          {/* Brand */}
           <Link
-            href={!isSignIn ? "/sign-in" : "/sign-up"}
-            className="font-bold text-user-primary ml-1"
+            href="/"
+            className="flex items-center gap-2 self-center"
+            aria-label="JobVoice home"
           >
-            {!isSignIn ? "Sign In" : "Sign Up"}
+            <Image src="/logo.svg" alt="" height={28} width={32} />
+            <span className="font-semibold tracking-tight text-fg-strong text-lg">
+              JobVoice
+            </span>
           </Link>
-        </p>
+
+          {/* Heading */}
+          <div className="flex flex-col gap-1.5 text-center">
+            <h1 className="text-2xl font-semibold tracking-tight text-fg-strong">
+              {isSignIn ? "Welcome back" : "Create your account"}
+            </h1>
+            <p className="text-sm text-fg-muted">
+              {isSignIn
+                ? "Sign in to keep practicing interviews."
+                : "Start practicing interviews with an AI in minutes."}
+            </p>
+          </div>
+
+          {/* Form */}
+          <Form {...form}>
+            <form
+              onSubmit={form.handleSubmit(onSubmit)}
+              className="flex flex-col gap-4"
+            >
+              {!isSignIn && (
+                <FormField
+                  control={form.control}
+                  name="name"
+                  label="Name"
+                  placeholder="Your name"
+                  type="text"
+                />
+              )}
+
+              <FormField
+                control={form.control}
+                name="email"
+                label="Email"
+                placeholder="you@example.com"
+                type="email"
+              />
+
+              <div className="relative">
+                <FormField
+                  control={form.control}
+                  name="password"
+                  label="Password"
+                  placeholder={isSignIn ? "Your password" : "At least 3 characters"}
+                  type={showPassword ? "text" : "password"}
+                />
+                <button
+                  type="button"
+                  onClick={togglePasswordVisibility}
+                  aria-label={showPassword ? "Hide password" : "Show password"}
+                  className={cn(
+                    "absolute right-2.5 top-[34px] flex items-center justify-center",
+                    "size-7 rounded-md text-fg-muted hover:text-fg-strong",
+                    "hover:bg-surface-3 transition-colors",
+                  )}
+                >
+                  {showPassword ? (
+                    <EyeOff className="size-4" />
+                  ) : (
+                    <Eye className="size-4" />
+                  )}
+                </button>
+              </div>
+
+              <Button
+                type="submit"
+                disabled={loading}
+                className="w-full mt-2 gap-2"
+              >
+                {loading ? (
+                  <>
+                    <Loader2 className="size-4 animate-spin" />
+                    {isSignIn ? "Signing in…" : "Creating account…"}
+                  </>
+                ) : (
+                  <>{isSignIn ? "Sign in" : "Create account"}</>
+                )}
+              </Button>
+            </form>
+          </Form>
+
+          {/* Footer link */}
+          <p className="text-center text-sm text-fg-muted pt-2 border-t border-border-subtle">
+            <span className="block pt-4">
+              {isSignIn ? "No account yet?" : "Already have one?"}{" "}
+              <Link
+                href={isSignIn ? "/sign-up" : "/sign-in"}
+                className="font-medium text-accent hover:underline underline-offset-4"
+              >
+                {isSignIn ? "Create one" : "Sign in"}
+              </Link>
+            </span>
+          </p>
+        </div>
       </div>
     </div>
   );
