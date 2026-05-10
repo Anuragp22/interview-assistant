@@ -24,7 +24,23 @@ export default function RootLayout({
       <body className={`${monaSans.className} antialiased`}>
         {children}
 
-        <Toaster />
+        <Toaster
+          theme="dark"
+          richColors
+          closeButton
+          toastOptions={{
+            classNames: {
+              toast:
+                "!bg-surface-1 !border !border-border-default !text-fg-strong !shadow-lg",
+              description: "!text-fg-muted",
+              actionButton:
+                "!bg-accent !text-accent-fg hover:!bg-accent-hover",
+              cancelButton: "!bg-surface-2 !text-fg-default",
+              closeButton:
+                "!bg-surface-2 !border-border-default !text-fg-muted hover:!text-fg-strong",
+            },
+          }}
+        />
       </body>
     </html>
   );
