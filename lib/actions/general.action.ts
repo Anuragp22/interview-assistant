@@ -50,8 +50,15 @@ export async function createFeedback(params: CreateFeedbackParams) {
         },
       },
       schema: feedbackSchema,
+      // The literal word "JSON" must appear in the prompt — Groq enforces
+      // this when response_format is json_object. The validation lives
+      // server-side and rejects the request with a 400 if the prompt
+      // doesn't mention JSON anywhere.
       prompt: `
         You are an AI interviewer analyzing a mock interview. Your task is to evaluate the candidate based on structured categories. Be thorough and detailed in your analysis. Don't be lenient with the candidate. If there are mistakes or areas for improvement, point them out.
+
+        Respond as a single JSON object that matches the provided schema exactly.
+
         Transcript:
         ${formattedTranscript}
 
@@ -63,7 +70,7 @@ export async function createFeedback(params: CreateFeedbackParams) {
         - **Confidence & Clarity**: Confidence in responses, engagement, and clarity.
         `,
       system:
-        'You are a professional interviewer analyzing a mock interview. Your task is to evaluate the candidate based on structured categories',
+        'You are a professional interviewer analyzing a mock interview. Your task is to evaluate the candidate based on structured categories. Output a single JSON object matching the schema.',
     });
 
     const feedback = {
