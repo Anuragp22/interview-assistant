@@ -1,6 +1,6 @@
 # Interview Agent
 
-Python worker that joins LiveKit rooms named `interview-*`, runs a Deepgram → GPT-4 → 11labs voice pipeline, and writes per-turn transcripts to Firestore.
+Python worker that joins LiveKit rooms named `interview-*`, runs a Deepgram → Groq (Llama 3.3 70B) → 11labs voice pipeline, and writes per-turn transcripts to Firestore.
 
 See spec: `../docs/superpowers/specs/2026-05-07-livekit-pipeline-design.md`.
 
@@ -39,7 +39,7 @@ The agent runs as a long-lived container. Any PaaS that supports Docker + env va
 cd livekit-agent
 fly launch --name interview-agent --no-deploy
 fly secrets set LIVEKIT_URL=... LIVEKIT_API_KEY=... LIVEKIT_API_SECRET=... \
-               DEEPGRAM_API_KEY=... ELEVEN_API_KEY=... OPENAI_API_KEY=... \
+               DEEPGRAM_API_KEY=... ELEVEN_API_KEY=... GROQ_API_KEY=... \
                FIREBASE_SERVICE_ACCOUNT_JSON=$(base64 -w0 path/to/sa.json)
 fly deploy
 ```

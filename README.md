@@ -25,7 +25,7 @@ Interview Assistant creates a realistic interview environment by leveraging mult
 - **Real-time transport**: LiveKit Cloud (WebRTC SFU) + LiveKit Agents (Python worker)
 - **Speech-to-Text**: Deepgram Nova-2 (driven by the agent, not a hosted service)
 - **Text-to-Speech**: 11labs "Sarah" voice (driven by the agent)
-- **Conversation AI**: OpenAI GPT-4 (driven by the agent)
+- **Conversation AI**: Groq Llama-3.3 70B (called via the OpenAI-compatible client; driven by the agent)
 - **Feedback AI**: Google Gemini 2.0 Flash (server action, post-call)
 - **UI Components**: Radix UI, Lucide React icons
 - **Form Handling**: React Hook Form with Zod validation
@@ -37,7 +37,7 @@ The application uses **LiveKit Cloud** as the WebRTC SFU and a **Python agent** 
 1. **User clicks Call** → Next.js mints a LiveKit access token (signed JWT) with interview metadata.
 2. **Browser joins the LiveKit room** → publishes microphone audio.
 3. **LiveKit Cloud dispatches the Python agent** to the room as soon as the user appears.
-4. **Inside the agent:** Deepgram transcribes user speech → GPT-4 generates the interviewer's reply → 11labs converts the reply to Sarah's voice → audio is sent back through LiveKit.
+4. **Inside the agent:** Deepgram transcribes user speech → Groq Llama-3.3 70B generates the interviewer's reply → 11labs converts the reply to Sarah's voice → audio is sent back through LiveKit.
 5. **Per-turn:** the agent writes each completed exchange to `interviews/{id}/turns` in Firestore.
 6. **End of call:** a server action reads the turns, asks Gemini 2.0 Flash to score the interview, and writes a `feedback/{id}` document.
 
@@ -49,7 +49,7 @@ The application uses **LiveKit Cloud** as the WebRTC SFU and a **Python agent** 
 - Python 3.11+ (for the LiveKit agent worker)
 - Firebase account
 - LiveKit Cloud account
-- OpenAI API key
+- Groq API key (https://console.groq.com/keys)
 - Deepgram API key
 - ElevenLabs API key
 - Google AI Studio account
@@ -85,13 +85,13 @@ NEXT_PUBLIC_LIVEKIT_URL=wss://your-project.livekit.cloud
 NEXT_PUBLIC_ANALYTICS_ID=your_analytics_id
 ```
 
-The Python agent under `livekit-agent/` has its own `.env` with provider keys — see `livekit-agent/README.md` for the full list (LiveKit credentials, OpenAI, Deepgram, ElevenLabs, and a Firebase service-account JSON for per-turn writes).
+The Python agent under `livekit-agent/` has its own `.env` with provider keys — see `livekit-agent/README.md` for the full list (LiveKit credentials, Groq, Deepgram, ElevenLabs, and a Firebase service-account JSON for per-turn writes).
 
 You can obtain these keys by:
 
 1. Creating a Firebase project at [Firebase Console](https://console.firebase.google.com/)
 2. Setting up a Google AI Studio account for the Gemini API key
-3. Creating an OpenAI account for the GPT-4 API key
+3. Getting a Groq API key at [console.groq.com/keys](https://console.groq.com/keys)
 4. Registering at [LiveKit Cloud](https://livekit.io/) for a project URL, API key, and secret
 5. Creating accounts at [Deepgram](https://deepgram.com/) and [ElevenLabs](https://elevenlabs.io/) for the agent
 

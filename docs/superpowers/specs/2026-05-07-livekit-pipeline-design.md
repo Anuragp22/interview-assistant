@@ -13,7 +13,7 @@
 ### Goals
 
 1. Replace VAPI as the voice transport and AI pipeline orchestrator with **LiveKit Cloud** (SFU) plus a self-owned **Python agent** built on the LiveKit Agents SDK.
-2. Preserve the candidate-facing audio behavior: 11labs "Sarah" voice, Deepgram STT, GPT-4 conversation, and the existing post-call feedback flow (Gemini 2.0 Flash, current `feedbackSchema`).
+2. Preserve the candidate-facing audio behavior: 11labs "Sarah" voice, Deepgram STT, Groq Llama-3.3 70B conversation (via OpenAI-compatible endpoint), and the existing post-call feedback flow (Gemini 2.0 Flash, current `feedbackSchema`).
 3. Provide **interrupt / barge-in handling** with configurable thresholds via the LiveKit Agents pipeline.
 4. Replace the VAPI-driven generate flow with a **multi-step form** (better UX than today's voice-driven prompt collection).
 5. Establish three **forward seams** so future sub-projects don't require re-architecture:
@@ -49,7 +49,7 @@
 │                          │                                │                          │
 │  - @livekit/client       │                                │  - VoicePipelineAgent    │
 │  - publishes mic audio   │   audio (WebRTC) over          │    ├─ Deepgram   (STT)   │
-│  - plays agent audio     │ ◀──────── LiveKit Cloud ─────▶ │    ├─ GPT-4      (LLM)   │
+│  - plays agent audio     │ ◀──────── LiveKit Cloud ─────▶ │    ├─ Groq Llama (LLM)   │
 │  - subscribes to data    │   data (text events)           │    └─ 11labs     (TTS)   │
 │    messages (transcript, │                                │  - reads room metadata   │
 │    status)               │                                │  - emits per-turn events │
@@ -105,7 +105,7 @@
 ### 3.2 Added (new Python service, repo path `livekit-agent/`)
 
 - `agent.py` — worker entrypoint, registers the `interview-*` room-name filter, builds a session per dispatch.
-- `pipeline.py` — `VoicePipelineAgent` factory: Deepgram STT, GPT-4 LLM, 11labs TTS, Silero VAD; interrupt thresholds configurable via env.
+- `pipeline.py` — `VoicePipelineAgent` factory: Deepgram STT, Groq Llama-3.3 70B LLM (via OpenAI-compatible endpoint), 11labs TTS, Silero VAD; interrupt thresholds configurable via env.
 - `prompts.py` — interviewer system prompt and voice settings (the values currently in `constants/index.ts`'s `interviewer` object).
 - `persistence/firestore.py` — `TurnsRepository` mirroring the schema in §4; uses `firebase-admin` Python SDK with a service-account JSON loaded from env.
 - `hooks.py` — `InterviewHooks` interface with no-op default implementation: `on_interview_started`, `on_user_turn_committed`, `on_assistant_turn_committed`, `on_interview_ended`. Forward seam (c).
@@ -129,9 +129,11 @@
 
 **Next.js:** `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, `NEXT_PUBLIC_LIVEKIT_URL`.
 
-**Agent service:** `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, `DEEPGRAM_API_KEY`, `ELEVEN_API_KEY`, `OPENAI_API_KEY`, `FIREBASE_SERVICE_ACCOUNT_JSON` (base64-encoded JSON).
+**Agent service:** `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, `DEEPGRAM_API_KEY`, `ELEVEN_API_KEY`, `GROQ_API_KEY`, `FIREBASE_SERVICE_ACCOUNT_JSON` (base64-encoded JSON). Optional: `GROQ_MODEL` (defaults to `llama-3.3-70b-versatile`).
 
 > Note: the `livekit-agents` ElevenLabs plugin reads `ELEVEN_API_KEY` (not `ELEVENLABS_API_KEY`). Match that spelling in `.env` files and deploy configs.
+
+> Note: the LLM is wired through `livekit-plugins-openai` against Groq's OpenAI-compatible endpoint (`https://api.groq.com/openai/v1`), so no extra plugin dependency is needed. See `livekit-agent/src/interview_agent/pipeline.py`.
 
 ---
 
