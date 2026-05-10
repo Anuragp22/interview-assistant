@@ -4,20 +4,23 @@ import { ArrowRight, Mic, Sparkles } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import InterviewCard from "@/components/InterviewCard";
+import ScoreProgressCard from "@/components/ScoreProgressCard";
 
 import { getCurrentUser } from "@/lib/actions/auth.action";
 import {
   getInterviewsByUserId,
   getLatestInterviews,
+  getUserScoreHistory,
 } from "@/lib/actions/general.action";
 
 async function Home() {
   const user = await getCurrentUser();
   if (!user) redirect("/sign-in");
 
-  const [userInterviews, allInterview] = await Promise.all([
+  const [userInterviews, allInterview, scoreHistory] = await Promise.all([
     getInterviewsByUserId(user.id),
     getLatestInterviews({ userId: user.id }),
+    getUserScoreHistory(user.id),
   ]);
 
   const hasPastInterviews = (userInterviews?.length ?? 0) > 0;
@@ -53,6 +56,9 @@ async function Home() {
           </Button>
         </div>
       </section>
+
+      {/* Score progression — only renders when 2+ scored interviews exist */}
+      <ScoreProgressCard history={scoreHistory} />
 
       {/* Your interviews */}
       <section className="flex flex-col gap-5">

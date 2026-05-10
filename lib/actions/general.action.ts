@@ -133,6 +133,55 @@ export async function getLatestInterviews(
   })) as Interview[];
 }
 
+export type ScoreHistoryPoint = {
+  feedbackId: string;
+  interviewId: string;
+  totalScore: number;
+  createdAt: string;
+};
+
+/**
+ * Returns the user's feedback history ordered chronologically (oldest
+ * first), trimmed to the most recent N entries. Used by the dashboard's
+ * progression sparkline. Empty array if the user has no feedback yet —
+ * the caller decides whether to render the sparkline at all.
+ *
+ * Sorting is done in-memory rather than via a Firestore composite index
+ * on (userId asc, createdAt desc) so this works without an extra index
+ * deploy. A user's total feedback count is small (dozens at most), so
+ * the read+sort cost is negligible. Worth revisiting if power users
+ * ever cross hundreds of interviews.
+ */
+export async function getUserScoreHistory(
+  userId: string | undefined,
+  options: { limit?: number } = {}
+): Promise<ScoreHistoryPoint[]> {
+  const { limit = 12 } = options;
+  if (!userId) return [];
+
+  const snap = await db
+    .collection('feedback')
+    .where('userId', '==', userId)
+    .get();
+
+  const all: ScoreHistoryPoint[] = snap.docs.map((doc) => {
+    const data = doc.data() as Feedback;
+    return {
+      feedbackId: doc.id,
+      interviewId: data.interviewId,
+      totalScore: data.totalScore,
+      createdAt: data.createdAt,
+    };
+  });
+
+  // Sort newest first, take the last `limit`, then reverse to oldest-first
+  // chronological order (left-to-right on the chart).
+  return all
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+    .slice(0, limit)
+    .reverse();
+}
+
 export async function getInterviewsByUserId(
   userId: string | undefined
 ): Promise<Interview[] | null> {
