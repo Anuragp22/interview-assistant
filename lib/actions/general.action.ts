@@ -50,27 +50,42 @@ export async function createFeedback(params: CreateFeedbackParams) {
         },
       },
       schema: feedbackSchema,
-      // The literal word "JSON" must appear in the prompt — Groq enforces
-      // this when response_format is json_object. The validation lives
-      // server-side and rejects the request with a 400 if the prompt
-      // doesn't mention JSON anywhere.
+      // Groq's json_object mode doesn't enforce schema structure server-
+      // side — the model freelances unless we describe the shape
+      // explicitly. So we ship the exact shape, with the EXACT category
+      // names from feedbackSchema (z.literal('Communication Skills')
+      // etc. — the literals don't tolerate even punctuation drift).
+      // The literal word "JSON" must also appear (Groq requirement).
       prompt: `
-        You are an AI interviewer analyzing a mock interview. Your task is to evaluate the candidate based on structured categories. Be thorough and detailed in your analysis. Don't be lenient with the candidate. If there are mistakes or areas for improvement, point them out.
+You are a professional interviewer analyzing a mock interview transcript. Be thorough and rigorous; do not be lenient. Surface real mistakes and concrete areas for improvement.
 
-        Respond as a single JSON object that matches the provided schema exactly.
+Transcript:
+${formattedTranscript}
 
-        Transcript:
-        ${formattedTranscript}
+Respond with ONE JSON object matching this exact shape (no extra fields, no missing fields):
 
-        Please score the candidate from 0 to 100 in the following areas. Do not add categories other than the ones provided:
-        - **Communication Skills**: Clarity, articulation, structured responses.
-        - **Technical Knowledge**: Understanding of key concepts for the role.
-        - **Problem-Solving**: Ability to analyze problems and propose solutions.
-        - **Cultural & Role Fit**: Alignment with company values and job role.
-        - **Confidence & Clarity**: Confidence in responses, engagement, and clarity.
+{
+  "totalScore": <integer 0-100, the overall score>,
+  "categoryScores": [
+    { "name": "Communication Skills", "score": <integer 0-100>, "comment": "<2-4 sentences>" },
+    { "name": "Technical Knowledge", "score": <integer 0-100>, "comment": "<2-4 sentences>" },
+    { "name": "Problem Solving", "score": <integer 0-100>, "comment": "<2-4 sentences>" },
+    { "name": "Cultural Fit", "score": <integer 0-100>, "comment": "<2-4 sentences>" },
+    { "name": "Confidence and Clarity", "score": <integer 0-100>, "comment": "<2-4 sentences>" }
+  ],
+  "strengths": ["<short bullet>", "<short bullet>", "..."],
+  "areasForImprovement": ["<short bullet>", "<short bullet>", "..."],
+  "finalAssessment": "<2-4 sentence overall summary>"
+}
+
+Critical rules:
+- The categoryScores array must contain EXACTLY those five entries, in that order, with names matching character-for-character (no ampersands, no hyphens — "Problem Solving" not "Problem-Solving"; "Cultural Fit" not "Cultural & Role Fit"; "Confidence and Clarity" not "Confidence & Clarity").
+- All scores are integers from 0 to 100.
+- "strengths" and "areasForImprovement" each contain 2-5 short bullet strings.
+- Output JSON only — no preamble, no code fences, no trailing prose.
         `,
       system:
-        'You are a professional interviewer analyzing a mock interview. Your task is to evaluate the candidate based on structured categories. Output a single JSON object matching the schema.',
+        'You are a professional interviewer analyzing a mock interview. Output a single JSON object exactly matching the schema described in the user message.',
     });
 
     const feedback = {
