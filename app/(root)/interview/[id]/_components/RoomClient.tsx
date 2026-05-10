@@ -12,11 +12,12 @@ import {
   type RemoteTrackPublication,
 } from "livekit-client";
 import { toast } from "sonner";
-import { Loader2, Mic, PhoneOff, User } from "lucide-react";
+import { PhoneOff, User } from "lucide-react";
 
 import { mintInterviewRoomToken } from "@/lib/actions/interview.action";
 import { createFeedback } from "@/lib/actions/general.action";
 import { cn } from "@/lib/utils";
+import PreCallReadyScreen from "./PreCallReadyScreen";
 
 // If the AI agent worker isn't running (or is misconfigured), the LiveKit
 // room connect still succeeds — the browser just sits in "Connected" with
@@ -39,6 +40,10 @@ type Props = {
   userId: string;
   userName: string;
   feedbackId?: string;
+  // Briefing data shown on the pre-call ready screen.
+  questions: string[];
+  type: string;
+  role: string;
 };
 
 type Turn = { role: "user" | "assistant"; content: string; index: number };
@@ -48,6 +53,9 @@ export default function RoomClient({
   userId,
   userName,
   feedbackId,
+  questions,
+  type,
+  role,
 }: Props) {
   const router = useRouter();
   const roomRef = useRef<Room | null>(null);
@@ -229,16 +237,49 @@ export default function RoomClient({
     };
   }, []);
 
-  const lastAssistant =
-    [...turns].reverse().find((t) => t.role === "assistant")?.content ?? "";
-
   const isLive =
     connectionState === "connected" || connectionState === "reconnecting";
-  const showCall =
-    connectionState !== "connected" && connectionState !== "reconnecting";
+  const isPreCall =
+    connectionState === "idle" ||
+    connectionState === "ended" ||
+    connectionState === "error" ||
+    connectionState === "connecting";
+
+  // Audio sink is mounted unconditionally at the top so the ref points to
+  // the same DOM node across pre-call <-> in-call view switches. The
+  // TrackSubscribed handler captures audioElRef.current at attach time,
+  // so unmounting/remounting the audio element under it would silence
+  // the agent.
+  const audioSink = (
+    <audio ref={audioElRef} autoPlay playsInline className="hidden" />
+  );
+
+  // Pre-call: ready screen with briefing + mic test. Also shown after the
+  // call ends or errors so the user can retry without losing context.
+  // 'connecting' falls in here too — the disabled "Connecting…" CTA on
+  // the ready screen keeps the briefing visible during the brief connect
+  // window instead of flashing an empty in-call view.
+  if (isPreCall) {
+    return (
+      <>
+        {audioSink}
+        <PreCallReadyScreen
+          role={role}
+          type={type}
+          questionsCount={questions.length}
+          starting={connectionState === "connecting"}
+          retry={connectionState === "ended" || connectionState === "error"}
+          errorMessage={errorMessage}
+          onStart={startCall}
+        />
+      </>
+    );
+  }
 
   return (
     <div className="flex flex-col gap-6">
+      {audioSink}
+
       {/* Status bar: state chip + duration */}
       <div className="flex items-center justify-between">
         <StatusChip state={connectionState} />
@@ -249,102 +290,59 @@ export default function RoomClient({
         )}
       </div>
 
-      {/* Two-card grid: AI interviewer + user */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+      {/* Centerpiece: the AI avatar dominates the screen so the user
+          listens (no transcript to read). User self-view sits smaller
+          alongside on desktop or below on mobile, like a Zoom self-view.
+          We deliberately don't render the live transcript — reading the
+          AI's text-as-it-arrives breaks the rhythm of a real interview.
+          The full transcript lands on the feedback page after the call. */}
+      <div className="grid grid-cols-1 md:grid-cols-[1fr_auto] gap-4 items-center">
         <ParticipantCard
           variant="agent"
           name="AI Interviewer"
           subtitle={
             isLive
               ? agentSpeaking
-                ? "Speaking…"
+                ? "Speaking"
                 : "Listening"
-              : "Ready when you are"
+              : ""
           }
           imageSrc="/ai-avatar.png"
           imageAlt="AI Interviewer"
           speaking={agentSpeaking && isLive}
           isLive={isLive}
+          size="large"
         />
         <ParticipantCard
           variant="user"
           name={userName}
-          subtitle={isLive ? (agentSpeaking ? "Listening" : "Speaking…") : ""}
+          subtitle={isLive ? (agentSpeaking ? "Listening" : "Speaking") : ""}
           imageSrc="/user-avatar.png"
           imageAlt={userName}
           speaking={!agentSpeaking && isLive}
           isLive={isLive}
+          size="small"
         />
       </div>
 
-      {/* Live transcript — last assistant utterance */}
-      {turns.length > 0 && lastAssistant && (
-        <div className="card-border animate-fadeIn">
-          <div className="flex items-start gap-3 p-5">
-            <div className="flex-shrink-0 size-7 rounded-full bg-accent-soft border border-accent-border flex items-center justify-center mt-0.5">
-              <span className="text-xs font-semibold text-fg-strong">AI</span>
-            </div>
-            <p
-              key={lastAssistant}
-              className="text-base md:text-lg text-fg-strong leading-relaxed animate-fadeIn"
-            >
-              {lastAssistant}
-            </p>
-          </div>
-        </div>
-      )}
-
-      {/* Hidden audio sink */}
-      <audio ref={audioElRef} autoPlay playsInline />
-
-      {/* Call control */}
+      {/* Call control — only End in-call. Start is on the pre-call ready
+          screen, never reachable here. */}
       <div className="flex flex-col items-center gap-3 mt-2">
-        {showCall ? (
-          <button
-            type="button"
-            onClick={startCall}
-            disabled={connectionState === "connecting"}
-            className={cn(
-              "inline-flex items-center justify-center gap-2 px-8 py-3.5 text-sm font-semibold",
-              "rounded-full bg-accent text-accent-fg transition-all",
-              "hover:bg-accent-hover active:scale-[0.98]",
-              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-surface-0",
-              "disabled:opacity-60 disabled:cursor-not-allowed",
-              "shadow-[0_0_0_1px_var(--color-accent-border),0_8px_24px_-8px_var(--color-accent-soft)]",
-              "min-w-40",
-            )}
-          >
-            {connectionState === "connecting" ? (
-              <>
-                <Loader2 className="size-4 animate-spin" />
-                Connecting…
-              </>
-            ) : (
-              <>
-                <Mic className="size-4" />
-                {connectionState === "ended" || connectionState === "error"
-                  ? "Start again"
-                  : "Start interview"}
-              </>
-            )}
-          </button>
-        ) : (
-          <button
-            type="button"
-            onClick={endCall}
-            className={cn(
-              "inline-flex items-center justify-center gap-2 px-8 py-3.5 text-sm font-semibold",
-              "rounded-full bg-destructive-200 text-white transition-all",
-              "hover:bg-destructive-100 active:scale-[0.98]",
-              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-destructive-100 focus-visible:ring-offset-2 focus-visible:ring-offset-surface-0",
-              "shadow-[0_0_0_1px_oklch(0.66_0.22_25_/_30%),0_8px_24px_-8px_oklch(0.66_0.22_25_/_50%)]",
-              "min-w-40",
-            )}
-          >
-            <PhoneOff className="size-4" />
-            End interview
-          </button>
-        )}
+        <button
+          type="button"
+          onClick={endCall}
+          className={cn(
+            "inline-flex items-center justify-center gap-2 px-8 py-3.5 text-sm font-semibold",
+            "rounded-full bg-destructive-200 text-white transition-all",
+            "hover:bg-destructive-100 active:scale-[0.98]",
+            "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-destructive-100 focus-visible:ring-offset-2 focus-visible:ring-offset-surface-0",
+            "shadow-[0_0_0_1px_oklch(0.66_0.22_25_/_30%),0_8px_24px_-8px_oklch(0.66_0.22_25_/_50%)]",
+            "min-w-40",
+          )}
+        >
+          <PhoneOff className="size-4" />
+          End interview
+        </button>
 
         {errorMessage && (
           <p className="text-sm text-destructive-100 text-center max-w-md">
@@ -368,6 +366,7 @@ function ParticipantCard({
   imageAlt,
   speaking,
   isLive,
+  size = "large",
 }: {
   variant: "agent" | "user";
   name: string;
@@ -376,12 +375,15 @@ function ParticipantCard({
   imageAlt: string;
   speaking: boolean;
   isLive: boolean;
+  size?: "large" | "small";
 }) {
+  const isSmall = size === "small";
   return (
     <div
       className={cn(
         "relative overflow-hidden rounded-xl bg-surface-1 border border-border-default",
-        "flex flex-col items-center justify-center gap-4 p-8 min-h-[280px]",
+        "flex flex-col items-center justify-center",
+        isSmall ? "gap-2.5 p-5 min-h-[200px] md:w-56" : "gap-5 p-10 min-h-[420px]",
         // Subtle accent halo on top — strongest for the agent card to anchor
         // visual attention; lighter for the user card.
         "before:absolute before:inset-0 before:pointer-events-none",
@@ -406,15 +408,14 @@ function ParticipantCard({
         )}
         <div
           className={cn(
-            "relative flex items-center justify-center rounded-full size-28 overflow-hidden",
+            "relative flex items-center justify-center rounded-full overflow-hidden",
             "bg-surface-2 border transition-colors",
+            isSmall ? "size-20" : "size-44",
             speaking
               ? "border-accent shadow-[0_0_0_4px_var(--color-accent-soft)]"
               : "border-border-strong",
           )}
         >
-          {/* Real avatar image. eslint-disable-line: keep <img> here so this
-              works without next/image config for arbitrary paths. */}
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img
             src={imageSrc}
@@ -424,15 +425,26 @@ function ParticipantCard({
         </div>
       </div>
       <div className="relative z-10 flex flex-col items-center gap-1">
-        <h3 className="text-base font-semibold text-fg-strong">{name}</h3>
+        <h3
+          className={cn(
+            "font-semibold text-fg-strong",
+            isSmall ? "text-sm" : "text-lg",
+          )}
+        >
+          {name}
+        </h3>
         {subtitle && (
-          <p className="text-xs text-fg-muted flex items-center gap-1.5">
-            {speaking && (
+          <p
+            className={cn(
+              "flex items-center gap-1.5 text-fg-muted",
+              isSmall ? "text-[11px]" : "text-xs",
+            )}
+          >
+            {speaking ? (
               <span className="size-1.5 rounded-full bg-accent animate-pulse" />
-            )}
-            {!speaking && isLive && variant === "user" && (
+            ) : isLive && variant === "user" ? (
               <User className="size-3" />
-            )}
+            ) : null}
             {subtitle}
           </p>
         )}
