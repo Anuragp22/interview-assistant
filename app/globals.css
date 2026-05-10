@@ -441,10 +441,6 @@
   background: var(--color-surface-1);
 }
 
-@utility pattern {
-  /* No-op now — body already paints the dot grid + glow. */
-}
-
 @keyframes fadeIn {
   from {
     opacity: 0;
