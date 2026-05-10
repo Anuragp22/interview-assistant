@@ -69,6 +69,38 @@ def accepts_room(room_name: str) -> bool:
     return room_name.startswith(_ROOM_PREFIX)
 
 
+async def drain_pending_tasks(tasks: set[asyncio.Task[Any]]) -> None:
+    """Await every task in ``tasks``; re-raise the first exception, if any.
+
+    The function is self-contained: it removes tasks from the set as it
+    processes them, so callers don't need to wire ``add_done_callback`` for
+    progress. It also loops in case a hook task schedules additional tasks
+    into the same set during the drain (e.g. a hook that fans out to another
+    hook).
+
+    Why ``return_exceptions=True``: the default ``gather`` short-circuits on the
+    first exception, leaving the remaining tasks pending. That dropped data
+    silently before. With ``return_exceptions=True`` every task is awaited to
+    completion; we then surface the first exception to the caller so the worker
+    log shows the real failure instead of an asyncio "Task was destroyed but it
+    is pending" warning.
+    """
+    first_exc: BaseException | None = None
+    while tasks:
+        snapshot = list(tasks)
+        # Pop the snapshot out of the set BEFORE awaiting so the loop can't
+        # spin forever if the caller didn't install a discard done-callback.
+        # Tasks scheduled mid-drain still show up in the set on the next pass.
+        tasks.difference_update(snapshot)
+        results = await asyncio.gather(*snapshot, return_exceptions=True)
+        for r in results:
+            if isinstance(r, BaseException) and first_exc is None:
+                logger.error("hook task raised during drain", exc_info=r)
+                first_exc = r
+    if first_exc is not None:
+        raise first_exc
+
+
 def parse_metadata(raw: str | None) -> InterviewContext:
     """Parse the JWT-attached participant metadata into an InterviewContext."""
     if not raw:
@@ -186,22 +218,6 @@ async def entrypoint(job: JobContext) -> None:
     def _on_room_dc(*_: Any) -> None:
         finished.set()
 
-    async def _drain_hook_tasks() -> None:
-        """Await pending hook tasks so the last turn isn't lost on disconnect.
-
-        Uses gather without return_exceptions so persistence failures surface
-        in the worker log instead of being silently swallowed by asyncio's
-        default unhandled-task logger. Caller is responsible for ensuring
-        on_interview_ended and aclose still run even if this raises.
-        """
-        if not pending_hook_tasks:
-            return
-        try:
-            await asyncio.gather(*pending_hook_tasks)
-        except Exception:
-            logger.exception("hook task raised during drain")
-            raise
-
     await hooks.on_interview_started(ctx)
     try:
         await session.start(agent=agent, room=job.room)
@@ -209,7 +225,7 @@ async def entrypoint(job: JobContext) -> None:
         await finished.wait()
     finally:
         try:
-            await _drain_hook_tasks()
+            await drain_pending_tasks(pending_hook_tasks)
         finally:
             # ALWAYS run on_interview_ended + aclose, even if start/say/drain raised,
             # so subscribers see a terminating event after on_interview_started fired.
