@@ -32,8 +32,10 @@ async function Home() {
             <Sparkles className="size-3" />
             Powered by Groq Llama-3.3 70B
           </span>
-          <h1 className="text-3xl md:text-4xl font-semibold tracking-tight text-fg-strong leading-tight">
-            Practice interviews with an AI that listens, asks, and scores you.
+          <h1 className="font-display text-4xl md:text-5xl lg:text-[3.5rem] tracking-tight text-fg-strong leading-[1.05]">
+            Practice interviews with an AI that{" "}
+            <em className="italic">listens</em>, asks, and{" "}
+            <em className="italic">scores</em> you.
           </h1>
           <p className="text-fg-muted">
             Generate a role-specific interview, talk to it live, and get

@@ -48,6 +48,10 @@
   --color-destructive-200: oklch(0.58 0.22 25);
 
   --font-mona-sans: 'Mona Sans', sans-serif;
+  --font-instrument-serif: 'Instrument Serif', Georgia, serif;
+  /* Aliases used by Tailwind utilities (font-display, font-sans). */
+  --font-sans: var(--font-mona-sans);
+  --font-display: var(--font-instrument-serif);
 
   /* Subtle dot grid used as page background. Generated as data-uri so we
      don't depend on a binary asset. */

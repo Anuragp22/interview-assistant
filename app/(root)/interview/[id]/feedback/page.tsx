@@ -171,7 +171,9 @@ function ScoreHero({
       <div className="relative z-10 flex flex-col md:flex-row items-start md:items-center gap-6 p-8">
         <ScoreRing score={score} />
         <div className="flex flex-col gap-2">
-          <h2 className="text-xl font-semibold text-fg-strong">{headline}</h2>
+          <h2 className="font-display text-2xl md:text-3xl tracking-tight text-fg-strong leading-[1.1]">
+            {headline}
+          </h2>
           <p className="text-fg-default leading-relaxed">{assessment}</p>
         </div>
       </div>

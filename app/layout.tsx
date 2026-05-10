@@ -1,12 +1,21 @@
 import { Toaster } from "sonner";
 import type { Metadata } from "next";
-import { Mona_Sans } from "next/font/google";
+import { Mona_Sans, Instrument_Serif } from "next/font/google";
 
 import "./globals.css";
 
 const monaSans = Mona_Sans({
   variable: "--font-mona-sans",
   subsets: ["latin"],
+});
+
+// Editorial display serif — used sparingly on headline moments (dashboard
+// hero, feedback score-hero) to bring gravitas. Body stays Mona Sans.
+const instrumentSerif = Instrument_Serif({
+  variable: "--font-instrument-serif",
+  subsets: ["latin"],
+  weight: ["400"],
+  style: ["normal", "italic"],
 });
 
 export const metadata: Metadata = {
@@ -20,7 +29,10 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" className="dark">
+    <html
+      lang="en"
+      className={`dark ${monaSans.variable} ${instrumentSerif.variable}`}
+    >
       <body className={`${monaSans.className} antialiased`}>
         {children}
 
