@@ -5,7 +5,7 @@ import { useForm, Controller } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { useRouter } from "next/navigation";
-import { Loader2 } from "lucide-react";
+import { ArrowLeft, ArrowRight, Check, Loader2, X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -37,6 +37,13 @@ const formSchema = z.object({
 type FormValues = z.infer<typeof formSchema>;
 
 type Props = { userId: string };
+
+const STEPS = [
+  { label: "Role" },
+  { label: "Stack" },
+  { label: "Style" },
+  { label: "Review" },
+] as const;
 
 export default function InterviewForm({ userId }: Props) {
   const router = useRouter();
@@ -105,193 +112,287 @@ export default function InterviewForm({ userId }: Props) {
 
   return (
     <>
-      {submitting && <SubmittingOverlay role={values.role} amount={values.amount} />}
-      <form
-      onSubmit={handleSubmit(onSubmit)}
-      className="card-border max-w-xl mx-auto"
-    >
-      <div className="card-content gap-6">
-        <Stepper step={step} />
+      {submitting && (
+        <SubmittingOverlay role={values.role} amount={values.amount} />
+      )}
 
-        {step === 0 && (
-          <div className="flex flex-col gap-4">
-            <label className="label">Role</label>
-            <Controller
-              name="role"
-              control={control}
-              render={({ field }) => (
-                <>
-                  <Input
-                    list="roles"
-                    placeholder="e.g. Frontend Developer"
-                    {...field}
-                  />
-                  <datalist id="roles">
-                    {ROLE_SUGGESTIONS.map((r) => (
-                      <option key={r} value={r} />
-                    ))}
-                  </datalist>
-                </>
-              )}
-            />
-            {formState.errors.role && (
-              <p className="text-sm text-red-400">
-                {formState.errors.role.message}
-              </p>
-            )}
+      <form onSubmit={handleSubmit(onSubmit)} className="card-border">
+        <div className="flex flex-col gap-8 p-6 md:p-8">
+          <Stepper step={step} />
 
-            <label className="label">Experience level</label>
-            <Controller
-              name="level"
-              control={control}
-              render={({ field }) => (
-                <SegmentedControl
-                  options={LEVELS as unknown as string[]}
-                  value={field.value}
-                  onChange={field.onChange}
+          {step === 0 && (
+            <Step
+              title="Who are you interviewing as?"
+              hint="The role determines the question style and difficulty."
+            >
+              <Field label="Role">
+                <Controller
+                  name="role"
+                  control={control}
+                  render={({ field }) => (
+                    <>
+                      <Input
+                        list="roles"
+                        placeholder="e.g. Frontend Developer"
+                        autoFocus
+                        {...field}
+                      />
+                      <datalist id="roles">
+                        {ROLE_SUGGESTIONS.map((r) => (
+                          <option key={r} value={r} />
+                        ))}
+                      </datalist>
+                    </>
+                  )}
                 />
-              )}
-            />
-          </div>
-        )}
+                <FieldError message={formState.errors.role?.message} />
+              </Field>
 
-        {step === 1 && (
-          <div className="flex flex-col gap-4">
-            <label className="label">Tech stack</label>
-            <ChipInput
-              value={values.techstack}
-              onChange={(next) =>
-                setValue("techstack", next, { shouldValidate: true })
-              }
-              placeholder="React, TypeScript, …  (Enter or comma to add)"
-            />
-            {formState.errors.techstack && (
-              <p className="text-sm text-red-400">
-                {formState.errors.techstack.message}
-              </p>
-            )}
-          </div>
-        )}
-
-        {step === 2 && (
-          <div className="flex flex-col gap-4">
-            <label className="label">Interview type</label>
-            <Controller
-              name="type"
-              control={control}
-              render={({ field }) => (
-                <SegmentedControl
-                  options={TYPES as unknown as string[]}
-                  value={field.value}
-                  onChange={field.onChange}
+              <Field label="Experience level">
+                <Controller
+                  name="level"
+                  control={control}
+                  render={({ field }) => (
+                    <SegmentedControl
+                      options={LEVELS as unknown as string[]}
+                      value={field.value}
+                      onChange={field.onChange}
+                    />
+                  )}
                 />
-              )}
-            />
-
-            <label className="label">
-              Number of questions: {values.amount}
-            </label>
-            <Controller
-              name="amount"
-              control={control}
-              render={({ field }) => (
-                <input
-                  type="range"
-                  min={3}
-                  max={15}
-                  step={1}
-                  value={field.value}
-                  onChange={(e) => field.onChange(Number(e.target.value))}
-                  className="w-full"
-                />
-              )}
-            />
-          </div>
-        )}
-
-        {step === 3 && (
-          <div className="flex flex-col gap-3">
-            <h3 className="text-lg font-semibold">Review</h3>
-            <SummaryRow label="Role">{values.role}</SummaryRow>
-            <SummaryRow label="Level">{values.level}</SummaryRow>
-            <SummaryRow label="Tech stack">
-              {values.techstack.join(", ")}
-            </SummaryRow>
-            <SummaryRow label="Type">{values.type}</SummaryRow>
-            <SummaryRow label="Questions">{values.amount}</SummaryRow>
-            {submitError && (
-              <p className="text-sm text-red-400">{submitError}</p>
-            )}
-          </div>
-        )}
-
-        <div className="flex justify-between mt-4">
-          <Button
-            type="button"
-            variant="secondary"
-            onClick={prev}
-            disabled={step === 0}
-          >
-            Back
-          </Button>
-          {step < 3 ? (
-            <Button type="button" onClick={next}>
-              Next
-            </Button>
-          ) : (
-            <Button type="submit" disabled={submitting}>
-              {submitting ? (
-                <>
-                  <Loader2 className="size-4 mr-2 animate-spin" />
-                  Generating…
-                </>
-              ) : (
-                "Create interview"
-              )}
-            </Button>
+              </Field>
+            </Step>
           )}
+
+          {step === 1 && (
+            <Step
+              title="What tech stack should it cover?"
+              hint="Add the technologies you want questions to focus on. Press Enter or comma to add."
+            >
+              <Field label="Tech stack">
+                <ChipInput
+                  value={values.techstack}
+                  onChange={(next) =>
+                    setValue("techstack", next, { shouldValidate: true })
+                  }
+                  placeholder="React, TypeScript, PostgreSQL…"
+                />
+                <FieldError message={formState.errors.techstack?.message} />
+              </Field>
+            </Step>
+          )}
+
+          {step === 2 && (
+            <Step
+              title="How should it run?"
+              hint="Pick the interview style and how many questions you want."
+            >
+              <Field label="Interview type">
+                <Controller
+                  name="type"
+                  control={control}
+                  render={({ field }) => (
+                    <SegmentedControl
+                      options={TYPES as unknown as string[]}
+                      value={field.value}
+                      onChange={field.onChange}
+                    />
+                  )}
+                />
+              </Field>
+
+              <Field
+                label="Number of questions"
+                trailing={
+                  <span className="text-fg-strong font-semibold tabular-nums">
+                    {values.amount}
+                  </span>
+                }
+              >
+                <Controller
+                  name="amount"
+                  control={control}
+                  render={({ field }) => (
+                    <RangeSlider
+                      min={3}
+                      max={15}
+                      value={field.value}
+                      onChange={field.onChange}
+                    />
+                  )}
+                />
+              </Field>
+            </Step>
+          )}
+
+          {step === 3 && (
+            <Step
+              title="Review & generate"
+              hint="Confirm the details. We'll generate questions and route you to the live room."
+            >
+              <div className="rounded-lg border border-border-default bg-surface-2/50 divide-y divide-border-subtle">
+                <SummaryRow label="Role">{values.role}</SummaryRow>
+                <SummaryRow label="Level">{values.level}</SummaryRow>
+                <SummaryRow label="Tech stack">
+                  <div className="flex flex-wrap gap-1.5 justify-end">
+                    {values.techstack.map((t) => (
+                      <span
+                        key={t}
+                        className="text-xs px-2 py-0.5 rounded-md bg-accent-soft border border-accent-border text-fg-strong"
+                      >
+                        {t}
+                      </span>
+                    ))}
+                  </div>
+                </SummaryRow>
+                <SummaryRow label="Type">{values.type}</SummaryRow>
+                <SummaryRow label="Questions">{values.amount}</SummaryRow>
+              </div>
+              {submitError && (
+                <p className="text-sm text-destructive-100">{submitError}</p>
+              )}
+            </Step>
+          )}
+
+          <div className="flex items-center justify-between pt-2 border-t border-border-subtle">
+            <Button
+              type="button"
+              variant="ghost"
+              onClick={prev}
+              disabled={step === 0 || submitting}
+              className="gap-2"
+            >
+              <ArrowLeft className="size-4" />
+              Back
+            </Button>
+            {step < 3 ? (
+              <Button type="button" onClick={next} className="gap-2">
+                Continue
+                <ArrowRight className="size-4" />
+              </Button>
+            ) : (
+              <Button type="submit" disabled={submitting} className="gap-2">
+                {submitting ? (
+                  <>
+                    <Loader2 className="size-4 animate-spin" />
+                    Generating…
+                  </>
+                ) : (
+                  <>
+                    Create interview
+                    <ArrowRight className="size-4" />
+                  </>
+                )}
+              </Button>
+            )}
+          </div>
         </div>
-      </div>
-    </form>
+      </form>
     </>
   );
 }
 
-function SubmittingOverlay({ role, amount }: { role: string; amount: number }) {
+/* ---------------------------------------------------------------------------
+ * Sub-components
+ * ------------------------------------------------------------------------- */
+
+function Stepper({ step }: { step: number }) {
   return (
-    <div className="fixed inset-0 z-50 bg-dark-100/85 backdrop-blur-sm flex items-center justify-center">
-      <div className="card-border max-w-md w-full mx-4">
-        <div className="card-content gap-4 items-center text-center">
-          <Loader2 className="size-10 animate-spin text-primary-100" />
-          <h3 className="text-lg font-semibold">Generating your interview</h3>
-          <p className="text-sm opacity-70">
-            Asking Groq Llama-3.3 70B for {amount} interview questions tailored
-            to <span className="font-medium">{role || "your role"}</span>. This
-            usually takes 3–8 seconds.
-          </p>
-          <p className="text-xs opacity-50">
-            Don&apos;t close this tab.
-          </p>
-        </div>
-      </div>
+    <div className="flex items-center gap-3">
+      {STEPS.map((s, i) => {
+        const status: "done" | "current" | "todo" =
+          i < step ? "done" : i === step ? "current" : "todo";
+        return (
+          <div key={s.label} className="flex items-center gap-3 flex-1">
+            <div className="flex items-center gap-2 min-w-0">
+              <div
+                className={cn(
+                  "flex items-center justify-center size-7 rounded-full text-xs font-semibold border transition-colors",
+                  status === "done" &&
+                    "bg-accent border-accent text-accent-fg",
+                  status === "current" &&
+                    "bg-accent-soft border-accent-border text-fg-strong",
+                  status === "todo" &&
+                    "bg-surface-2 border-border-default text-fg-muted",
+                )}
+              >
+                {status === "done" ? (
+                  <Check className="size-3.5" strokeWidth={3} />
+                ) : (
+                  i + 1
+                )}
+              </div>
+              <span
+                className={cn(
+                  "text-sm font-medium hidden sm:inline",
+                  status === "done" && "text-fg-default",
+                  status === "current" && "text-fg-strong",
+                  status === "todo" && "text-fg-muted",
+                )}
+              >
+                {s.label}
+              </span>
+            </div>
+            {i < STEPS.length - 1 && (
+              <div
+                className={cn(
+                  "h-px flex-1 transition-colors",
+                  i < step ? "bg-accent" : "bg-border-default",
+                )}
+              />
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }
 
-function Stepper({ step }: { step: number }) {
+function Step({
+  title,
+  hint,
+  children,
+}: {
+  title: string;
+  hint?: string;
+  children: React.ReactNode;
+}) {
   return (
-    <div className="flex gap-2">
-      {[0, 1, 2, 3].map((i) => (
-        <div
-          key={i}
-          className={cn(
-            "h-1.5 flex-1 rounded-full",
-            i <= step ? "bg-primary-100" : "bg-dark-300",
-          )}
-        />
-      ))}
+    <div className="flex flex-col gap-6 animate-fadeIn">
+      <div className="flex flex-col gap-1">
+        <h2 className="text-xl md:text-2xl font-semibold text-fg-strong">
+          {title}
+        </h2>
+        {hint && <p className="text-fg-muted text-sm">{hint}</p>}
+      </div>
+      <div className="flex flex-col gap-5">{children}</div>
     </div>
   );
+}
+
+function Field({
+  label,
+  trailing,
+  children,
+}: {
+  label: string;
+  trailing?: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="flex items-center justify-between">
+        <label className="text-sm font-medium text-fg-default">{label}</label>
+        {trailing}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function FieldError({ message }: { message?: string }) {
+  if (!message) return null;
+  return <p className="text-sm text-destructive-100">{message}</p>;
 }
 
 function SegmentedControl({
@@ -304,22 +405,25 @@ function SegmentedControl({
   onChange: (v: string) => void;
 }) {
   return (
-    <div className="flex gap-2">
-      {options.map((o) => (
-        <button
-          type="button"
-          key={o}
-          onClick={() => onChange(o)}
-          className={cn(
-            "px-4 py-2 rounded-lg border transition-colors",
-            value === o
-              ? "bg-primary-100 text-dark-100 border-primary-100"
-              : "border-dark-300",
-          )}
-        >
-          {o}
-        </button>
-      ))}
+    <div className="flex p-1 rounded-md bg-surface-2 border border-border-default">
+      {options.map((o) => {
+        const active = value === o;
+        return (
+          <button
+            type="button"
+            key={o}
+            onClick={() => onChange(o)}
+            className={cn(
+              "flex-1 px-4 py-2 rounded text-sm font-medium transition-all",
+              active
+                ? "bg-accent text-accent-fg shadow-sm"
+                : "text-fg-muted hover:text-fg-strong hover:bg-surface-3/50",
+            )}
+          >
+            {o}
+          </button>
+        );
+      })}
     </div>
   );
 }
@@ -347,7 +451,7 @@ function ChipInput({
   }
 
   return (
-    <div>
+    <div className="flex flex-col gap-2.5">
       <Input
         value={draft}
         placeholder={placeholder}
@@ -369,23 +473,78 @@ function ChipInput({
           }
         }}
       />
-      <div className="flex flex-wrap gap-2 mt-2">
-        {value.map((chip) => (
-          <span
-            key={chip}
-            className="bg-dark-300 px-3 py-1 rounded-full text-sm flex items-center gap-2"
-          >
-            {chip}
-            <button
-              type="button"
-              aria-label={`Remove ${chip}`}
-              onClick={() => onChange(value.filter((c) => c !== chip))}
-              className="opacity-60 hover:opacity-100"
+      {value.length > 0 && (
+        <div className="flex flex-wrap gap-1.5">
+          {value.map((chip) => (
+            <span
+              key={chip}
+              className="group inline-flex items-center gap-1.5 bg-accent-soft border border-accent-border text-fg-strong text-sm px-2.5 py-1 rounded-md"
             >
-              ×
-            </button>
-          </span>
-        ))}
+              {chip}
+              <button
+                type="button"
+                aria-label={`Remove ${chip}`}
+                onClick={() => onChange(value.filter((c) => c !== chip))}
+                className="opacity-50 group-hover:opacity-100 transition-opacity rounded-sm hover:bg-accent/20 p-0.5"
+              >
+                <X className="size-3" />
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function RangeSlider({
+  min,
+  max,
+  value,
+  onChange,
+}: {
+  min: number;
+  max: number;
+  value: number;
+  onChange: (v: number) => void;
+}) {
+  const pct = ((value - min) / (max - min)) * 100;
+  return (
+    <div className="flex flex-col gap-2">
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={1}
+        value={value}
+        onChange={(e) => onChange(Number(e.target.value))}
+        className={cn(
+          "w-full h-1.5 rounded-full appearance-none cursor-pointer",
+          "bg-surface-2 border border-border-default",
+          // WebKit thumb
+          "[&::-webkit-slider-thumb]:appearance-none",
+          "[&::-webkit-slider-thumb]:size-4",
+          "[&::-webkit-slider-thumb]:rounded-full",
+          "[&::-webkit-slider-thumb]:bg-accent",
+          "[&::-webkit-slider-thumb]:border-2",
+          "[&::-webkit-slider-thumb]:border-surface-0",
+          "[&::-webkit-slider-thumb]:shadow-md",
+          "[&::-webkit-slider-thumb]:transition-transform",
+          "[&::-webkit-slider-thumb]:hover:scale-110",
+          // Firefox thumb
+          "[&::-moz-range-thumb]:size-4",
+          "[&::-moz-range-thumb]:rounded-full",
+          "[&::-moz-range-thumb]:bg-accent",
+          "[&::-moz-range-thumb]:border-2",
+          "[&::-moz-range-thumb]:border-surface-0",
+        )}
+        style={{
+          background: `linear-gradient(to right, var(--color-accent) 0%, var(--color-accent) ${pct}%, var(--color-surface-2) ${pct}%, var(--color-surface-2) 100%)`,
+        }}
+      />
+      <div className="flex justify-between text-xs text-fg-muted tabular-nums">
+        <span>{min}</span>
+        <span>{max}</span>
       </div>
     </div>
   );
@@ -399,9 +558,40 @@ function SummaryRow({
   children: React.ReactNode;
 }) {
   return (
-    <div className="flex justify-between text-sm">
-      <span className="opacity-60">{label}</span>
-      <span className="font-medium">{children}</span>
+    <div className="flex items-center justify-between gap-4 px-4 py-3">
+      <span className="text-sm text-fg-muted">{label}</span>
+      <span className="text-sm font-medium text-fg-strong text-right">
+        {children}
+      </span>
+    </div>
+  );
+}
+
+function SubmittingOverlay({
+  role,
+  amount,
+}: {
+  role: string;
+  amount: number;
+}) {
+  return (
+    <div className="fixed inset-0 z-50 bg-surface-0/80 backdrop-blur-sm flex items-center justify-center animate-fadeIn">
+      <div className="card-border max-w-md w-full mx-4">
+        <div className="flex flex-col gap-4 items-center text-center p-8">
+          <Loader2 className="size-10 animate-spin text-accent" />
+          <h3 className="text-lg font-semibold text-fg-strong">
+            Generating your interview
+          </h3>
+          <p className="text-sm text-fg-muted">
+            Asking Groq Llama-3.3 70B for {amount} questions tailored to{" "}
+            <span className="text-fg-strong font-medium">
+              {role || "your role"}
+            </span>
+            . This usually takes 3–8 seconds.
+          </p>
+          <p className="text-xs text-fg-subtle">Don&apos;t close this tab.</p>
+        </div>
+      </div>
     </div>
   );
 }
