@@ -1,6 +1,7 @@
 "use server";
 
 import { cookies } from "next/headers";
+import { randomBytes } from "crypto";
 import { db, auth } from "@/firebase/admin";
 import { generateQuestionsAndRubrics } from "@/lib/llm/groq-template";
 
@@ -129,6 +130,43 @@ export async function updateTemplate(
     return {
       success: false,
       message: e instanceof Error ? e.message : "Failed to update template",
+    };
+  }
+}
+
+export async function mintInviteToken(
+  templateId: string,
+  candidateEmail?: string,
+): Promise<ActionResult<{ token: string; expiresAt: string }>> {
+  try {
+    const hrUid = await requireHrUid();
+    const t = await getTemplate(templateId);
+    if (!t) return { success: false, message: "Template not found" };
+
+    const token = randomBytes(32).toString("base64url");
+    const expiresAt = new Date(
+      Date.now() + 14 * 24 * 60 * 60 * 1000,
+    ).toISOString();
+
+    await db
+      .collection("invites")
+      .doc(token)
+      .set({
+        token,
+        templateId,
+        hrUid,
+        candidateEmail: candidateEmail ?? null,
+        status: "pending" as const,
+        expiresAt,
+        createdAt: new Date().toISOString(),
+      });
+
+    return { success: true, data: { token, expiresAt } };
+  } catch (e) {
+    console.error("mintInviteToken failed:", e);
+    return {
+      success: false,
+      message: e instanceof Error ? e.message : "Failed to mint invite",
     };
   }
 }
