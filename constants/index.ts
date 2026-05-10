@@ -169,3 +169,16 @@ export const dummyInterviews: Interview[] = [
     createdAt: '2024-03-14T15:30:00Z',
   },
 ];
+
+// Per-question rubric expected from Phase-1 generation.
+export const rubricBaseSchema = z.object({
+  expectedConcepts: z.array(z.string()).min(2).max(8),
+  expectedSpecifics: z.array(z.string()).min(1).max(6),
+  depth: z.enum(["foundational", "intermediate", "advanced"]),
+  priority: z.union([z.literal(1), z.literal(2), z.literal(3)]),
+});
+
+export const templateGenerationSchema = z.object({
+  questions: z.array(z.string()).min(5).max(12),
+  rubrics: z.array(rubricBaseSchema).min(5).max(12),
+});
