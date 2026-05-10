@@ -1,5 +1,6 @@
 import Link from "next/link";
-import Image from "next/image";
+import { redirect } from "next/navigation";
+import { ArrowRight, Mic, Sparkles } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import InterviewCard from "@/components/InterviewCard";
@@ -12,47 +13,57 @@ import {
 
 async function Home() {
   const user = await getCurrentUser();
+  if (!user) redirect("/sign-in");
 
   const [userInterviews, allInterview] = await Promise.all([
-    getInterviewsByUserId(user?.id!),
-    getLatestInterviews({ userId: user?.id! }),
+    getInterviewsByUserId(user.id),
+    getLatestInterviews({ userId: user.id }),
   ]);
 
-  const hasPastInterviews = userInterviews?.length! > 0;
-  const hasUpcomingInterviews = allInterview?.length! > 0;
+  const hasPastInterviews = (userInterviews?.length ?? 0) > 0;
+  const hasUpcomingInterviews = (allInterview?.length ?? 0) > 0;
 
   return (
     <>
+      {/* Hero */}
       <section className="card-cta">
-        <div className="flex flex-col gap-6 max-w-lg">
-          <h2>Get Interview-Ready with AI-Powered Practice & Feedback</h2>
-          <p className="text-lg">
-            Practice real interview questions & get instant feedback
+        <div className="relative z-10 flex flex-col gap-4 max-w-lg">
+          <span className="inline-flex items-center gap-1.5 self-start text-xs font-medium px-2.5 py-1 rounded-full bg-accent-soft border border-accent-border text-fg-strong">
+            <Sparkles className="size-3" />
+            Powered by Groq Llama-3.3 70B
+          </span>
+          <h1 className="text-3xl md:text-4xl font-semibold tracking-tight text-fg-strong leading-tight">
+            Practice interviews with an AI that listens, asks, and scores you.
+          </h1>
+          <p className="text-fg-muted">
+            Generate a role-specific interview, talk to it live, and get
+            structured feedback in seconds.
           </p>
-
-          <Button asChild className="btn-primary max-sm:w-full">
-            <Link href="/interview">Start an Interview</Link>
+          <Button
+            asChild
+            size="lg"
+            className="self-start gap-2 mt-1"
+          >
+            <Link href="/interview">
+              <Mic className="size-4" />
+              Start an interview
+            </Link>
           </Button>
         </div>
-
-        <Image
-          src="/robot.png"
-          alt="robo-dude"
-          width={400}
-          height={400}
-          className="max-sm:hidden"
-        />
       </section>
 
-      <section className="flex flex-col gap-6 mt-8">
-        <h2>Your Interviews</h2>
-
+      {/* Your interviews */}
+      <section className="flex flex-col gap-5">
+        <SectionHeader
+          title="Your interviews"
+          subtitle="Interviews you've generated. Tap one to take it or to view feedback."
+        />
         <div className="interviews-section">
           {hasPastInterviews ? (
-            userInterviews?.map((interview) => (
+            userInterviews!.map((interview) => (
               <InterviewCard
                 key={interview.id}
-                userId={user?.id}
+                userId={user.id}
                 interviewId={interview.id}
                 role={interview.role}
                 type={interview.type}
@@ -61,20 +72,26 @@ async function Home() {
               />
             ))
           ) : (
-            <p>You haven&apos;t taken any interviews yet</p>
+            <EmptyState
+              title="No interviews yet"
+              description="Generate your first interview from the button above."
+            />
           )}
         </div>
       </section>
 
-      <section className="flex flex-col gap-6 mt-8">
-        <h2>Take Interviews</h2>
-
+      {/* Take from others */}
+      <section className="flex flex-col gap-5">
+        <SectionHeader
+          title="Browse interviews"
+          subtitle="Interviews other people have generated. Take any of them as a fresh practice run."
+        />
         <div className="interviews-section">
           {hasUpcomingInterviews ? (
-            allInterview?.map((interview) => (
+            allInterview!.map((interview) => (
               <InterviewCard
                 key={interview.id}
-                userId={user?.id}
+                userId={user.id}
                 interviewId={interview.id}
                 role={interview.role}
                 type={interview.type}
@@ -83,11 +100,52 @@ async function Home() {
               />
             ))
           ) : (
-            <p>There are no interviews available</p>
+            <EmptyState
+              title="Nothing to browse yet"
+              description="When other users generate interviews, they'll show up here."
+            />
           )}
         </div>
       </section>
     </>
+  );
+}
+
+function SectionHeader({
+  title,
+  subtitle,
+}: {
+  title: string;
+  subtitle: string;
+}) {
+  return (
+    <div className="flex flex-col gap-1">
+      <h2 className="text-xl md:text-2xl font-semibold tracking-tight text-fg-strong">
+        {title}
+      </h2>
+      <p className="text-fg-muted text-sm">{subtitle}</p>
+    </div>
+  );
+}
+
+function EmptyState({
+  title,
+  description,
+}: {
+  title: string;
+  description: string;
+}) {
+  return (
+    <div className="col-span-full rounded-xl border border-dashed border-border-default bg-surface-1/40 px-6 py-10 flex flex-col items-center justify-center gap-2 text-center">
+      <h3 className="text-base font-semibold text-fg-strong">{title}</h3>
+      <p className="text-sm text-fg-muted max-w-md">{description}</p>
+      <Button asChild size="sm" variant="ghost" className="mt-2 gap-1.5">
+        <Link href="/interview">
+          Generate one
+          <ArrowRight className="size-3.5" />
+        </Link>
+      </Button>
+    </div>
   );
 }
 

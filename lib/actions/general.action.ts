@@ -108,6 +108,17 @@ export async function getLatestInterviews(
 ): Promise<Interview[] | null> {
   const { userId, limit = 20 } = params;
 
+  // Guard at the boundary: Firestore .where('userId', '!=', undefined) throws
+  // 'Cannot use "undefined" as a Firestore value'. The (root) layout's
+  // redirect-on-unauth and the page's data fetch run in parallel in App
+  // Router, so the page can still call this with a null user id before the
+  // redirect lands. Returning null is the same shape the caller already
+  // handles (`allInterview?.length! > 0`).
+  if (!userId) {
+    console.error('getLatestInterviews: userId is undefined');
+    return null;
+  }
+
   const interviews = await db
     .collection('interviews')
     .orderBy('createdAt', 'desc')

@@ -1,8 +1,8 @@
 import dayjs from "dayjs";
 import Link from "next/link";
 import Image from "next/image";
+import { ArrowRight, Calendar, Star } from "lucide-react";
 
-import { Button } from "./ui/button";
 import DisplayTechIcons from "@/components/DisplayTechIcons";
 
 import { cn, getRandomInterviewCover } from "@/lib/utils";
@@ -19,92 +19,86 @@ const InterviewCard = async ({
   const feedback =
     userId && interviewId
       ? await getFeedbackByInterviewId({
-        interviewId,
-        userId,
-      })
+          interviewId,
+          userId,
+        })
       : null;
 
   const normalizedType = /mix/gi.test(type) ? "Mixed" : type;
-
-  const badgeColor =
-    {
-      Behavioral: "bg-light-400",
-      Mixed: "bg-light-600",
-      Technical: "bg-light-800",
-    }[normalizedType] || "bg-light-600";
-
   const formattedDate = dayjs(
     feedback?.createdAt || createdAt || Date.now()
   ).format("MMM D, YYYY");
 
-  return (
-    <div className="card-border w-[360px] max-sm:w-full min-h-96">
-      <div className="card-interview">
-        <div>
-          {/* Type Badge */}
-          <div
-            className={cn(
-              "absolute top-0 right-0 w-fit px-4 py-2 rounded-bl-lg",
-              badgeColor
-            )}
-          >
-            <p className="badge-text ">{normalizedType}</p>
-          </div>
+  const href = feedback
+    ? `/interview/${interviewId}/feedback`
+    : `/interview/${interviewId}`;
 
-          {/* Cover Image */}
+  return (
+    <Link href={href} className="card-interview group">
+      <div className="flex flex-col gap-4">
+        {/* Header: cover + type chip */}
+        <div className="flex items-start justify-between gap-3">
           <Image
             src={getRandomInterviewCover()}
-            alt="cover-image"
-            width={90}
-            height={90}
-            className="rounded-full object-fit size-[90px]"
+            alt=""
+            width={56}
+            height={56}
+            className="rounded-lg object-cover size-14 ring-1 ring-border-default"
           />
-
-          {/* Interview Role */}
-          <h3 className="mt-5 capitalize">{role} Interview</h3>
-
-          {/* Date & Score */}
-          <div className="flex flex-row gap-5 mt-3">
-            <div className="flex flex-row gap-2">
-              <Image
-                src="/calendar.svg"
-                width={22}
-                height={22}
-                alt="calendar"
-              />
-              <p>{formattedDate}</p>
-            </div>
-
-            <div className="flex flex-row gap-2 items-center">
-              <Image src="/star.svg" width={22} height={22} alt="star" />
-              <p>{feedback?.totalScore || "---"}/100</p>
-            </div>
-          </div>
-
-          {/* Feedback or Placeholder Text */}
-          <p className="line-clamp-2 mt-5">
-            {feedback?.finalAssessment ||
-              "You haven't taken this interview yet. Take it now to improve your skills."}
-          </p>
+          <span
+            className={cn(
+              "text-xs font-medium px-2 py-1 rounded-md",
+              "bg-accent-soft border border-accent-border text-fg-strong",
+            )}
+          >
+            {normalizedType}
+          </span>
         </div>
 
-        <div className="flex flex-row justify-between">
-          <DisplayTechIcons techStack={techstack} />
+        {/* Title */}
+        <h3 className="text-base font-semibold text-fg-strong capitalize line-clamp-1">
+          {role} Interview
+        </h3>
 
-          <Button className="btn-primary">
-            <Link
-              href={
-                feedback
-                  ? `/interview/${interviewId}/feedback`
-                  : `/interview/${interviewId}`
-              }
-            >
-              {feedback ? "Check Feedback" : "View Interview"}
-            </Link>
-          </Button>
+        {/* Metadata */}
+        <div className="flex items-center gap-4 text-xs text-fg-muted">
+          <span className="inline-flex items-center gap-1.5">
+            <Calendar className="size-3.5" />
+            {formattedDate}
+          </span>
+          <span className="inline-flex items-center gap-1.5">
+            <Star
+              className={cn(
+                "size-3.5",
+                feedback ? "text-accent fill-accent" : "text-fg-subtle",
+              )}
+            />
+            {feedback?.totalScore ?? "—"}/100
+          </span>
         </div>
+
+        {/* Description / final assessment */}
+        <p className="text-sm text-fg-default leading-relaxed line-clamp-2">
+          {feedback?.finalAssessment ||
+            "You haven't taken this interview yet. Take it now to practice and get scored feedback."}
+        </p>
       </div>
-    </div>
+
+      {/* Footer: tech icons + CTA */}
+      <div className="flex items-center justify-between gap-3 pt-4 border-t border-border-subtle">
+        <DisplayTechIcons techStack={techstack} />
+        <span
+          className={cn(
+            "inline-flex items-center gap-1 text-sm font-medium",
+            feedback ? "text-fg-default" : "text-accent",
+            "group-hover:gap-2 transition-all",
+          )}
+        >
+          {feedback ? "View feedback" : "Take it"}
+          <ArrowRight className="size-3.5" />
+        </span>
+      </div>
+    </Link>
   );
 };
 
