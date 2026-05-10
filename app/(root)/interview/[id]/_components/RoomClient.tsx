@@ -12,19 +12,13 @@ import {
   type RemoteTrackPublication,
 } from "livekit-client";
 import { toast } from "sonner";
-import { PhoneOff, User } from "lucide-react";
+import { Bot, Mic, MicOff, PhoneOff } from "lucide-react";
 
 import { mintInterviewRoomToken } from "@/lib/actions/interview.action";
 import { createFeedback } from "@/lib/actions/general.action";
 import { cn } from "@/lib/utils";
 import PreCallReadyScreen from "./PreCallReadyScreen";
 
-// If the AI agent worker isn't running (or is misconfigured), the LiveKit
-// room connect still succeeds — the browser just sits in "Connected" with
-// no remote participant ever joining. 10s is comfortably above the cold-
-// start window for the Python agent dispatcher under normal conditions
-// while still being short enough that the user gets actionable feedback
-// instead of a silent stall.
 const AGENT_JOIN_TIMEOUT_MS = 10_000;
 
 type ConnectionState =
@@ -40,10 +34,6 @@ type Props = {
   userId: string;
   userName: string;
   feedbackId?: string;
-  // Briefing data shown on the pre-call ready screen.
-  questions: string[];
-  type: string;
-  role: string;
 };
 
 type Turn = { role: "user" | "assistant"; content: string; index: number };
@@ -53,17 +43,11 @@ export default function RoomClient({
   userId,
   userName,
   feedbackId,
-  questions,
-  type,
-  role,
 }: Props) {
   const router = useRouter();
   const roomRef = useRef<Room | null>(null);
   const audioElRef = useRef<HTMLAudioElement | null>(null);
   const agentWatchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Latches once we either start a feedback request or decide not to (e.g. the
-  // watchdog tripped). Both endCall() and the Disconnected event handler check
-  // this so the feedback flow can never run twice for the same session.
   const feedbackAttemptedRef = useRef(false);
 
   const [connectionState, setConnectionState] =
@@ -72,6 +56,7 @@ export default function RoomClient({
   const [turns, setTurns] = useState<Turn[]>([]);
   const [agentSpeaking, setAgentSpeaking] = useState(false);
   const [elapsedMs, setElapsedMs] = useState(0);
+  const [micEnabled, setMicEnabled] = useState(true);
 
   // Tick a duration counter while the call is connected. Scoped to "active
   // call" only — pauses on reconnecting, resets on a fresh call.
@@ -84,8 +69,6 @@ export default function RoomClient({
   }, [connectionState]);
 
   async function runFeedbackFlow() {
-    // Idempotent: only the first caller (endCall, Disconnected handler, etc.)
-    // wins. Subsequent calls bail out so we never double-fire createFeedback.
     if (feedbackAttemptedRef.current) return;
     feedbackAttemptedRef.current = true;
 
@@ -97,10 +80,6 @@ export default function RoomClient({
     if (result.success && result.feedbackId) {
       router.push(`/interview/${interviewId}/feedback`);
     } else {
-      // Surface why we're bouncing the user back to the dashboard instead of
-      // the feedback page. Common cause: no turns persisted (agent crashed,
-      // or call ended before any conversation happened) — see createFeedback
-      // in lib/actions/general.action.ts.
       toast.error("Couldn't generate feedback for this interview.", {
         description:
           "We couldn't build a feedback report from this session. " +
@@ -124,15 +103,13 @@ export default function RoomClient({
     setErrorMessage(null);
     setTurns([]);
     setElapsedMs(0);
-    // New session → clear the latch so a fresh feedback attempt can run.
+    setMicEnabled(true);
     feedbackAttemptedRef.current = false;
 
     const result = await mintInterviewRoomToken(interviewId);
     if (!result.success) {
       setConnectionState("error");
       setErrorMessage(result.message);
-      // Token mint failed → no room → no possible feedback. Latch so a
-      // later cleanup-disconnect doesn't spuriously call createFeedback.
       feedbackAttemptedRef.current = true;
       return;
     }
@@ -142,16 +119,12 @@ export default function RoomClient({
 
     room.on(RoomEvent.Connected, () => {
       setConnectionState("connected");
-      // Watchdog: if the AI agent doesn't join within AGENT_JOIN_TIMEOUT_MS,
-      // surface an error. Without this, the user sees "Connected" forever
-      // when the Python agent worker isn't running.
       agentWatchdogRef.current = setTimeout(() => {
         setConnectionState("error");
         setErrorMessage(
           "AI interviewer did not join. The interview-agent worker may not be running. " +
             "Try again in a moment or check the agent service logs.",
         );
-        // No agent ever joined → no conversation → no feedback to generate.
         feedbackAttemptedRef.current = true;
         roomRef.current?.disconnect();
       }, AGENT_JOIN_TIMEOUT_MS);
@@ -214,6 +187,18 @@ export default function RoomClient({
     }
   }
 
+  async function toggleMic() {
+    const next = !micEnabled;
+    setMicEnabled(next);
+    try {
+      await roomRef.current?.localParticipant.setMicrophoneEnabled(next);
+    } catch (err) {
+      console.error("Failed to toggle mic:", err);
+      // Roll back the optimistic state on failure so the UI reflects reality.
+      setMicEnabled(!next);
+    }
+  }
+
   async function endCall() {
     if (agentWatchdogRef.current) {
       clearTimeout(agentWatchdogRef.current);
@@ -245,28 +230,17 @@ export default function RoomClient({
     connectionState === "error" ||
     connectionState === "connecting";
 
-  // Audio sink is mounted unconditionally at the top so the ref points to
-  // the same DOM node across pre-call <-> in-call view switches. The
-  // TrackSubscribed handler captures audioElRef.current at attach time,
-  // so unmounting/remounting the audio element under it would silence
-  // the agent.
+  // Audio sink is mounted unconditionally so the ref stays stable across
+  // pre-call <-> in-call view switches.
   const audioSink = (
     <audio ref={audioElRef} autoPlay playsInline className="hidden" />
   );
 
-  // Pre-call: ready screen with briefing + mic test. Also shown after the
-  // call ends or errors so the user can retry without losing context.
-  // 'connecting' falls in here too — the disabled "Connecting…" CTA on
-  // the ready screen keeps the briefing visible during the brief connect
-  // window instead of flashing an empty in-call view.
   if (isPreCall) {
     return (
       <>
         {audioSink}
         <PreCallReadyScreen
-          role={role}
-          type={type}
-          questionsCount={questions.length}
           starting={connectionState === "connecting"}
           retry={connectionState === "ended" || connectionState === "error"}
           errorMessage={errorMessage}
@@ -276,11 +250,18 @@ export default function RoomClient({
     );
   }
 
+  // ---------------------------------------------------------------------
+  // In-call view — Google Meet pattern.
+  // Two equal video-aspect tiles, the active speaker gets an accent ring
+  // and breathing glow. Bottom control bar handles mic toggle + End.
+  // No transcript on screen (you listen, you don't read), no question
+  // counter (you don't pace yourself), no metadata header (you focus).
+  // ---------------------------------------------------------------------
   return (
     <div className="flex flex-col gap-6">
       {audioSink}
 
-      {/* Status bar: state chip + duration */}
+      {/* Minimal status row: Live indicator + duration. Nothing else. */}
       <div className="flex items-center justify-between">
         <StatusChip state={connectionState} />
         {isLive && (
@@ -290,59 +271,65 @@ export default function RoomClient({
         )}
       </div>
 
-      {/* Centerpiece: the AI avatar dominates the screen so the user
-          listens (no transcript to read). User self-view sits smaller
-          alongside on desktop or below on mobile, like a Zoom self-view.
-          We deliberately don't render the live transcript — reading the
-          AI's text-as-it-arrives breaks the rhythm of a real interview.
-          The full transcript lands on the feedback page after the call. */}
-      <div className="grid grid-cols-1 md:grid-cols-[1fr_auto] gap-4 items-center">
-        <ParticipantCard
+      {/* Two-tile video grid. Equal sizes, 16:9 aspect ratio. */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <ParticipantTile
           variant="agent"
           name="AI Interviewer"
-          subtitle={
-            isLive
-              ? agentSpeaking
-                ? "Speaking"
-                : "Listening"
-              : ""
-          }
-          imageSrc="/ai-avatar.png"
-          imageAlt="AI Interviewer"
+          subtitle={isLive ? (agentSpeaking ? "Speaking" : "Listening") : ""}
           speaking={agentSpeaking && isLive}
-          isLive={isLive}
-          size="large"
         />
-        <ParticipantCard
+        <ParticipantTile
           variant="user"
           name={userName}
-          subtitle={isLive ? (agentSpeaking ? "Listening" : "Speaking") : ""}
-          imageSrc="/user-avatar.png"
-          imageAlt={userName}
-          speaking={!agentSpeaking && isLive}
-          isLive={isLive}
-          size="small"
+          subtitle={
+            isLive
+              ? !micEnabled
+                ? "Muted"
+                : agentSpeaking
+                  ? "Listening"
+                  : "Speaking"
+              : ""
+          }
+          speaking={!agentSpeaking && isLive && micEnabled}
+          muted={!micEnabled}
         />
       </div>
 
-      {/* Call control — only End in-call. Start is on the pre-call ready
-          screen, never reachable here. */}
+      {/* Bottom control bar. Mic toggle + End. Settings live in the nav. */}
       <div className="flex flex-col items-center gap-3 mt-2">
-        <button
-          type="button"
-          onClick={endCall}
-          className={cn(
-            "inline-flex items-center justify-center gap-2 px-8 py-3.5 text-sm font-semibold",
-            "rounded-full bg-destructive-200 text-white transition-all",
-            "hover:bg-destructive-100 active:scale-[0.98]",
-            "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-destructive-100 focus-visible:ring-offset-2 focus-visible:ring-offset-surface-0",
-            "shadow-[0_0_0_1px_oklch(0.66_0.22_25_/_30%),0_8px_24px_-8px_oklch(0.66_0.22_25_/_50%)]",
-            "min-w-40",
-          )}
-        >
-          <PhoneOff className="size-4" />
-          End interview
-        </button>
+        <div className="inline-flex items-center gap-2 p-1.5 rounded-full bg-surface-1 border border-border-default">
+          <ControlButton
+            label={micEnabled ? "Mute microphone" : "Unmute microphone"}
+            onClick={toggleMic}
+            tone={micEnabled ? "neutral" : "warning"}
+          >
+            {micEnabled ? (
+              <Mic className="size-5" />
+            ) : (
+              <MicOff className="size-5" />
+            )}
+          </ControlButton>
+
+          {/* Visual divider */}
+          <span className="h-6 w-px bg-border-default" aria-hidden />
+
+          <button
+            type="button"
+            onClick={endCall}
+            aria-label="End interview"
+            className={cn(
+              "inline-flex items-center justify-center gap-2 h-11 px-5 rounded-full",
+              "bg-destructive-200 text-white font-semibold text-sm",
+              "transition-all hover:bg-destructive-100 active:scale-[0.97]",
+              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-destructive-100 focus-visible:ring-offset-2 focus-visible:ring-offset-surface-0",
+              "shadow-[0_0_0_1px_oklch(0.66_0.22_25_/_30%)]",
+            )}
+          >
+            <PhoneOff className="size-4" />
+            End
+          </button>
+        </div>
 
         {errorMessage && (
           <p className="text-sm text-destructive-100 text-center max-w-md">
@@ -358,98 +345,163 @@ export default function RoomClient({
  * Sub-components
  * ------------------------------------------------------------------------- */
 
-function ParticipantCard({
+function ParticipantTile({
   variant,
   name,
   subtitle,
-  imageSrc,
-  imageAlt,
   speaking,
-  isLive,
-  size = "large",
+  muted,
 }: {
   variant: "agent" | "user";
   name: string;
   subtitle: string;
-  imageSrc: string;
-  imageAlt: string;
   speaking: boolean;
-  isLive: boolean;
-  size?: "large" | "small";
+  muted?: boolean;
 }) {
-  const isSmall = size === "small";
   return (
     <div
       className={cn(
-        "relative overflow-hidden rounded-xl bg-surface-1 border border-border-default",
-        "flex flex-col items-center justify-center",
-        isSmall ? "gap-2.5 p-5 min-h-[200px] md:w-56" : "gap-5 p-10 min-h-[420px]",
-        // Subtle accent halo on top — strongest for the agent card to anchor
-        // visual attention; lighter for the user card.
-        "before:absolute before:inset-0 before:pointer-events-none",
-        variant === "agent"
-          ? "before:bg-[radial-gradient(ellipse_70%_45%_at_50%_0%,var(--color-accent-soft),transparent)]"
-          : "before:bg-[radial-gradient(ellipse_60%_35%_at_50%_0%,oklch(1_0_0_/_4%),transparent)]",
-        // Speaking state amplifies the halo so it's obvious who's talking
-        speaking && "ring-1 ring-accent",
+        "relative aspect-video rounded-xl overflow-hidden",
+        "bg-surface-1 border transition-all duration-200",
+        // Active-speaker ring + accent glow.
+        speaking
+          ? "border-accent shadow-[0_0_0_2px_var(--color-accent-soft),0_0_40px_-8px_var(--color-accent-soft)]"
+          : "border-border-default",
       )}
     >
-      <div className="relative z-10">
-        {/* Pulse rings while speaking. Two rings staggered for a soft
-            breathing effect rather than a single hard ping. */}
-        {speaking && (
-          <>
-            <span className="absolute inset-0 rounded-full bg-accent/20 animate-ping" />
-            <span
-              className="absolute inset-0 rounded-full bg-accent/30 animate-ping"
-              style={{ animationDelay: "0.4s" }}
-            />
-          </>
+      {/* Subtle radial halo so the tile has depth */}
+      <div
+        className="absolute inset-0 pointer-events-none"
+        style={{
+          background:
+            variant === "agent"
+              ? "radial-gradient(ellipse 60% 80% at 50% 100%, var(--color-accent-soft), transparent)"
+              : "radial-gradient(ellipse 60% 80% at 50% 100%, oklch(1 0 0 / 4%), transparent)",
+        }}
+      />
+
+      {/* Centered avatar */}
+      <div className="absolute inset-0 flex flex-col items-center justify-center gap-3">
+        {variant === "agent" ? (
+          <AgentAvatar speaking={speaking} />
+        ) : (
+          <UserAvatar muted={muted} />
         )}
-        <div
-          className={cn(
-            "relative flex items-center justify-center rounded-full overflow-hidden",
-            "bg-surface-2 border transition-colors",
-            isSmall ? "size-20" : "size-44",
-            speaking
-              ? "border-accent shadow-[0_0_0_4px_var(--color-accent-soft)]"
-              : "border-border-strong",
-          )}
-        >
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            src={imageSrc}
-            alt={imageAlt}
-            className="size-full object-cover"
-          />
-        </div>
       </div>
-      <div className="relative z-10 flex flex-col items-center gap-1">
-        <h3
+
+      {/* Name strip — bottom-left, like Google Meet */}
+      <div className="absolute left-3 bottom-3 right-3 flex items-center justify-between gap-2">
+        <span
           className={cn(
-            "font-semibold text-fg-strong",
-            isSmall ? "text-sm" : "text-lg",
+            "inline-flex items-center gap-2 px-2.5 py-1 rounded-md",
+            "bg-surface-0/70 backdrop-blur-sm border border-border-default",
+            "text-xs font-medium text-fg-strong max-w-full",
           )}
         >
-          {name}
-        </h3>
+          {muted && <MicOff className="size-3 text-destructive-100" />}
+          <span className="truncate">{name}</span>
+        </span>
         {subtitle && (
-          <p
+          <span
             className={cn(
-              "flex items-center gap-1.5 text-fg-muted",
-              isSmall ? "text-[11px]" : "text-xs",
+              "inline-flex items-center gap-1.5 px-2 py-1 rounded-md text-[11px] font-medium",
+              "bg-surface-0/70 backdrop-blur-sm border border-border-default",
+              speaking ? "text-fg-strong" : "text-fg-muted",
             )}
           >
-            {speaking ? (
+            {speaking && (
               <span className="size-1.5 rounded-full bg-accent animate-pulse" />
-            ) : isLive && variant === "user" ? (
-              <User className="size-3" />
-            ) : null}
+            )}
             {subtitle}
-          </p>
+          </span>
         )}
       </div>
     </div>
+  );
+}
+
+function AgentAvatar({ speaking }: { speaking: boolean }) {
+  return (
+    <div className="relative">
+      {/* Speaking pulse rings — only render when active so idle tile is clean */}
+      {speaking && (
+        <>
+          <span className="absolute inset-0 rounded-full bg-accent/15 animate-ping" />
+          <span
+            className="absolute inset-0 rounded-full bg-accent/25 animate-ping"
+            style={{ animationDelay: "0.4s" }}
+          />
+        </>
+      )}
+      <div
+        className={cn(
+          "relative flex items-center justify-center size-32 rounded-full",
+          "transition-all duration-300",
+          speaking
+            ? "bg-gradient-to-br from-accent to-accent-hover shadow-[0_0_60px_-10px_var(--color-accent)]"
+            : "bg-gradient-to-br from-surface-3 to-surface-2",
+          "border border-border-strong",
+        )}
+      >
+        <Bot
+          className={cn(
+            "size-16 transition-colors",
+            speaking ? "text-accent-fg" : "text-fg-default",
+          )}
+          strokeWidth={1.5}
+        />
+      </div>
+    </div>
+  );
+}
+
+function UserAvatar({ muted }: { muted?: boolean }) {
+  return (
+    <div className="relative">
+      <div
+        className={cn(
+          "relative flex items-center justify-center size-32 rounded-full overflow-hidden",
+          "bg-surface-2 border border-border-strong",
+          muted && "opacity-70",
+        )}
+      >
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          src="/user-avatar.png"
+          alt=""
+          className="size-full object-cover"
+        />
+      </div>
+    </div>
+  );
+}
+
+function ControlButton({
+  label,
+  onClick,
+  tone = "neutral",
+  children,
+}: {
+  label: string;
+  onClick: () => void;
+  tone?: "neutral" | "warning";
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-label={label}
+      className={cn(
+        "inline-flex items-center justify-center size-11 rounded-full transition-colors",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-surface-1",
+        tone === "warning"
+          ? "bg-destructive-100/15 border border-destructive-100/30 text-destructive-100 hover:bg-destructive-100/25"
+          : "bg-surface-2 border border-border-default text-fg-default hover:bg-surface-3 hover:text-fg-strong",
+      )}
+    >
+      {children}
+    </button>
   );
 }
 
