@@ -47,21 +47,6 @@
   --color-destructive-100: oklch(0.66 0.22 25);
   --color-destructive-200: oklch(0.58 0.22 25);
 
-  /* ---------- Legacy aliases (preserve so existing classes keep working) ---------- */
-  /* primary-100/200 used to be purple; now they map to accent so old usages
-     instantly inherit the new direction. */
-  --color-primary-100: oklch(0.62 0.20 256);
-  --color-primary-200: oklch(0.68 0.20 256);
-
-  --color-light-100: oklch(0.86 0 0);   /* body */
-  --color-light-400: oklch(0.65 0 0);   /* muted */
-  --color-light-600: oklch(0.50 0 0);   /* subtle */
-  --color-light-800: oklch(0.30 0 0);   /* very dim */
-
-  --color-dark-100: oklch(0.135 0.006 240); /* surface-0 */
-  --color-dark-200: oklch(0.215 0.008 240); /* surface-2 */
-  --color-dark-300: oklch(0.175 0.008 240); /* surface-1 */
-
   --font-mona-sans: 'Mona Sans', sans-serif;
 
   /* Subtle dot grid used as page background. Generated as data-uri so we
@@ -184,144 +169,11 @@
    ============================================================================= */
 
 @layer components {
-  /* ---------- Buttons ---------- */
-
-  .btn-call {
-    @apply inline-flex items-center justify-center gap-2 px-7 py-3 text-sm font-semibold leading-5
-           text-white bg-success-200 rounded-full transition-all
-           hover:bg-success-100 active:scale-[0.98]
-           focus-visible:ring-2 focus-visible:ring-success-100 focus-visible:ring-offset-2
-           focus-visible:ring-offset-surface-0
-           shadow-[0_0_0_1px_oklch(0.65_0.18_145_/_30%),0_8px_24px_-8px_oklch(0.65_0.18_145_/_50%)]
-           min-w-32 cursor-pointer;
-  }
-
-  .btn-disconnect {
-    @apply inline-flex items-center justify-center gap-2 px-7 py-3 text-sm font-semibold leading-5
-           text-white bg-destructive-200 rounded-full transition-all
-           hover:bg-destructive-100 active:scale-[0.98]
-           focus-visible:ring-2 focus-visible:ring-destructive-100 focus-visible:ring-offset-2
-           focus-visible:ring-offset-surface-0
-           shadow-[0_0_0_1px_oklch(0.66_0.22_25_/_30%),0_8px_24px_-8px_oklch(0.66_0.22_25_/_50%)]
-           min-w-32 cursor-pointer;
-  }
-
-  .btn-primary {
-    @apply inline-flex items-center justify-center gap-2 px-5 py-2.5 text-sm font-semibold
-           !text-accent-fg !bg-accent rounded-md transition-all
-           hover:!bg-accent-hover active:scale-[0.98]
-           focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2
-           focus-visible:ring-offset-surface-0
-           cursor-pointer min-h-10;
-  }
-
-  .btn-secondary {
-    @apply inline-flex items-center justify-center gap-2 px-5 py-2.5 text-sm font-semibold
-           !text-fg-strong !bg-surface-2 rounded-md transition-all
-           hover:!bg-surface-3 active:scale-[0.98]
-           border border-border-default
-           focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2
-           focus-visible:ring-offset-surface-0
-           cursor-pointer min-h-10;
-  }
-
-  .btn-upload {
-    @apply flex items-center justify-center gap-1.5 min-h-12 w-full px-5 rounded-md
-           bg-surface-2 border border-border-default cursor-pointer overflow-hidden
-           hover:bg-surface-3 transition-colors;
-  }
-
   /* ---------- Cards ---------- */
 
-  /* Hairline-bordered card on surface-1 — the new default. Replaces the old
-     gradient-bordered look. */
+  /* Hairline-bordered card on surface-1 — the design default. */
   .card-border {
     @apply rounded-xl bg-surface-1 border border-border-default;
-  }
-
-  .card {
-    @apply rounded-xl bg-surface-1 border border-border-default;
-  }
-
-  .card-content {
-    @apply flex flex-col p-6;
-  }
-
-  /* ---------- Forms ---------- */
-
-  .form {
-    @apply w-full;
-
-    .label {
-      @apply !text-fg-muted !font-medium !text-sm;
-    }
-
-    .input {
-      @apply !bg-surface-2 !rounded-md !min-h-11 !px-4 !text-fg-strong
-             !border !border-border-default
-             placeholder:!text-fg-subtle
-             focus-visible:!border-accent;
-    }
-
-    .btn {
-      @apply !w-full !bg-accent !text-accent-fg hover:!bg-accent-hover
-             !rounded-md !min-h-11 !font-semibold !px-5 cursor-pointer
-             active:scale-[0.99] transition-all;
-    }
-  }
-
-  /* ---------- Interview room (call view) ---------- */
-
-  .call-view {
-    @apply grid grid-cols-1 sm:grid-cols-2 gap-6 w-full;
-
-    h3 {
-      @apply text-center text-fg-strong mt-5 text-base font-medium;
-    }
-
-    .card-interviewer {
-      @apply flex flex-col items-center justify-center gap-3 p-7 h-[420px]
-             rounded-xl bg-surface-1 border border-border-default
-             relative overflow-hidden;
-    }
-
-    .card-interviewer::before {
-      content: '';
-      @apply absolute inset-0 pointer-events-none;
-      background: radial-gradient(
-        ellipse 60% 40% at 50% 0%,
-        var(--color-accent-soft),
-        transparent
-      );
-    }
-
-    .avatar {
-      @apply relative z-10 flex items-center justify-center rounded-full
-             size-[120px] bg-surface-2 border border-border-strong overflow-hidden;
-    }
-
-    .avatar .animate-speak {
-      @apply absolute inline-flex size-full animate-ping rounded-full
-             bg-accent opacity-40;
-    }
-
-    .card-border {
-      @apply rounded-xl bg-surface-1 border border-border-default
-             flex flex-col items-center justify-center gap-3 p-7 h-[420px]
-             max-md:hidden;
-    }
-  }
-
-  .transcript-border {
-    @apply rounded-xl bg-surface-1 border border-border-default w-full;
-
-    .transcript {
-      @apply rounded-xl px-6 py-4 flex items-center justify-center min-h-14;
-
-      p {
-        @apply text-base md:text-lg text-center text-fg-strong leading-relaxed;
-      }
-    }
   }
 
   /* ---------- Layouts ---------- */
@@ -364,31 +216,9 @@
            rounded-xl bg-surface-1 border border-border-default
            hover:border-border-strong transition-all
            hover:bg-surface-2/60;
-
-    .badge-text {
-      @apply text-xs font-semibold capitalize;
-    }
-  }
-
-  .interview-text {
-    @apply text-base text-fg-default leading-relaxed;
-  }
-
-  /* ---------- Feedback page ---------- */
-
-  .section-feedback {
-    @apply flex flex-col gap-8 max-w-4xl mx-auto px-4 text-base leading-relaxed;
-
-    .buttons {
-      @apply flex w-full justify-stretch gap-3 max-sm:flex-col;
-    }
   }
 
   /* ---------- Misc ---------- */
-
-  .progress {
-    @apply h-1.5 text-[5px] font-bold bg-accent rounded-full flex items-center justify-center;
-  }
 
   .tech-tooltip {
     @apply absolute bottom-full mb-1 hidden group-hover:flex
@@ -401,44 +231,8 @@
    Utility classes
    ============================================================================= */
 
-@utility flex-center {
-  @apply flex items-center justify-center;
-}
-
 @utility animate-fadeIn {
   animation: fadeIn 0.3s ease-out;
-}
-
-/* Kept for backwards compatibility — both gradients are now subtle, not loud */
-@utility dark-gradient {
-  background: linear-gradient(
-    180deg,
-    var(--color-surface-1) 0%,
-    var(--color-surface-0) 100%
-  );
-}
-
-@utility blue-gradient-dark {
-  background: linear-gradient(
-    180deg,
-    color-mix(in oklch, var(--color-accent) 8%, var(--color-surface-1)) 0%,
-    var(--color-surface-0) 100%
-  );
-}
-
-@utility blue-gradient {
-  background: linear-gradient(
-    135deg,
-    color-mix(in oklch, var(--color-accent) 25%, var(--color-surface-2)) 0%,
-    var(--color-surface-2) 100%
-  );
-}
-
-@utility border-gradient {
-  /* Old utility used to render a pseudo-double-border; we now use a flat
-     border on .card-border so this is essentially a no-op for layout. Kept so
-     legacy markup doesn't look weird. */
-  background: var(--color-surface-1);
 }
 
 @keyframes fadeIn {
