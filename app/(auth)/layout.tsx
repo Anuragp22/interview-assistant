@@ -3,26 +3,26 @@ import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 
 import { auth } from "@/firebase/admin";
+import { resolveRoleForSession } from "@/lib/role-resolution";
 
 const AuthLayout = async ({ children }: { children: ReactNode }) => {
-    // Only redirect *HR* users away from sign-in/sign-up — they belong on
-    // their dashboard. Candidates always land via /take/{token}, never via
-    // a generic auth page, so they should still see the form if they hit one
-    // by accident (or if their session is stale and they need to re-auth).
-    // Sending every authenticated user to "/" caused a redirect loop with
-    // app/(root)/page.tsx, which sends non-HR users straight back here.
+    // Only redirect HR users away from sign-in/sign-up. Candidates always
+    // arrive via /take/{token}, so leaving them on the form (if they ever
+    // hit it) is the right behavior. Sending every authenticated user to
+    // "/" caused a redirect loop with the root page.
     const cookie = (await cookies()).get("session")?.value;
+    let role: "hr" | "candidate" | null = null;
     if (cookie) {
         try {
             const decoded = await auth.verifySessionCookie(cookie, true);
-            const role = (decoded as Record<string, unknown>).role as
-                | string
-                | undefined;
-            if (role === "hr") redirect("/templates");
+            role = await resolveRoleForSession(decoded);
         } catch {
-            // invalid / expired cookie — fall through and render the form
+            role = null;
         }
     }
+    // redirect() throws NEXT_REDIRECT — keep it OUTSIDE the try/catch
+    // so the throw isn't swallowed.
+    if (role === "hr") redirect("/templates");
 
     return <div className="auth-layout">{children}</div>;
 };

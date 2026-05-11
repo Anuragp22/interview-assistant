@@ -6,6 +6,7 @@ import { redirect } from "next/navigation";
 import { auth } from "@/firebase/admin";
 import { cookies } from "next/headers";
 import LogoutButton from "@/components/LogoutButton";
+import { resolveRoleForSession } from "@/lib/role-resolution";
 
 const SESSION_COOKIE = "session";
 
@@ -13,17 +14,16 @@ const HrLayout = async ({ children }: { children: ReactNode }) => {
   const sessionCookie = (await cookies()).get(SESSION_COOKIE)?.value;
   if (!sessionCookie) redirect("/sign-in");
 
-  let role: string | undefined;
+  let role: "hr" | "candidate" | null = null;
   try {
     const decoded = await auth.verifySessionCookie(sessionCookie, true);
-    role = decoded.role as string | undefined;
+    role = await resolveRoleForSession(decoded);
   } catch {
-    redirect("/sign-in");
+    role = null;
   }
 
-  // Guard: this route group is HR-only. Candidates redirect to a candidate
-  // landing; signed-in users with no role get sent to sign-in (broken state
-  // we don't want them landing on an HR dashboard).
+  // redirect() throws NEXT_REDIRECT — keep it OUTSIDE the try/catch.
+  // This route group is HR-only; anyone else gets bounced to sign-in.
   if (role !== "hr") {
     redirect("/sign-in");
   }
