@@ -17,6 +17,14 @@ async function requireUid(): Promise<string> {
   return decoded.uid;
 }
 
+async function requireHrUid(): Promise<string> {
+  const cookie = (await cookies()).get(SESSION_COOKIE)?.value;
+  if (!cookie) throw new Error("Not signed in");
+  const decoded = await auth.verifySessionCookie(cookie, true);
+  if (decoded.role !== "hr") throw new Error("Not authorized (HR only)");
+  return decoded.uid;
+}
+
 /**
  * Atomically: validate invite is pending+unexpired, stamp candidate role,
  * mark invite redeemed, create session doc, return sessionId.
@@ -248,4 +256,34 @@ export async function pasteAndGroundCv(input: {
       message: e instanceof Error ? e.message : "Failed to process CV",
     };
   }
+}
+
+export async function getSessionsForTemplate(
+  templateId: string,
+): Promise<Array<Session & { candidateName: string; candidateEmail: string }>> {
+  const hrUid = await requireHrUid();
+  const tdoc = await db.collection("templates").doc(templateId).get();
+  if (!tdoc.exists || (tdoc.data() as Template).hrUid !== hrUid) {
+    return [];
+  }
+  const sessSnap = await db
+    .collection("sessions")
+    .where("templateId", "==", templateId)
+    .orderBy("createdAt", "desc")
+    .get();
+  const out: Array<Session & { candidateName: string; candidateEmail: string }> = [];
+  for (const d of sessSnap.docs) {
+    const s = d.data() as Session;
+    let candidateName = "Candidate";
+    let candidateEmail = "";
+    try {
+      const ur = await auth.getUser(s.candidateUid);
+      candidateName = ur.displayName ?? "Candidate";
+      candidateEmail = ur.email ?? "";
+    } catch {
+      // user deleted — fine
+    }
+    out.push({ ...s, candidateName, candidateEmail });
+  }
+  return out;
 }
