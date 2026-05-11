@@ -4,6 +4,7 @@ import { cookies } from "next/headers";
 import { randomBytes } from "crypto";
 import { db, auth } from "@/firebase/admin";
 import { generateQuestionsAndRubrics } from "@/lib/llm/groq-template";
+import { resolveRoleForSession } from "@/lib/role-resolution";
 
 const SESSION_COOKIE = "session";
 
@@ -11,7 +12,8 @@ async function requireHrUid(): Promise<string> {
   const cookie = (await cookies()).get(SESSION_COOKIE)?.value;
   if (!cookie) throw new Error("Not signed in");
   const decoded = await auth.verifySessionCookie(cookie, true);
-  if (decoded.role !== "hr") throw new Error("Not authorized (HR only)");
+  const role = await resolveRoleForSession(decoded);
+  if (role !== "hr") throw new Error("Not authorized (HR only)");
   return decoded.uid;
 }
 

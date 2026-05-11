@@ -2,6 +2,7 @@ import { NextRequest } from "next/server";
 import { cookies } from "next/headers";
 import { db, auth } from "@/firebase/admin";
 import { mintSessionRoomToken } from "@/lib/livekit";
+import { resolveRoleForSession } from "@/lib/role-resolution";
 
 export const runtime = "nodejs";
 
@@ -15,7 +16,7 @@ export async function POST(
     return Response.json({ success: false, error: "Not signed in" }, { status: 401 });
   }
   const decoded = await auth.verifySessionCookie(sessionCookie, true);
-  const role = (decoded as Record<string, unknown>).role as string | undefined;
+  const role = await resolveRoleForSession(decoded);
   if (role !== "candidate") {
     return Response.json({ success: false, error: "Candidate only" }, { status: 403 });
   }

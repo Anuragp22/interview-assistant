@@ -7,6 +7,7 @@ import { setUserRole } from "@/lib/admin-claims";
 import { extractResumeText, CvParseError } from "@/lib/cv-parse";
 import { regroundQuestions } from "@/lib/llm/groq-grounding";
 import { getStorage } from "firebase-admin/storage";
+import { resolveRoleForSession } from "@/lib/role-resolution";
 
 const SESSION_COOKIE = "session";
 
@@ -21,7 +22,8 @@ async function requireHrUid(): Promise<string> {
   const cookie = (await cookies()).get(SESSION_COOKIE)?.value;
   if (!cookie) throw new Error("Not signed in");
   const decoded = await auth.verifySessionCookie(cookie, true);
-  if (decoded.role !== "hr") throw new Error("Not authorized (HR only)");
+  const role = await resolveRoleForSession(decoded);
+  if (role !== "hr") throw new Error("Not authorized (HR only)");
   return decoded.uid;
 }
 
