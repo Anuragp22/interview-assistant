@@ -108,8 +108,11 @@
   --color-secondary-foreground: var(--secondary-foreground);
   --color-muted: var(--muted);
   --color-muted-foreground: var(--muted-foreground);
-  --color-accent: var(--accent);
-  --color-accent-foreground: var(--accent-foreground);
+  /* --color-accent / --color-accent-foreground are intentionally NOT remapped
+     here — the outer @theme already defines them as the brand electric blue.
+     The shadcn-style --accent / --accent-foreground vars above stay available
+     for any component that explicitly reads var(--accent), but Tailwind utilities
+     like bg-accent / text-accent / border-accent resolve to the brand color. */
   --color-destructive: var(--destructive);
   --color-border: var(--border);
   --color-input: var(--input);
