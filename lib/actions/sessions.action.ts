@@ -268,14 +268,17 @@ export async function getSessionsForTemplate(
   if (!tdoc.exists || (tdoc.data() as Template).hrUid !== hrUid) {
     return [];
   }
+  // Sort in memory to avoid the composite index (templateId asc,
+  // createdAt desc). One template has tens of candidates at most.
   const sessSnap = await db
     .collection("sessions")
     .where("templateId", "==", templateId)
-    .orderBy("createdAt", "desc")
     .get();
+  const sortedDocs = sessSnap.docs
+    .map((d) => d.data() as Session)
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   const out: Array<Session & { candidateName: string; candidateEmail: string }> = [];
-  for (const d of sessSnap.docs) {
-    const s = d.data() as Session;
+  for (const s of sortedDocs) {
     let candidateName = "Candidate";
     let candidateEmail = "";
     try {

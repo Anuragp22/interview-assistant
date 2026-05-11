@@ -61,12 +61,17 @@ export async function createTemplate(input: {
 
 export async function getTemplatesForCurrentHr(): Promise<Template[]> {
   const hrUid = await requireHrUid();
+  // Sort in memory rather than via Firestore .orderBy so we don't need a
+  // composite index (hrUid asc, createdAt desc). Each HR has tens of
+  // templates at most — the cost is negligible and skips a manual console
+  // step on every fresh deploy.
   const snap = await db
     .collection("templates")
     .where("hrUid", "==", hrUid)
-    .orderBy("createdAt", "desc")
     .get();
-  return snap.docs.map((d) => d.data() as Template);
+  return snap.docs
+    .map((d) => d.data() as Template)
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 
 export async function getTemplate(
