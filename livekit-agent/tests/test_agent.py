@@ -1,214 +1,81 @@
 """Tests for unit-testable helpers in agent.py.
 
 Live behavior of entrypoint() is verified via the manual smoke described
-in the plan's Task 7 Step 2 and Task 18.
+in the plan's Task 18 integration smoke.
+
+Removed in Task 18:
+- test_accepts_room_* — accepts_room() was removed; room filtering is now
+  done inline via parse_session_id_from_room (tested in test_session_data.py).
+- test_parse_metadata_* — parse_metadata() was removed; per-interview metadata
+  loading is replaced by per-session Firestore loading (session_data module).
+- test_extract_text_* — extract_text() was removed; content extraction is now
+  done inline in the _on_item handler in entrypoint().
+- test_persist_turns_hook_* — PersistTurnsHook class was removed; turn writes
+  are now done directly via TurnsRepository in the _on_item handler.
+- test_room_data_hook_* — RoomDataHook class was removed; the new entrypoint
+  does not publish room-data envelopes (moved to the Next.js read side).
 """
 
 import asyncio
-import json
-from datetime import datetime, timezone
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
-from interview_agent.agent import (
-    PersistTurnsHook,
-    RoomDataHook,
-    accepts_room,
-    drain_pending_tasks,
-    extract_text,
-    parse_metadata,
-)
-from interview_agent.messages import StatusMessage, TurnMessage, decode_message
-from interview_agent.persistence.models import InterviewContext, Turn
-
-
-def _ctx() -> InterviewContext:
-    return InterviewContext(
-        interview_id="iv1",
-        user_id="u1",
-        user_name="Alex",
-        type="Technical",
-        questions=["What is React?"],
-    )
-
-
-def _turn(role: str = "user", content: str = "hi", index: int = 0) -> Turn:
-    now = datetime.now(timezone.utc)
-    return Turn(role=role, content=content, started_at=now, ended_at=now, index=index)
-
-
-def test_accepts_room_true_for_interview_prefix():
-    assert accepts_room("interview-foo") is True
-    assert accepts_room("interview-iv1-u1") is True
-
-
-def test_accepts_room_false_for_other_names():
-    assert accepts_room("lobby") is False
-    assert accepts_room("") is False
-    assert accepts_room("INTERVIEW-foo") is False  # case-sensitive
-
-
-def test_parse_metadata_happy_path():
-    raw = json.dumps({
-        "interviewId": "iv1",
-        "userId": "u1",
-        "userName": "Alex",
-        "type": "Technical",
-        "questions": ["Q1", "Q2"],
-    })
-    ctx = parse_metadata(raw)
-    assert ctx.interview_id == "iv1"
-    assert ctx.user_id == "u1"
-    assert ctx.user_name == "Alex"
-    assert ctx.type == "Technical"
-    assert ctx.questions == ["Q1", "Q2"]
-
-
-def test_parse_metadata_handles_missing_questions_list():
-    raw = json.dumps({
-        "interviewId": "iv1",
-        "userId": "u1",
-        "userName": "Alex",
-        "type": "Behavioral",
-    })
-    ctx = parse_metadata(raw)
-    assert ctx.questions == []
-
-
-def test_parse_metadata_raises_on_empty_string():
-    with pytest.raises(ValueError):
-        parse_metadata("")
-
-
-def test_parse_metadata_raises_on_none():
-    with pytest.raises(ValueError):
-        parse_metadata(None)
-
-
-def test_extract_text_joins_string_content_only():
-    """ChatMessage content can mix strings and other variants; we keep strings only."""
-    item = MagicMock()
-    item.content = ["Hello ", "world"]
-    assert extract_text(item) == "Hello world"
-
-
-def test_extract_text_skips_non_string_content():
-    item = MagicMock()
-    item.content = ["text ", 42, None, "more"]
-    assert extract_text(item) == "text more"
-
-
-@pytest.mark.asyncio
-async def test_persist_turns_hook_writes_user_and_assistant_turns():
-    repo = MagicMock()
-    hook = PersistTurnsHook(repo)
-    ctx = _ctx()
-
-    await hook.on_user_turn_committed(ctx, _turn("user", "answer", 0))
-    await hook.on_assistant_turn_committed(ctx, _turn("assistant", "next q", 1))
-
-    assert repo.append_turn.call_count == 2
-    assert repo.append_turn.call_args_list[0].args[0] is ctx
-    assert repo.append_turn.call_args_list[0].args[1].role == "user"
-    assert repo.append_turn.call_args_list[1].args[1].role == "assistant"
-
-
-@pytest.mark.asyncio
-async def test_room_data_hook_publishes_status_started_with_correct_envelope():
-    room = MagicMock()
-    room.local_participant.publish_data = AsyncMock(return_value=None)
-
-    hook = RoomDataHook(room)
-    ctx = _ctx()
-    await hook.on_interview_started(ctx)
-
-    assert room.local_participant.publish_data.call_count == 1
-    call = room.local_participant.publish_data.call_args
-    payload = call.args[0]
-    decoded = decode_message(payload)
-    assert isinstance(decoded, StatusMessage)
-    assert decoded.state == "interview_started"
-    assert call.kwargs.get("reliable") is True
-
-
-@pytest.mark.asyncio
-async def test_room_data_hook_publishes_turn_messages_for_user_and_assistant():
-    room = MagicMock()
-    room.local_participant.publish_data = AsyncMock(return_value=None)
-
-    hook = RoomDataHook(room)
-    ctx = _ctx()
-
-    await hook.on_user_turn_committed(ctx, _turn("user", "answer", 0))
-    await hook.on_assistant_turn_committed(ctx, _turn("assistant", "next q", 1))
-
-    assert room.local_participant.publish_data.call_count == 2
-
-    user_payload = room.local_participant.publish_data.call_args_list[0].args[0]
-    assistant_payload = room.local_participant.publish_data.call_args_list[1].args[0]
-
-    user_msg = decode_message(user_payload)
-    assistant_msg = decode_message(assistant_payload)
-
-    assert isinstance(user_msg, TurnMessage)
-    assert user_msg.role == "user"
-    assert user_msg.content == "answer"
-    assert user_msg.index == 0
-
-    assert isinstance(assistant_msg, TurnMessage)
-    assert assistant_msg.role == "assistant"
-    assert assistant_msg.content == "next q"
-    assert assistant_msg.index == 1
-
-
-@pytest.mark.asyncio
-async def test_room_data_hook_publishes_status_ended():
-    room = MagicMock()
-    room.local_participant.publish_data = AsyncMock(return_value=None)
-
-    hook = RoomDataHook(room)
-    ctx = _ctx()
-    await hook.on_interview_ended(ctx)
-
-    payload = room.local_participant.publish_data.call_args.args[0]
-    decoded = decode_message(payload)
-    assert isinstance(decoded, StatusMessage)
-    assert decoded.state == "interview_ended"
-
-
-@pytest.mark.asyncio
-async def test_hook_tasks_can_be_drained():
-    """Smoke test for the asyncio.gather drain pattern used in entrypoint.
-
-    We can't unit-test entrypoint() end-to-end, but we can verify that the
-    track+drain pattern correctly waits for in-flight tasks.
-    """
-    completed: list[int] = []
-    pending: set[asyncio.Task[None]] = set()
-
-    async def slow_write(i: int) -> None:
-        await asyncio.sleep(0.01)
-        completed.append(i)
-
-    def track(coro: Any) -> None:
-        task = asyncio.create_task(coro)
-        pending.add(task)
-        task.add_done_callback(pending.discard)
-
-    track(slow_write(0))
-    track(slow_write(1))
-    track(slow_write(2))
-
-    await asyncio.gather(*pending)
-
-    assert completed == [0, 1, 2]
-    assert pending == set()
+from interview_agent.agent import GeneralInterviewer, drain_pending_tasks
 
 
 # ---------------------------------------------------------------------------
-# drain_pending_tasks (module-level helper extracted from entrypoint)
+# GeneralInterviewer
+# ---------------------------------------------------------------------------
+
+def test_general_interviewer_stores_index_and_session_id():
+    index = MagicMock()
+    agent = GeneralInterviewer(
+        instructions="You are an interviewer.",
+        index=index,
+        session_id="sess_abc",
+    )
+    assert agent._index is index
+    assert agent._session_id == "sess_abc"
+    assert agent.instructions == "You are an interviewer."
+
+
+def test_general_interviewer_has_lookup_cv_jd_tool():
+    """The agent must expose lookup_cv_jd as a function_tool."""
+    index = MagicMock()
+    agent = GeneralInterviewer(
+        instructions="instructions",
+        index=index,
+        session_id="sess_abc",
+    )
+    # livekit-agents stores registered tools via the class's _tools dict or
+    # exposes them via the agent's function_tools attribute. We verify the
+    # method is present and callable.
+    assert callable(getattr(agent, "lookup_cv_jd", None))
+
+
+@pytest.mark.asyncio
+async def test_lookup_cv_jd_delegates_to_query_index():
+    """lookup_cv_jd must call query_index with the agent's index and the query."""
+    from unittest.mock import AsyncMock, patch
+
+    index = MagicMock()
+    agent = GeneralInterviewer(
+        instructions="instructions",
+        index=index,
+        session_id="sess_abc",
+    )
+
+    with patch("interview_agent.agent.query_index", new=AsyncMock(return_value="chunk text")) as mock_qi:
+        result = await agent.lookup_cv_jd("What tech stack?")
+
+    mock_qi.assert_called_once_with(index, "What tech stack?", top_k=3)
+    assert result == "chunk text"
+
+
+# ---------------------------------------------------------------------------
+# drain_pending_tasks (module-level helper used in entrypoint)
 # ---------------------------------------------------------------------------
 
 

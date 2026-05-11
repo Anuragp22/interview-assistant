@@ -1,61 +1,54 @@
-"""Worker entrypoint: dispatches an AgentSession per interview room.
+"""LiveKit agent entrypoint for the v0.1 HR interview platform.
 
 Run with:
     uv run python -m interview_agent.agent dev      # local development
     uv run python -m interview_agent.agent start    # production
 
 Room-naming contract:
-    Rooms are named `interview-{interviewId}-{userId}`.
-    Participant metadata (set when the JWT is signed by Next.js) carries:
-        {
-            "interviewId": str,
-            "userId": str,
-            "userName": str,
-            "type": "Technical" | "Behavioral" | "Mixed",
-            "questions": list[str]
-        }
+    Rooms are named `session-{sessionId}`.
+    All per-call inputs (CV, JD, grounded questions, candidate name, role,
+    level) are loaded from Firestore at dispatch time using the session id
+    extracted from the room name.
 
 This module is the worker entrypoint, not unit-tested end-to-end. The
-unit-testable helpers (metadata parsing, hooks, room-name filter) are
-covered in test_agent.py. Live behavior is verified via Task 7 smoke
-(operator-run) and Task 18 e2e.
+unit-testable helpers (drain_pending_tasks, GeneralInterviewer) are
+covered in test_agent.py. Live behavior is verified via the Task 18
+integration smoke.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
-from livekit import rtc
 from livekit.agents import (
-    AutoSubscribe,
+    Agent,
+    AgentSession,
     JobContext,
     JobProcess,
     JobRequest,
     WorkerOptions,
     cli,
+    function_tool,
 )
 from livekit.agents.llm import ChatMessage
 from livekit.agents.voice.events import ConversationItemAddedEvent
-from livekit.plugins import silero
 
-from interview_agent.hooks import CompositeHooks, InterviewHooks
-from interview_agent.messages import (
-    StatusMessage,
-    TurnMessage,
-    encode_message,
-)
+from interview_agent.persona import GENERAL_PERSONA, render_system_prompt
 from interview_agent.persistence.firestore import TurnsRepository, init_firebase
-from interview_agent.persistence.models import InterviewContext, Turn
-from interview_agent.pipeline import build_agent, build_session
-from interview_agent.prompts import build_first_message
+from interview_agent.persistence.models import Turn
+from interview_agent.pipeline import build_session
+from interview_agent.rag import build_index, query_index
+from interview_agent.session_data import (
+    SESSION_ROOM_PREFIX,
+    load_session_data,
+    parse_session_id_from_room,
+)
 
 
 def _load_env() -> None:
@@ -90,14 +83,6 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("interview-agent")
 
 
-_ROOM_PREFIX = "interview-"
-
-
-def accepts_room(room_name: str) -> bool:
-    """Worker dispatch filter: only handle rooms whose name starts with `interview-`."""
-    return room_name.startswith(_ROOM_PREFIX)
-
-
 async def drain_pending_tasks(tasks: set[asyncio.Task[Any]]) -> None:
     """Await every task in ``tasks``; re-raise the first exception, if any.
 
@@ -130,83 +115,56 @@ async def drain_pending_tasks(tasks: set[asyncio.Task[Any]]) -> None:
         raise first_exc
 
 
-def parse_metadata(raw: str | None) -> InterviewContext:
-    """Parse the JWT-attached participant metadata into an InterviewContext."""
-    if not raw:
-        raise ValueError("Participant joined without metadata; cannot start interview.")
-    payload: dict[str, Any] = json.loads(raw)
-    return InterviewContext(
-        interview_id=payload["interviewId"],
-        user_id=payload["userId"],
-        user_name=payload["userName"],
-        type=payload["type"],
-        questions=list(payload.get("questions") or []),
+class GeneralInterviewer(Agent):
+    """v0.1 single Persona. Sub-project E adds sibling Agent subclasses."""
+
+    def __init__(self, *, instructions: str, index: Any, session_id: str) -> None:
+        super().__init__(instructions=instructions)
+        self._index = index
+        self._session_id = session_id
+
+    @function_tool
+    async def lookup_cv_jd(self, query: str) -> str:
+        """Look up specifics from the candidate's CV or the job description.
+        Use when you need a concrete fact (project name, tech, dates,
+        specific JD requirement) before asking a question or follow-up.
+        Returns the most relevant chunks from the indexed CV+JD."""
+        return await query_index(self._index, query, top_k=3)
+
+
+async def entrypoint(ctx: JobContext) -> None:
+    session_id = parse_session_id_from_room(ctx.room.name)
+    if session_id is None:
+        logger.warning("rejecting foreign room: %s", ctx.room.name)
+        return
+
+    await ctx.connect()
+    db = init_firebase()
+    session_data = load_session_data(db, session_id)
+
+    index = build_index(
+        cv_text=session_data.cv_extracted_text,
+        jd_text=session_data.job_description,
     )
 
+    instructions = render_system_prompt(
+        persona=GENERAL_PERSONA,
+        candidate_name=session_data.candidate_name,
+        role=session_data.role,
+        level=session_data.level,
+        questions_grounded=session_data.questions_grounded,
+    )
+    agent = GeneralInterviewer(
+        instructions=instructions,
+        index=index,
+        session_id=session_id,
+    )
 
-def extract_text(item: ChatMessage) -> str:
-    """Extract plain text from a ChatMessage's content list."""
-    return "".join(c for c in item.content if isinstance(c, str))
+    turns_repo = TurnsRepository(db, session_id=session_id)
+    vad = ctx.proc.userdata.get("vad")  # set by prewarm; may be None on first dispatch
+    voice_session = build_session(vad=vad)
 
-
-class PersistTurnsHook(InterviewHooks):
-    """Forward seam (b): writes every committed turn to Firestore."""
-
-    def __init__(self, repo: TurnsRepository) -> None:
-        self._repo = repo
-
-    async def on_user_turn_committed(self, ctx: InterviewContext, turn: Turn) -> None:
-        self._repo.append_turn(ctx, turn)
-
-    async def on_assistant_turn_committed(self, ctx: InterviewContext, turn: Turn) -> None:
-        self._repo.append_turn(ctx, turn)
-
-
-class RoomDataHook(InterviewHooks):
-    """Forward seam (a): publishes typed envelope messages to the room."""
-
-    def __init__(self, room: rtc.Room) -> None:
-        self._room = room
-
-    async def _publish(self, payload: bytes) -> None:
-        await self._room.local_participant.publish_data(payload, reliable=True)
-
-    async def on_interview_started(self, ctx: InterviewContext) -> None:
-        await self._publish(encode_message(StatusMessage(state="interview_started", at=time.time())))
-
-    async def on_user_turn_committed(self, ctx: InterviewContext, turn: Turn) -> None:
-        await self._publish(encode_message(TurnMessage(role="user", content=turn.content, index=turn.index)))
-
-    async def on_assistant_turn_committed(self, ctx: InterviewContext, turn: Turn) -> None:
-        await self._publish(encode_message(TurnMessage(role="assistant", content=turn.content, index=turn.index)))
-
-    async def on_interview_ended(self, ctx: InterviewContext) -> None:
-        await self._publish(encode_message(StatusMessage(state="interview_ended", at=time.time())))
-
-
-async def entrypoint(job: JobContext) -> None:
-    await job.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
-
-    participant = await job.wait_for_participant()
-    ctx = parse_metadata(participant.metadata)
-    logger.info("starting interview interview_id=%s user_id=%s", ctx.interview_id, ctx.user_id)
-
-    db = init_firebase()
-    repo = TurnsRepository(db)
-
-    hooks = CompositeHooks([
-        PersistTurnsHook(repo),
-        RoomDataHook(job.room),
-    ])
-
-    vad = job.proc.userdata.get("vad")  # set by prewarm; may be None on first dispatch before prewarm runs
-    session = build_session(vad=vad)
-    agent = build_agent(ctx)
-
-    # Wire conversation events to hooks. In 1.x both user and agent turns
-    # surface via `conversation_item_added`; we fan out by item.role.
-    turn_index = 0
-    pending_hook_tasks: set[asyncio.Task[None]] = set()
+    pending_hook_tasks: set[asyncio.Task[Any]] = set()
 
     def _track_task(coro: Any) -> None:
         """Schedule a hook coroutine and track it so we can drain on shutdown."""
@@ -214,71 +172,73 @@ async def entrypoint(job: JobContext) -> None:
         pending_hook_tasks.add(task)
         task.add_done_callback(pending_hook_tasks.discard)
 
-    @session.on("conversation_item_added")
+    turn_index = 0
+
+    @voice_session.on("conversation_item_added")
     def _on_item(event: ConversationItemAddedEvent) -> None:
         nonlocal turn_index
         item = event.item
         if not isinstance(item, ChatMessage):
-            return  # AgentHandoff or other variant — not our turn
-
-        text = extract_text(item)
-        if not text:
             return
-
+        content = "".join(c for c in item.content if isinstance(c, str))
+        if not content:
+            return
         now = datetime.now(timezone.utc)
-        if item.role == "user":
-            turn = Turn(role="user", content=text, started_at=now, ended_at=now, index=turn_index)
-            turn_index += 1
-            _track_task(hooks.on_user_turn_committed(ctx, turn))
-        elif item.role == "assistant":
-            turn = Turn(role="assistant", content=text, started_at=now, ended_at=now, index=turn_index)
-            turn_index += 1
-            _track_task(hooks.on_assistant_turn_committed(ctx, turn))
+        turn = Turn(
+            role=item.role,
+            content=content,
+            started_at=now,
+            ended_at=now,
+            index=turn_index,
+            metadata={
+                "personaId": GENERAL_PERSONA.id,
+                "modelId": "llama-3.3-70b-versatile",
+            },
+        )
+        # Increment after capturing the index for this turn.
+        _track_task(_write_turn(turns_repo, turn))
+        turn_index += 1
 
-    # Wait-for-end signaling
-    finished = asyncio.Event()
+    db.collection("sessions").document(session_id).update({
+        "status": "in-call",
+        "startedAt": datetime.now(timezone.utc).isoformat(),
+    })
 
-    @job.room.on("participant_disconnected")
-    def _on_left(p: rtc.RemoteParticipant) -> None:
-        if p.identity == participant.identity:
-            finished.set()
-
-    @job.room.on("disconnected")
-    def _on_room_dc(*_: Any) -> None:
-        finished.set()
-
-    await hooks.on_interview_started(ctx)
     try:
-        await session.start(agent=agent, room=job.room)
-        await session.say(build_first_message(ctx), allow_interruptions=True)
-        await finished.wait()
+        await voice_session.start(agent=agent, room=ctx.room)
     finally:
         try:
             await drain_pending_tasks(pending_hook_tasks)
         finally:
-            # ALWAYS run on_interview_ended + aclose, even if start/say/drain raised,
-            # so subscribers see a terminating event after on_interview_started fired.
-            await hooks.on_interview_ended(ctx)
-            await session.aclose()
+            await voice_session.aclose()
 
 
-async def _request(req: JobRequest) -> None:
-    if not accepts_room(req.room.name):
+async def _write_turn(repo: TurnsRepository, turn: Turn) -> None:
+    """Async wrapper around the synchronous Firestore write so it can be tracked."""
+    repo.append_turn(turn)
+
+
+async def _request_fnc(req: JobRequest) -> None:
+    if not req.room.name.startswith(SESSION_ROOM_PREFIX):
         await req.reject()
         return
-    await req.accept(name="interview-agent")
+    await req.accept(name="hr-interviewer")
 
 
 def prewarm(proc: JobProcess) -> None:
-    """Pre-load Silero VAD once per worker process; saves ~1s per dispatch."""
+    """Pre-load Silero VAD + fastembed model once per worker process."""
+    from livekit.plugins import silero
+    from interview_agent.rag import prewarm_fastembed
+
     proc.userdata["vad"] = silero.VAD.load()
+    prewarm_fastembed()
 
 
 if __name__ == "__main__":
     cli.run_app(
         WorkerOptions(
             entrypoint_fnc=entrypoint,
+            request_fnc=_request_fnc,
             prewarm_fnc=prewarm,
-            request_fnc=_request,
         )
     )

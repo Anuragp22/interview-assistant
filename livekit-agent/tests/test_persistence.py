@@ -14,33 +14,61 @@ from interview_agent.persistence.firestore import (
     TurnsRepository,
     _load_service_account_dict,
 )
-from interview_agent.persistence.models import InterviewContext, Turn
+from interview_agent.persistence.models import Turn
 
 
-def _ctx(interview_id: str = "iv_1", user_id: str = "u_1") -> InterviewContext:
-    return InterviewContext(
-        interview_id=interview_id,
-        user_id=user_id,
-        user_name="Test User",
-        type="Technical",
-        questions=["What is React?"],
-    )
+def _turn(
+    role: str = "user",
+    content: str = "Hello",
+    index: int = 0,
+    started: datetime | None = None,
+    ended: datetime | None = None,
+    metadata=None,
+) -> Turn:
+    started = started or datetime(2026, 5, 7, 10, 0, 0, tzinfo=timezone.utc)
+    ended = ended or datetime(2026, 5, 7, 10, 0, 2, tzinfo=timezone.utc)
+    return Turn(role=role, content=content, started_at=started, ended_at=ended, index=index, metadata=metadata)
 
 
-def test_append_turn_writes_to_correct_path():
+# ---------------------------------------------------------------------------
+# TurnsRepository constructor validation
+# ---------------------------------------------------------------------------
+
+def test_repository_requires_exactly_one_id():
     client = MagicMock()
-    repo = TurnsRepository(client)
-    ctx = _ctx()
+    with pytest.raises(ValueError, match="Exactly one"):
+        TurnsRepository(client)  # neither provided
 
-    turn = Turn(
-        role="user",
-        content="Hello",
-        started_at=datetime(2026, 5, 7, 10, 0, 0, tzinfo=timezone.utc),
-        ended_at=datetime(2026, 5, 7, 10, 0, 2, tzinfo=timezone.utc),
-        index=0,
-    )
 
-    repo.append_turn(ctx, turn)
+def test_repository_raises_when_both_ids_provided():
+    client = MagicMock()
+    with pytest.raises(ValueError, match="Exactly one"):
+        TurnsRepository(client, interview_id="iv1", session_id="sess1")
+
+
+def test_repository_accepts_interview_id_only():
+    client = MagicMock()
+    repo = TurnsRepository(client, interview_id="iv1")
+    assert repo._interview_id == "iv1"
+    assert repo._session_id is None
+
+
+def test_repository_accepts_session_id_only():
+    client = MagicMock()
+    repo = TurnsRepository(client, session_id="sess1")
+    assert repo._session_id == "sess1"
+    assert repo._interview_id is None
+
+
+# ---------------------------------------------------------------------------
+# interview_id path (backward compat) — writes to interviews/{id}/turns
+# ---------------------------------------------------------------------------
+
+def test_append_turn_writes_to_correct_interview_path():
+    client = MagicMock()
+    repo = TurnsRepository(client, interview_id="iv_1")
+
+    repo.append_turn(_turn())
 
     client.collection.assert_called_with("interviews")
     client.collection.return_value.document.assert_called_with("iv_1")
@@ -48,7 +76,7 @@ def test_append_turn_writes_to_correct_path():
             .collection.assert_called_with("turns"))
 
 
-def test_append_turn_serializes_fields():
+def test_append_turn_serializes_fields_via_interview_path():
     client = MagicMock()
     set_mock = (
         client.collection.return_value
@@ -57,13 +85,12 @@ def test_append_turn_serializes_fields():
               .document.return_value
               .set
     )
-    repo = TurnsRepository(client)
-    ctx = _ctx()
+    repo = TurnsRepository(client, interview_id="iv_1")
     started = datetime(2026, 5, 7, 10, 0, 0, tzinfo=timezone.utc)
     ended = datetime(2026, 5, 7, 10, 0, 2, tzinfo=timezone.utc)
     turn = Turn(role="assistant", content="Hi there", started_at=started, ended_at=ended, index=4)
 
-    repo.append_turn(ctx, turn)
+    repo.append_turn(turn)
 
     written = set_mock.call_args.args[0]
     assert written == {
@@ -76,7 +103,7 @@ def test_append_turn_serializes_fields():
     }
 
 
-def test_append_turn_preserves_metadata_dict():
+def test_append_turn_preserves_metadata_dict_via_interview_path():
     client = MagicMock()
     set_mock = (
         client.collection.return_value
@@ -85,27 +112,98 @@ def test_append_turn_preserves_metadata_dict():
               .document.return_value
               .set
     )
-    repo = TurnsRepository(client)
-    ctx = _ctx()
-    turn = Turn(
-        role="user",
-        content="answer",
-        started_at=datetime.now(timezone.utc),
-        ended_at=datetime.now(timezone.utc),
-        index=2,
-        metadata={"intent": "elaborate"},
-    )
+    repo = TurnsRepository(client, interview_id="iv_1")
+    turn = _turn(index=2, metadata={"intent": "elaborate"})
 
-    repo.append_turn(ctx, turn)
+    repo.append_turn(turn)
 
     written = set_mock.call_args.args[0]
     assert written["metadata"] == {"intent": "elaborate"}
 
 
+def test_append_turn_uses_index_as_doc_id_via_interview_path():
+    """Idempotency: the leaf document id is `str(index)`, not auto-generated."""
+    client = MagicMock()
+    repo = TurnsRepository(client, interview_id="iv_1")
+    turn = _turn(index=7)
+
+    repo.append_turn(turn)
+
+    turns_collection = client.collection.return_value.document.return_value.collection.return_value
+    turns_collection.document.assert_called_with("7")
+    turns_collection.document.return_value.set.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# session_id path (new v0.1 route) — writes to sessions/{id}/turns
+# ---------------------------------------------------------------------------
+
+def test_append_turn_writes_to_correct_session_path():
+    client = MagicMock()
+    repo = TurnsRepository(client, session_id="sess_1")
+
+    repo.append_turn(_turn())
+
+    client.collection.assert_called_with("sessions")
+    client.collection.return_value.document.assert_called_with("sess_1")
+    (client.collection.return_value.document.return_value
+            .collection.assert_called_with("turns"))
+
+
+def test_append_turn_serializes_fields_via_session_path():
+    client = MagicMock()
+    set_mock = (
+        client.collection.return_value
+              .document.return_value
+              .collection.return_value
+              .document.return_value
+              .set
+    )
+    repo = TurnsRepository(client, session_id="sess_1")
+    started = datetime(2026, 5, 7, 10, 0, 0, tzinfo=timezone.utc)
+    ended = datetime(2026, 5, 7, 10, 0, 2, tzinfo=timezone.utc)
+    turn = Turn(
+        role="user",
+        content="Session answer",
+        started_at=started,
+        ended_at=ended,
+        index=0,
+        metadata={"personaId": "general", "modelId": "llama-3.3-70b-versatile"},
+    )
+
+    repo.append_turn(turn)
+
+    written = set_mock.call_args.args[0]
+    assert written == {
+        "role": "user",
+        "content": "Session answer",
+        "startedAt": started,
+        "endedAt": ended,
+        "index": 0,
+        "metadata": {"personaId": "general", "modelId": "llama-3.3-70b-versatile"},
+    }
+
+
+def test_append_turn_uses_index_as_doc_id_via_session_path():
+    """Idempotency: the leaf document id is `str(index)`, not auto-generated."""
+    client = MagicMock()
+    repo = TurnsRepository(client, session_id="sess_1")
+    turn = _turn(index=3)
+
+    repo.append_turn(turn)
+
+    turns_collection = client.collection.return_value.document.return_value.collection.return_value
+    turns_collection.document.assert_called_with("3")
+    turns_collection.document.return_value.set.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Shared invariants
+# ---------------------------------------------------------------------------
+
 def test_repository_rejects_negative_index():
     client = MagicMock()
-    repo = TurnsRepository(client)
-    ctx = _ctx()
+    repo = TurnsRepository(client, session_id="sess_1")
     turn = Turn(
         role="user",
         content="x",
@@ -115,28 +213,37 @@ def test_repository_rejects_negative_index():
     )
 
     with pytest.raises(ValueError):
-        repo.append_turn(ctx, turn)
+        repo.append_turn(turn)
 
 
-def test_append_turn_uses_index_as_doc_id():
-    """Idempotency: the leaf document id is `str(index)`, not auto-generated."""
+def test_append_turn_is_idempotent_on_retry():
+    """Same turn written twice -> same doc id, .set() invoked twice (overwrites)."""
     client = MagicMock()
-    repo = TurnsRepository(client)
-    ctx = _ctx()
+    repo = TurnsRepository(client, session_id="sess_1")
     turn = Turn(
-        role="user",
-        content="hi",
-        started_at=datetime(2026, 5, 7, 10, 0, 0, tzinfo=timezone.utc),
-        ended_at=datetime(2026, 5, 7, 10, 0, 1, tzinfo=timezone.utc),
-        index=7,
+        role="assistant",
+        content="x",
+        started_at=datetime.now(timezone.utc),
+        ended_at=datetime.now(timezone.utc),
+        index=3,
     )
 
-    repo.append_turn(ctx, turn)
+    repo.append_turn(turn)
+    repo.append_turn(turn)
 
-    turns_collection = client.collection.return_value.document.return_value.collection.return_value
-    turns_collection.document.assert_called_with("7")
-    turns_collection.document.return_value.set.assert_called_once()
+    set_mock = (
+        client.collection.return_value
+        .document.return_value
+        .collection.return_value
+        .document.return_value
+        .set
+    )
+    assert set_mock.call_count == 2
 
+
+# ---------------------------------------------------------------------------
+# Credential loading
+# ---------------------------------------------------------------------------
 
 @pytest.fixture(autouse=True)
 def _clear_firebase_env(monkeypatch):
@@ -205,29 +312,3 @@ def test_load_credentials_raises_when_discrete_fields_partial(monkeypatch):
     # client_email + private_key intentionally missing
     with pytest.raises(RuntimeError, match="Firebase credentials are not set"):
         _load_service_account_dict()
-
-
-def test_append_turn_is_idempotent_on_retry():
-    """Same turn written twice -> same doc id, .set() invoked twice (overwrites)."""
-    client = MagicMock()
-    repo = TurnsRepository(client)
-    ctx = _ctx()
-    turn = Turn(
-        role="assistant",
-        content="x",
-        started_at=datetime.now(timezone.utc),
-        ended_at=datetime.now(timezone.utc),
-        index=3,
-    )
-
-    repo.append_turn(ctx, turn)
-    repo.append_turn(ctx, turn)
-
-    set_mock = (
-        client.collection.return_value
-        .document.return_value
-        .collection.return_value
-        .document.return_value
-        .set
-    )
-    assert set_mock.call_count == 2

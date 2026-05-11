@@ -17,7 +17,7 @@ from typing import Any
 import firebase_admin
 from firebase_admin import credentials, firestore
 
-from interview_agent.persistence.models import InterviewContext, Turn
+from interview_agent.persistence.models import Turn
 
 logger = logging.getLogger(__name__)
 
@@ -80,12 +80,32 @@ def init_firebase() -> Any:
 
 
 class TurnsRepository:
-    """Writes turns to interviews/{id}/turns. Schema must match the spec §4.1."""
+    """Writes turns to sessions/{id}/turns or interviews/{id}/turns.
 
-    def __init__(self, client: Any) -> None:
+    Exactly one of ``session_id`` or ``interview_id`` must be provided.
+    The ``session_id`` path is the new v0.1 route; ``interview_id`` is kept
+    for backward compat with any callers that still use the old interview
+    room flow.
+
+    Schema must match the spec §4.1.
+    """
+
+    def __init__(
+        self,
+        client: Any,
+        *,
+        interview_id: str | None = None,
+        session_id: str | None = None,
+    ) -> None:
+        if (interview_id is None) == (session_id is None):
+            raise ValueError(
+                "Exactly one of interview_id or session_id must be provided"
+            )
         self._client = client
+        self._interview_id = interview_id
+        self._session_id = session_id
 
-    def append_turn(self, ctx: InterviewContext, turn: Turn) -> None:
+    def append_turn(self, turn: Turn) -> None:
         if turn.index < 0:
             raise ValueError(f"Turn index must be non-negative, got {turn.index}")
 
@@ -97,16 +117,32 @@ class TurnsRepository:
             "index": turn.index,
             "metadata": dict(turn.metadata) if turn.metadata is not None else None,
         }
-        (
-            self._client.collection("interviews")
-            .document(ctx.interview_id)
-            .collection("turns")
-            .document(str(turn.index))
-            .set(doc)
-        )
-        logger.debug(
-            "wrote turn role=%s index=%d interview=%s",
-            turn.role,
-            turn.index,
-            ctx.interview_id,
-        )
+
+        if self._session_id is not None:
+            (
+                self._client.collection("sessions")
+                .document(self._session_id)
+                .collection("turns")
+                .document(str(turn.index))
+                .set(doc)
+            )
+            logger.debug(
+                "wrote turn role=%s index=%d session=%s",
+                turn.role,
+                turn.index,
+                self._session_id,
+            )
+        else:
+            (
+                self._client.collection("interviews")
+                .document(self._interview_id)
+                .collection("turns")
+                .document(str(turn.index))
+                .set(doc)
+            )
+            logger.debug(
+                "wrote turn role=%s index=%d interview=%s",
+                turn.role,
+                turn.index,
+                self._interview_id,
+            )
