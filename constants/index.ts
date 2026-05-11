@@ -191,3 +191,27 @@ export const groundingSchema = z.object({
   questionsGrounded: z.array(z.string()).min(5).max(12),
   rubricsGrounded: z.array(rubricGroundedSchema).min(5).max(12),
 });
+
+export const reportSchema = z.object({
+  totalScore: z.number().min(0).max(100),
+  categoryScores: z.array(
+    z.object({
+      name: z.string(),
+      score: z.number().min(0).max(100),
+      comment: z.string(),
+    }),
+  ),
+  strengths: z.array(z.string()).min(1).max(8),
+  areasForImprovement: z.array(z.string()).min(1).max(8),
+  finalAssessment: z.string(),
+  recommendation: z.enum([
+    "strong-hire",
+    "hire",
+    "lean-hire",
+    "lean-no-hire",
+    "no-hire",
+    "inconclusive",
+  ]),
+  recommendationReasoning: z.string(),
+  rubricCoverage: z.record(z.string(), z.record(z.string(), z.boolean())),
+});
