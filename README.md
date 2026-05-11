@@ -220,3 +220,13 @@ The AI interviewer uses the following voice configuration (now defined in Python
 - **Similarity Boost**: 0.8 (consistent voice)
 - **Speed**: 0.9 (slightly slower for clarity)
 - **Style**: 0.5 (professional tone)
+
+## v0.1 schema migration
+
+Runs once after deploying v0.1, before retiring the legacy single-user flow:
+
+```bash
+npx tsx scripts/migrate-v0.1.ts
+```
+
+The migration is idempotent (re-running is safe) and non-destructive (legacy `interviews/` and `feedback/` collections are not deleted).
