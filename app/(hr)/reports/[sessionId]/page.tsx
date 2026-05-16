@@ -35,6 +35,7 @@ export default async function ReportPage({
     role: "user" | "assistant";
     content: string;
     index: number;
+    metadata?: { personaId?: string };
   });
 
   return (

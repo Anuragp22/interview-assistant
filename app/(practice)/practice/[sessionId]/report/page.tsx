@@ -45,6 +45,7 @@ export default async function PracticeReportPage({
         role: "user" | "assistant";
         content: string;
         index: number;
+        metadata?: { personaId?: string };
       },
   );
 

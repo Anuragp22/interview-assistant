@@ -14,12 +14,24 @@ const RECOMMENDATION_STYLES: Record<
   inconclusive: { label: "Inconclusive", tone: "text-fg-muted bg-surface-2 border-border-default", icon: MinusCircle },
 };
 
+const PERSONA_LABEL: Record<string, string> = {
+  behavioral: "Behavioral",
+  technical: "Technical",
+  "system-design": "System Design",
+  general: "AI",
+};
+
 export default function ReportView({
   report,
   transcript,
 }: {
   report: Report;
-  transcript: Array<{ role: "user" | "assistant"; content: string; index: number }>;
+  transcript: Array<{
+    role: "user" | "assistant";
+    content: string;
+    index: number;
+    metadata?: { personaId?: string };
+  }>;
 }) {
   const RecIcon = RECOMMENDATION_STYLES[report.recommendation].icon;
   return (
@@ -123,7 +135,9 @@ export default function ReportView({
                 )}
               >
                 <span className="text-xs uppercase tracking-wider text-fg-subtle mr-2">
-                  {t.role === "assistant" ? "AI" : "Candidate"}
+                  {t.role === "assistant"
+                    ? PERSONA_LABEL[t.metadata?.personaId ?? "general"] ?? "AI"
+                    : "Candidate"}
                 </span>
                 <span className="text-fg-default">{t.content}</span>
               </div>
