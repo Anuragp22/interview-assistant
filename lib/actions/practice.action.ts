@@ -7,6 +7,8 @@ import { randomBytes } from "crypto";
 
 import { auth, db } from "@/firebase/admin";
 import { extractResumeText, CvParseError } from "@/lib/cv-parse";
+import { generateQuestionsAndRubrics } from "@/lib/llm/groq-template";
+import { regroundQuestions } from "@/lib/llm/groq-grounding";
 
 const SESSION_COOKIE = "session";
 
@@ -99,4 +101,198 @@ export async function getSavedCv(): Promise<UserCv | null> {
   const doc = await db.collection("users").doc(uid).get();
   if (!doc.exists) return null;
   return (doc.data() as { cv?: UserCv }).cv ?? null;
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Practice session creation + history
+// ──────────────────────────────────────────────────────────────────────
+
+export async function createPracticeSession(input: {
+  role: string;
+  level: "Junior" | "Mid" | "Senior" | "Staff";
+  jobDescription: string;
+  // If provided, replace the saved CV with this file before grounding.
+  // If absent, the user MUST already have a saved CV.
+  newCv?: {
+    buffer: ArrayBuffer;
+    mimeType: string;
+    filename: string;
+  };
+}): Promise<ActionResult<{ sessionId: string }>> {
+  try {
+    const uid = await requireUid();
+
+    // 1. Ensure we have a CV. Replace if a new one was provided.
+    if (input.newCv) {
+      const r = await replaceCv(input.newCv);
+      if (!r.success) return { success: false, message: r.message };
+    }
+    const cv = await getSavedCv();
+    if (!cv) {
+      return {
+        success: false,
+        message: "CV required — upload one to start practising.",
+      };
+    }
+
+    // 2. Phase 1 — questions + base rubrics from role/level/JD only.
+    const { questions: questionsBase, rubrics: rubricsBase } =
+      await generateQuestionsAndRubrics({
+        role: input.role,
+        level: input.level,
+        jobDescription: input.jobDescription,
+      });
+
+    // 3. Create the template doc (hrUid = owner). Title auto-generated.
+    const tref = db.collection("templates").doc();
+    const now = new Date().toISOString();
+    await tref.set({
+      id: tref.id,
+      hrUid: uid,
+      title: `Practice: ${input.role}`,
+      role: input.role,
+      level: input.level,
+      jobDescription: input.jobDescription,
+      questionsBase,
+      rubricsBase,
+      status: "draft" as const,
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    // 4. Phase 2 — reground against the candidate's CV.
+    const { questionsGrounded, rubricsGrounded } = await regroundQuestions({
+      questionsBase,
+      rubricsBase,
+      jobDescription: input.jobDescription,
+      cvText: cv.extractedText,
+    });
+
+    // 5. Create the session doc. inviteToken = "practice" sentinel marks
+    //    practice-origin sessions so the dashboard can filter them
+    //    without an extra origin field.
+    const sref = db.collection("sessions").doc();
+    await sref.set({
+      id: sref.id,
+      templateId: tref.id,
+      inviteToken: "practice",
+      candidateUid: uid,
+      hrUid: uid,
+      cvStorageRef: cv.storageRef,
+      cvExtractedText: cv.extractedText,
+      questionsGrounded,
+      rubricsGrounded,
+      status: "awaiting-call" as const,
+      livekitRoomName: `session-${sref.id}`,
+      createdAt: new Date().toISOString(),
+    });
+
+    return { success: true, data: { sessionId: sref.id } };
+  } catch (e) {
+    console.error("createPracticeSession failed:", e);
+    return {
+      success: false,
+      message:
+        e instanceof Error ? e.message : "Failed to create practice session",
+    };
+  }
+}
+
+export type PracticeHistoryRow = {
+  sessionId: string;
+  role: string;
+  level: Template["level"];
+  totalScore: number | null;
+  recommendation: Recommendation | null;
+  status: Session["status"];
+  createdAt: string;
+  completedAt: string | null;
+};
+
+export async function getPracticeHistory(): Promise<PracticeHistoryRow[]> {
+  const uid = await requireUid();
+
+  // Practice-origin sessions: candidateUid == uid AND inviteToken == "practice".
+  // Sort in memory rather than via a composite index.
+  const sessSnap = await db
+    .collection("sessions")
+    .where("candidateUid", "==", uid)
+    .where("inviteToken", "==", "practice")
+    .get();
+
+  const rows: PracticeHistoryRow[] = [];
+  for (const sdoc of sessSnap.docs) {
+    const s = sdoc.data() as Session;
+
+    // Pull role/level from the parent template.
+    let role = "Unknown";
+    let level: Template["level"] = "Mid";
+    try {
+      const tdoc = await db.collection("templates").doc(s.templateId).get();
+      if (tdoc.exists) {
+        const t = tdoc.data() as Template;
+        role = t.role;
+        level = t.level;
+      }
+    } catch {
+      // tolerate template missing — use defaults
+    }
+
+    // Pull report if it exists (might not, for sessions still in-flight).
+    let totalScore: number | null = null;
+    let recommendation: Recommendation | null = null;
+    try {
+      const rdoc = await db.collection("reports").doc(s.id).get();
+      if (rdoc.exists) {
+        const r = rdoc.data() as Report;
+        totalScore = r.totalScore;
+        recommendation = r.recommendation;
+      }
+    } catch {
+      // tolerate report missing
+    }
+
+    rows.push({
+      sessionId: s.id,
+      role,
+      level,
+      totalScore,
+      recommendation,
+      status: s.status,
+      createdAt: s.createdAt,
+      completedAt: s.completedAt ?? null,
+    });
+  }
+
+  return rows.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+export type PracticeScorePoint = {
+  sessionId: string;
+  totalScore: number;
+  completedAt: string;
+};
+
+export async function getPracticeScoreHistory(
+  options: { limit?: number } = {},
+): Promise<PracticeScorePoint[]> {
+  const { limit = 12 } = options;
+  const rows = await getPracticeHistory();
+  return rows
+    .filter(
+      (
+        r,
+      ): r is PracticeHistoryRow & {
+        totalScore: number;
+        completedAt: string;
+      } => r.totalScore !== null && r.completedAt !== null,
+    )
+    .sort((a, b) => b.completedAt.localeCompare(a.completedAt))
+    .slice(0, limit)
+    .reverse()
+    .map((r) => ({
+      sessionId: r.sessionId,
+      totalScore: r.totalScore,
+      completedAt: r.completedAt,
+    }));
 }
