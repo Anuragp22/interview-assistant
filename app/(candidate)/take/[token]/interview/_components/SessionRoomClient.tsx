@@ -27,10 +27,14 @@ type ConnectionState =
 
 export default function SessionRoomClient({
   sessionId,
-  token,
+  doneHref,
 }: {
   sessionId: string;
-  token: string;
+  // Where to send the user after they hang up (or are disconnected).
+  // Candidate flow passes /take/{token}/done; practice passes
+  // /practice/{sessionId}/report. Decoupling this lets both flows reuse
+  // the same call component without forking.
+  doneHref: string;
 }) {
   const router = useRouter();
   const roomRef = useRef<Room | null>(null);
@@ -92,7 +96,7 @@ export default function SessionRoomClient({
       if (endAttemptedRef.current) return;
       endAttemptedRef.current = true;
       await fetch(`/api/sessions/${sessionId}/end`, { method: "POST" });
-      router.push(`/take/${token}/done`);
+      router.push(doneHref);
     });
 
     room.on(
@@ -134,7 +138,7 @@ export default function SessionRoomClient({
     if (endAttemptedRef.current) return;
     endAttemptedRef.current = true;
     await fetch(`/api/sessions/${sessionId}/end`, { method: "POST" });
-    router.push(`/take/${token}/done`);
+    router.push(doneHref);
   }
 
   const isLive = connectionState === "connected" || connectionState === "reconnecting";

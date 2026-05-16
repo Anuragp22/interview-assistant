@@ -23,5 +23,10 @@ export default async function InterviewPage({
   if (session.status === "completed") {
     redirect(`/take/${token}/done`);
   }
-  return <SessionRoomClient sessionId={session.id} token={token} />;
+  return (
+    <SessionRoomClient
+      sessionId={session.id}
+      doneHref={`/take/${token}/done`}
+    />
+  );
 }
