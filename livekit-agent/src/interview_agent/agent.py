@@ -43,7 +43,7 @@ from interview_agent.persona import GENERAL_PERSONA, render_system_prompt
 from interview_agent.persistence.firestore import TurnsRepository, init_firebase
 from interview_agent.persistence.models import Turn
 from interview_agent.pipeline import build_session
-from interview_agent.rag import build_index, query_index
+from interview_agent.rag import build_index, query_index, verify_claim
 from interview_agent.session_data import (
     SESSION_ROOM_PREFIX,
     load_session_data,
@@ -130,6 +130,27 @@ class GeneralInterviewer(Agent):
         specific JD requirement) before asking a question or follow-up.
         Returns the most relevant chunks from the indexed CV+JD."""
         return await query_index(self._index, query, top_k=3)
+
+    @function_tool
+    async def verify_cv_claim(self, claim: str) -> str:
+        """Verify whether a candidate's stated claim is supported by their
+        CV or the job description. Call this whenever the candidate
+        mentions a specific project, employer, technology, tenure, or
+        numeric outcome that isn't already in the agenda question.
+
+        Pass the claim VERBATIM (or close to it), e.g.:
+          "led the Vespa search migration at Razorpay"
+          "two years as a backend engineer at Stripe"
+          "cut p95 latency from 340ms to 90ms"
+
+        Returns one of three verdicts:
+          - supported   → safe to treat as fact; ask a deeper follow-up.
+          - ambiguous   → CV mentions something nearby; ask to disambiguate.
+          - unsupported → nothing supports it; probe for specifics rather
+                          than accepting the claim at face value.
+        """
+        result = await verify_claim(self._index, claim)
+        return result.for_llm()
 
 
 async def entrypoint(ctx: JobContext) -> None:

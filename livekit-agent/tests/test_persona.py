@@ -31,6 +31,7 @@ def test_render_system_prompt_substitutes_all_fields():
     assert "1. Walk me through how the search filters at Razorpay scaled." in rendered
     assert "2. How did your team handle CI/CD?" in rendered
     assert "lookup_cv_jd" in rendered
+    assert "verify_cv_claim" in rendered
     assert "accent" in rendered
 
 

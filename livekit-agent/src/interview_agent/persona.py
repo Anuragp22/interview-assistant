@@ -20,6 +20,12 @@ COMMON_RULES = """\
   company, a tech), ask about THAT, not a generic alternative.
 - When you need a concrete fact about the candidate's CV or the JD that isn't already
   obvious from the agenda question, call the `lookup_cv_jd` tool with a short query.
+- Whenever the candidate mentions a specific project, employer, technology, tenure, or
+  numeric outcome that you cannot verify from the agenda question alone, call the
+  `verify_cv_claim` tool with the claim verbatim BEFORE asking follow-up questions
+  that treat the claim as fact. If the verdict comes back "unsupported", do not
+  challenge the candidate aggressively, but ask them to substantiate it
+  ("Can you walk me through where you did that?") rather than accepting at face value.
 """
 
 GENERAL_TEMPLATE = """\

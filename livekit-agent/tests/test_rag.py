@@ -2,7 +2,7 @@
 
 import pytest
 
-from interview_agent.rag import build_index, query_index
+from interview_agent.rag import build_index, query_index, verify_claim
 
 
 CV_FIXTURE = """\
@@ -52,3 +52,41 @@ async def test_build_index_does_not_use_an_llm():
     finally:
         if saved:
             os.environ["OPENAI_API_KEY"] = saved
+
+
+@pytest.mark.asyncio
+async def test_verify_claim_supports_claim_already_in_cv():
+    """A claim that's literally in the CV should be reported as supported."""
+    index = build_index(CV_FIXTURE, JD_FIXTURE)
+    result = await verify_claim(
+        index, "Led the Vespa search migration at Razorpay"
+    )
+    assert result.verdict == "supported"
+    assert result.max_similarity >= 0.55
+    assert "Razorpay" in result.evidence
+
+
+@pytest.mark.asyncio
+async def test_verify_claim_marks_fabricated_claim_unsupported():
+    """A claim about a company / domain not in the CV or JD should be
+    flagged as unsupported (or at worst ambiguous) — never 'supported'."""
+    index = build_index(CV_FIXTURE, JD_FIXTURE)
+    result = await verify_claim(
+        index,
+        "Spent five years at Goldman Sachs running trading-floor risk simulations",
+    )
+    assert result.verdict in ("unsupported", "ambiguous")
+    # The CV has nothing about Goldman / finance, so similarity should be low.
+    assert result.max_similarity < 0.55
+
+
+@pytest.mark.asyncio
+async def test_verify_claim_for_llm_renders_each_verdict():
+    """The for_llm() helper has to produce a usable string for every verdict.
+    This guards against a future refactor breaking one of the three branches."""
+    index = build_index(CV_FIXTURE, JD_FIXTURE)
+
+    supported = await verify_claim(index, "Razorpay search filters team lead")
+    rendered = supported.for_llm()
+    assert "supported" in rendered.lower() or "unsupported" in rendered.lower()
+    assert f"{supported.max_similarity:.2f}" in rendered
