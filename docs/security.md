@@ -35,27 +35,58 @@ load-bearing weight:
 
 ### Layer 1 — Input classifier (catches novel attacks)
 
-`input_classifier.py` wires [`llm-guard`](https://github.com/protectai/llm-guard)'s
-`PromptInjection` scanner — a fine-tuned `protectai/deberta-v3-base-prompt-injection-v2`
-classifier — into LiveKit's `Agent.on_user_turn_completed` hook. When
-the scanner returns `is_valid=False` at threshold ≥ 0.92, we:
+`input_classifier.py` runs a HuggingFace text-classification model over
+every candidate utterance via LiveKit's `Agent.on_user_turn_completed`
+hook. When the model returns an injection-class score ≥ 0.92 we either
+block the turn (sequential mode) or interrupt the in-flight reply
+(speculative mode).
 
-1. Speak a canned deflection via `session.say(...)` so the candidate
-   isn't left hanging.
-2. Raise `StopResponse()` so the SDK skips LLM generation entirely
-   for that turn.
+**Model — `transformers` + `optimum.onnxruntime`, not llm-guard.**
+We tried `llm-guard`'s `PromptInjection` scanner first; its source at
+`llm_guard/input_scanners/prompt_injection.py:177` hard-codes the
+positive label as `"INJECTION"` and silently inverts the score for
+anything else. That made swapping in Llama Prompt Guard 2 (labels
+`MALICIOUS`/`BENIGN`) impossible — injection inputs would come back
+as benign. So we rolled our own thin wrapper directly on
+`transformers.AutoTokenizer` + `optimum.onnxruntime.ORTModelForSequenceClassification`,
+with generic label handling (any of `INJECTION` / `MALICIOUS` /
+`JAILBREAK` / `UNSAFE` counts as positive).
 
-The DeBERTa weights are loaded once per worker subprocess in the
-`prewarm` hook (saves the ~3-5 s model-load latency from being paid
-mid-call). Inference runs under `asyncio.to_thread` so it never blocks
-the event loop; ONNX backend keeps per-turn cost to ~50-100 ms on CPU,
-within the latency budget set in `latency_budget.py`.
+**Default model**: `protectai/deberta-v3-base-prompt-injection-v2`
+(non-gated, ~50-100 ms ONNX on CPU, ~98% AUC English).
 
-**Graceful degradation:** if `llm-guard` isn't installed (lighter dev
-envs), or the model fails to load (sandboxed CI without HuggingFace
-cache), `is_injection()` returns `(False, 0.0)` and the agent keeps
-operating — the tool-call guards remain the load-bearing defense in
-that case. Set `DISABLE_INPUT_CLASSIFIER=1` to opt out entirely.
+**Optional fast model**: `meta-llama/Llama-Prompt-Guard-2-22M` —
+Meta's distilled DeBERTa-xsmall at 22M params, **75% latency
+reduction** vs DeBERTa-base ([model card][lpg2-22m]: 19.3 ms on A100,
+0.995 AUC, 88.7% recall @ 1% FPR). Gated; requires HF auth + Llama 4
+license acceptance. Opt in by setting `INPUT_CLASSIFIER_MODEL=meta-llama/Llama-Prompt-Guard-2-22M`
+with `HF_TOKEN` exported. We don't ship it as default to keep the
+agent installable on machines without a HuggingFace account.
+
+[lpg2-22m]: https://huggingface.co/meta-llama/Llama-Prompt-Guard-2-22M
+
+**Mode selection** (`INPUT_CLASSIFIER_MODE`):
+
+| Mode | Behaviour | Latency impact | Trade-off |
+|---|---|---|---|
+| `sequential` (default) | Block in the hook, await classifier verdict before LLM starts | +50-100 ms wall-clock on every scanned turn | Safe — no flagged input ever reaches the LLM |
+| `speculative` | Fire classifier as a background task, return immediately, interrupt the LLM via `session.interrupt(force=True)` on a flag | ~0 ms on benign turns | Candidate may hear a fragment of bot reply before interrupt lands on blocked turns |
+
+**Short-utterance skip** (`INPUT_CLASSIFIER_MIN_WORDS`, default 4):
+inputs with fewer words skip the scan entirely. "Yes" / "okay" / "go on"
+aren't realistic injection vectors and don't need to pay classifier
+latency. The classifier requires meaningful context to do its work
+anyway — a 1-word input wouldn't trigger high confidence.
+
+**Prewarm**: weights load once per worker subprocess in `prewarm_fnc`
+(saves ~3-5 s model-load from being paid mid-call). Inference runs
+under `asyncio.to_thread` so it never blocks the event loop.
+
+**Graceful degradation**: if the model fails to load (sandboxed CI
+without HuggingFace cache, OOM, network blip), `is_injection()`
+returns `(False, 0.0)` and the agent keeps operating — the tool-call
+guards remain the load-bearing defense in that case. Set
+`DISABLE_INPUT_CLASSIFIER=1` to opt out entirely.
 
 This catches the **general** injection class the audit corpus didn't
 explicitly anticipate. The corpus is a regression gate; the classifier

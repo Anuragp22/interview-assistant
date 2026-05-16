@@ -49,6 +49,12 @@ class SessionCostAggregator:
         self._tts_characters_count: int = 0
         self._stt_audio_seconds: float = 0.0
         self._finalized = False
+        # Cached result from the first finalize() call. Second and
+        # subsequent calls return this instead of recomputing —
+        # session_duration is sampled from time.monotonic() and would
+        # otherwise drift between calls, breaking the idempotency
+        # contract the entrypoint's finally-path relies on.
+        self._cached_breakdown: CostBreakdown | None = None
 
     def handle_usage_event(self, event: Any) -> None:
         """Process a ``SessionUsageUpdatedEvent`` from the SDK.
@@ -100,11 +106,12 @@ class SessionCostAggregator:
         path can fire from both the normal-end and the error-end
         branches.
         """
-        if self._finalized:
+        if self._finalized and self._cached_breakdown is not None:
             logger.warning(
                 "finalize() called twice for session %s — returning cached result",
                 self._session_id,
             )
+            return self._cached_breakdown
         self._finalized = True
 
         session_duration = time.monotonic() - self._session_start
@@ -147,4 +154,5 @@ class SessionCostAggregator:
             breakdown.total_usd,
             session_duration,
         )
+        self._cached_breakdown = breakdown
         return breakdown

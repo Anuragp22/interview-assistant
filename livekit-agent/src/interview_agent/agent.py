@@ -66,6 +66,25 @@ from interview_agent.input_classifier import (
     is_injection,
     prewarm_input_classifier,
 )
+
+# Two operating modes for the input classifier:
+#   "sequential"  — block in on_user_turn_completed; LLM only starts
+#                   after the classifier returns. Adds ~50-100 ms of
+#                   wall-clock latency to every (non-short) turn but
+#                   guarantees no flagged input ever reaches the LLM.
+#   "speculative" — fire the classifier as a background task and let
+#                   on_user_turn_completed return immediately, so the
+#                   LLM starts in parallel. If the background scan
+#                   flags injection, we call ``session.interrupt(force=True)``
+#                   to cancel the in-flight LLM/TTS mid-stream and
+#                   speak a canned deflection. Recovers the latency
+#                   on benign turns at the cost of an occasional
+#                   half-word audio on blocked turns.
+#
+# Default = "sequential" because the half-word UX trade-off is real
+# and most candidate sessions never see an injection — there's
+# nothing to recover the 50-100 ms FROM on those turns.
+_CLASSIFIER_MODE = os.environ.get("INPUT_CLASSIFIER_MODE", "sequential").lower()
 from interview_agent.metrics_bridge import emit_turn_latency_span
 from interview_agent.security_guards import TransferGuard, detect_prompt_leak
 from interview_agent.tracing import (
@@ -260,20 +279,27 @@ class InterviewerBase(Agent):
     ) -> None:
         """Input-side prompt-injection check.
 
-        Runs the candidate's new utterance through the llm-guard
-        DeBERTa classifier BEFORE the LLM generates a reply. If
-        flagged, we:
-          1. Speak a canned deflection so the candidate isn't left
-             hanging,
-          2. Raise StopResponse so the SDK skips LLM generation
-             entirely for this turn.
+        Two modes (selected by ``INPUT_CLASSIFIER_MODE`` env var):
 
-        This is the input-side layer of the defense stack — paired
-        with the tool-call preconditions in ``security_guards.py``,
-        which catch attacks that slip past the classifier and try
-        to abuse a tool directly. Failing classifier load is a soft
-        failure (see input_classifier.py): the agent keeps running
-        with the tool guards alone.
+        * **sequential** (default): await the classifier verdict
+          before letting the LLM start. ~50-100 ms wall-clock added
+          to every non-short turn; guarantees no flagged input ever
+          reaches the LLM.
+
+        * **speculative**: launch the classifier as a background task
+          and return immediately, so the LLM starts in parallel. If
+          the background task flags the utterance, we call
+          ``session.interrupt(force=True)`` to cancel the in-flight
+          LLM/TTS mid-stream and speak a deflection. Recovers the
+          latency on benign turns; trade-off is the candidate may
+          hear a fragment of the bot's reply before it's interrupted
+          on blocked turns.
+
+        Either way, this is paired with the tool-call preconditions
+        in ``security_guards.py`` — those catch attacks that get past
+        the classifier and try to abuse a tool. A classifier load
+        failure is a soft failure (see input_classifier.py); the
+        session keeps running on the tool guards alone.
         """
         # Match the existing _on_item pattern: pull text out of the
         # message content list rather than calling .text_content,
@@ -284,10 +310,53 @@ class InterviewerBase(Agent):
         if not text:
             return
 
+        if _CLASSIFIER_MODE == "speculative":
+            # Don't await; the LLM will start as soon as we return.
+            # The task does its own block-handling on flag.
+            asyncio.create_task(self._speculative_classify_and_maybe_block(text))
+            return
+
         detected, score = await is_injection(text)
         if not detected:
             return
+        await self._record_block_and_deflect(text, score, speculative=False)
+        raise StopResponse()
 
+    async def _speculative_classify_and_maybe_block(self, text: str) -> None:
+        """Background classifier scan. Runs concurrently with the LLM.
+
+        If the verdict comes back positive AFTER the LLM has started
+        generating, we cancel the in-flight reply via
+        ``session.interrupt(force=True)`` and speak a deflection.
+        ``force=True`` interrupts even past the SDK's normal
+        ``allow_interruptions`` checks — we always want to win this
+        race when an injection is detected.
+        """
+        try:
+            detected, score = await is_injection(text)
+        except Exception:  # noqa: BLE001
+            logger.exception("speculative classifier scan failed")
+            return
+        if not detected:
+            return
+
+        await self._record_block_and_deflect(text, score, speculative=True)
+        try:
+            interrupt_fut = self.session.interrupt(force=True)
+            if interrupt_fut is not None:
+                # interrupt() returns an asyncio.Future that
+                # completes when the SDK has finished tearing down
+                # the in-flight reply. Awaiting it serialises the
+                # deflection AFTER the interrupt actually lands.
+                await interrupt_fut
+        except Exception:  # noqa: BLE001
+            logger.exception("speculative interrupt() failed")
+
+    async def _record_block_and_deflect(
+        self, text: str, score: float, *, speculative: bool
+    ) -> None:
+        """Emit the OTel span, log, and speak the canned deflection.
+        Shared between the sequential and speculative paths."""
         tracer = get_tracer()
         with tracer.start_as_current_span(
             "agent.input-classifier.blocked",
@@ -295,30 +364,31 @@ class InterviewerBase(Agent):
                 "persona.id": self._persona.id,
                 "risk.score": score,
                 "input.length": len(text),
+                "mode": "speculative" if speculative else "sequential",
             },
         ):
             logger.warning(
-                "SECURITY: input classifier blocked persona=%s score=%.3f "
-                "text=%r",
+                "SECURITY: input classifier blocked persona=%s mode=%s "
+                "score=%.3f text=%r",
                 self._persona.id,
+                "speculative" if speculative else "sequential",
                 score,
                 text[:200],
             )
             try:
                 # Canned deflection. Generic enough to feel natural
-                # whichever persona is active, narrow enough that it
-                # doesn't reveal what triggered the block.
+                # whichever persona is active, narrow enough that
+                # it doesn't reveal what triggered the block.
                 await self.session.say(
                     "Let's stay focused on the interview. Could you walk "
                     "me through your most recent project instead?"
                 )
             except Exception:  # noqa: BLE001
-                # A say() failure mustn't break the block. Worst
+                # A say() failure mustn't break the block path. Worst
                 # case the candidate gets silence + no LLM reply,
                 # which is still safer than letting the injection
                 # through.
                 logger.exception("classifier-deflection say() failed")
-            raise StopResponse()
 
     @function_tool()
     async def lookup_cv_jd(self, context: RunContext, query: str) -> str:

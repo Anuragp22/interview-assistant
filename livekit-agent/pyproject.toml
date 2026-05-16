@@ -19,11 +19,13 @@ dependencies = [
   "opentelemetry-api>=1.27",
   "opentelemetry-sdk>=1.27",
   "opentelemetry-exporter-otlp-proto-http>=1.27",
-  # Input-side prompt-injection classifier (load-bearing complement to
-  # the tool-call guards in security_guards.py). Uses a fine-tuned
-  # DeBERTa model via ONNX; transformers + onnxruntime are already
-  # transitively present from llama-index-embeddings-fastembed.
-  "llm-guard>=0.3.16",
+  # Input-side prompt-injection classifier — direct transformers +
+  # optimum.onnxruntime wrapper rather than llm-guard, because
+  # llm-guard's PromptInjection scanner hard-codes label=="INJECTION"
+  # and would silently mis-score Llama Prompt Guard 2 (MALICIOUS/BENIGN)
+  # or any other label scheme. transformers is already pulled in
+  # transitively via llama-index-embeddings-fastembed.
+  "optimum[onnxruntime]>=2.0",
 ]
 
 [project.optional-dependencies]
