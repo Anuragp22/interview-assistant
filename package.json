@@ -8,7 +8,9 @@
     "start": "next start",
     "lint": "next lint",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "eval": "tsx eval/run.ts",
+    "eval:baseline": "tsx eval/run.ts --baseline"
   },
   "dependencies": {
     "@ai-sdk/groq": "^3.0.39",

@@ -1,0 +1,66 @@
+{
+  "model": "llama-3.3-70b-versatile",
+  "recordedAt": "2026-05-16T13:24:16.872Z",
+  "fixtures": {
+    "backend-sre-senior": {
+      "cvGroundingRate": 0.6666666666666666,
+      "partitionOverall": 0.4444444444444444,
+      "hallucinationGuard": 1,
+      "aggregate": 0.7166666666666667
+    },
+    "ml-recsys-mid": {
+      "cvGroundingRate": 1,
+      "partitionOverall": 0.8888888888888888,
+      "hallucinationGuard": 1,
+      "aggregate": 0.9666666666666667
+    },
+    "frontend-lead-staff": {
+      "cvGroundingRate": 0.8888888888888888,
+      "partitionOverall": 0.6666666666666666,
+      "hallucinationGuard": 1,
+      "aggregate": 0.861111111111111
+    },
+    "ios-mobile-mid": {
+      "cvGroundingRate": 0.7777777777777778,
+      "partitionOverall": 0.5555555555555555,
+      "hallucinationGuard": 1,
+      "aggregate": 0.7888888888888889
+    },
+    "security-engineer-senior": {
+      "cvGroundingRate": 0.8888888888888888,
+      "partitionOverall": 0.7777777777777777,
+      "hallucinationGuard": 1,
+      "aggregate": 0.8944444444444443
+    },
+    "platform-engineer-senior": {
+      "cvGroundingRate": 0.8888888888888888,
+      "partitionOverall": 0.8888888888888888,
+      "hallucinationGuard": 1,
+      "aggregate": 0.9277777777777777
+    },
+    "data-engineer-mid": {
+      "cvGroundingRate": 1,
+      "partitionOverall": 0.7777777777777777,
+      "hallucinationGuard": 1,
+      "aggregate": 0.9333333333333332
+    },
+    "junior-fullstack": {
+      "cvGroundingRate": 0.5555555555555556,
+      "partitionOverall": 0.4444444444444444,
+      "hallucinationGuard": 1,
+      "aggregate": 0.6777777777777778
+    },
+    "staff-payments-architect": {
+      "cvGroundingRate": 0.5555555555555556,
+      "partitionOverall": 0.7777777777777777,
+      "hallucinationGuard": 1,
+      "aggregate": 0.7777777777777778
+    },
+    "devrel-solutions-senior": {
+      "cvGroundingRate": 1,
+      "partitionOverall": 0.5555555555555555,
+      "hallucinationGuard": 1,
+      "aggregate": 0.8666666666666666
+    }
+  }
+}

@@ -40,3 +40,6 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# eval — the latest report regenerates on every run; baselines.json is committed
+/eval/report.json
