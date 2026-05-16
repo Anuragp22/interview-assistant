@@ -118,6 +118,7 @@ BEHAVIORAL_PERSONA = Persona(
     id="behavioral",
     name="Sarah",
     expertise_area="behavioral interviewer specialising in STAR-framework probes",
+    # ElevenLabs premade "Sarah - Mature, Reassuring, Confident".
     voice_id="EXAVITQu4vr4xnSDxMaL",
     voice_stability=0.4,
     voice_similarity_boost=0.8,
@@ -134,6 +135,7 @@ TECHNICAL_PERSONA = Persona(
     id="technical",
     name="Adam",
     expertise_area="senior technical interviewer who probes implementation depth",
+    # ElevenLabs premade "Adam - Dominant, Firm".
     voice_id="pNInz6obpgDQGcFmaJgB",
     voice_stability=0.5,
     voice_similarity_boost=0.85,
@@ -150,7 +152,9 @@ SYSTEM_DESIGN_PERSONA = Persona(
     id="system-design",
     name="Bella",
     expertise_area="senior systems engineer focused on distributed-systems design",
-    voice_id="oWAxZDx7w5VEj9dCyTzz",
+    # ElevenLabs premade voice "Bella - Professional, Bright, Warm".
+    # Verified via GET /v1/voices against the account's catalog.
+    voice_id="hpp4J3VqNfWAUOO0d1Us",
     voice_stability=0.5,
     voice_similarity_boost=0.8,
     voice_speed=0.85,
