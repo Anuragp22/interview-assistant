@@ -28,6 +28,17 @@ export default async function PracticeSessionRouter({
   // Owner check — only the practising user can see this.
   if (session.candidateUid !== decoded.uid) notFound();
 
+  // Stale-session check: practice sessions created before the multi-agent
+  // rollout don't have questionsByPersona. The Python agent fails fast at
+  // dispatch on those; bounce the user to a fresh practice rather than let
+  // them watch the call die mid-handshake.
+  if (
+    session.inviteToken === "practice" &&
+    !session.questionsByPersona
+  ) {
+    redirect("/practice?stale=1");
+  }
+
   if (session.status === "awaiting-call" || session.status === "in-call") {
     redirect(`/practice/${sessionId}/interview`);
   }
