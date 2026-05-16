@@ -20,6 +20,7 @@ from livekit.plugins import deepgram, openai, silero
 from interview_agent.pipeline import (
     DEFAULT_GROQ_MODEL,
     GROQ_BASE_URL,
+    _INTERVIEW_TURN_HANDLING,
     build_session,
 )
 
@@ -96,3 +97,39 @@ def test_build_session_loads_vad_when_none_passed():
     """Default behavior: factory loads its own VAD."""
     session = build_session()
     assert isinstance(session.vad, silero.VAD)
+
+
+# ---------------------------------------------------------------------------
+# Interview-tuned turn handling
+# ---------------------------------------------------------------------------
+
+def test_interview_turn_handling_uses_debounced_interrupt_thresholds():
+    """The min_duration should be raised above the default 0.5s so short
+    'uh'/'mm' utterances don't cut the AI off mid-thought."""
+    interruption = _INTERVIEW_TURN_HANDLING["interruption"]
+    assert interruption["min_duration"] >= 0.8
+    # min_words >= 3 means STT also needs a meaningful chunk before counting
+    # as an interrupt — AND-ed with min_duration.
+    assert interruption["min_words"] >= 3
+
+
+def test_interview_turn_handling_keeps_false_interruption_resume_on():
+    """Without resume_false_interruption the agent would just stop mid-
+    sentence on every false alarm — terrible for an interview."""
+    assert _INTERVIEW_TURN_HANDLING["interruption"]["resume_false_interruption"] is True
+
+
+def test_interview_turn_handling_extends_endpointing_for_thinking_time():
+    """min_delay should be > the default 0.5s so candidates get a beat
+    after they stop talking before the AI replies."""
+    endpointing = _INTERVIEW_TURN_HANDLING["endpointing"]
+    assert endpointing["min_delay"] >= 0.7
+
+
+def test_build_session_propagates_interrupt_thresholds_to_session_options():
+    """End-to-end: the values from _INTERVIEW_TURN_HANDLING actually land
+    on session.options.interruption (where AgentActivity reads them)."""
+    session = build_session()
+    opts = session.options.interruption
+    assert opts["min_duration"] == _INTERVIEW_TURN_HANDLING["interruption"]["min_duration"]
+    assert opts["min_words"] == _INTERVIEW_TURN_HANDLING["interruption"]["min_words"]

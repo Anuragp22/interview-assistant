@@ -58,6 +58,16 @@ def build_session(*, vad: silero.VAD | None = None) -> AgentSession:
     No TTS at session level — each Agent subclass provides its own via
     persona-specific voice_settings (see agent.py:_build_tts_for).
 
+    Interview-tuned turn handling (see `_INTERVIEW_TURN_HANDLING` below):
+    - Bumps `interruption.min_duration` from 0.5s → 1.0s so a candidate's
+      brief "uh" or "mm" doesn't cut the AI off mid-thought.
+    - Adds `interruption.min_words = 3` so the same applies once STT lands
+      a partial transcript.
+    - Raises `endpointing.min_delay` from 0.5s → 0.8s to give candidates a
+      bit more thinking time before the AI jumps in.
+    - Keeps `resume_false_interruption=True` so the agent picks back up
+      seamlessly when its judgement was wrong.
+
     `vad` is an optional pre-loaded Silero VAD. The worker's prewarm
     function should load the VAD once and pass it here on each dispatch
     to avoid reloading per session.
@@ -67,4 +77,30 @@ def build_session(*, vad: silero.VAD | None = None) -> AgentSession:
         stt=deepgram.STT(model="nova-2", language="en-US"),
         llm=_build_groq_llm(),
         # tts intentionally omitted — each Agent supplies its own.
+        turn_handling=_INTERVIEW_TURN_HANDLING,
     )
+
+
+# Interview-tuned turn handling. Lives at module scope so tests can assert
+# the values without re-importing the session machinery. The schema is
+# livekit.agents.voice.turn.TurnHandlingOptions — a TypedDict — so we
+# express it as a plain dict here (no import needed at runtime).
+_INTERVIEW_TURN_HANDLING: dict = {
+    "interruption": {
+        # Default 0.5s — too eager. Candidates routinely emit short
+        # "uh"/"mm"/"yeah" sounds that shouldn't cut the AI off.
+        "min_duration": 1.0,
+        # Default 0. Once STT lands a transcript, also require 3+ words
+        # before counting as an interrupt. AND-ed with min_duration.
+        "min_words": 3,
+        # Default True — agent resumes mid-sentence after a false alarm.
+        "resume_false_interruption": True,
+        # Default 2.0s of silence post-interrupt before classifying as false.
+        "false_interruption_timeout": 2.0,
+    },
+    "endpointing": {
+        # Default 0.5s — too quick for thoughtful answers. 0.8s gives
+        # the candidate a beat to land on the next sentence.
+        "min_delay": 0.8,
+    },
+}
