@@ -84,14 +84,21 @@ def build_index(cv_text: str, jd_text: str) -> Any:
     from llama_index.core.settings import Settings
     from llama_index.embeddings.fastembed import FastEmbedEmbedding
 
-    Settings.embed_model = FastEmbedEmbedding("BAAI/bge-small-en-v1.5")
-    Settings.llm = None
+    from interview_agent.tracing import get_tracer
 
-    docs = [
-        Document(text=cv_text, metadata={"kind": "cv"}),
-        Document(text=jd_text, metadata={"kind": "jd"}),
-    ]
-    index = VectorStoreIndex.from_documents(docs)
+    tracer = get_tracer()
+    with tracer.start_as_current_span(
+        "rag.build-index",
+        attributes={"cv.chars": len(cv_text), "jd.chars": len(jd_text)},
+    ):
+        Settings.embed_model = FastEmbedEmbedding("BAAI/bge-small-en-v1.5")
+        Settings.llm = None
+
+        docs = [
+            Document(text=cv_text, metadata={"kind": "cv"}),
+            Document(text=jd_text, metadata={"kind": "jd"}),
+        ]
+        index = VectorStoreIndex.from_documents(docs)
     logger.info(
         "built per-session index: cv_chars=%d jd_chars=%d",
         len(cv_text),
@@ -102,9 +109,16 @@ def build_index(cv_text: str, jd_text: str) -> Any:
 
 async def query_index(index: Any, query: str, top_k: int = 3) -> str:
     """Run a similarity-top-k retrieval and return the joined chunk text."""
-    retriever = index.as_retriever(similarity_top_k=top_k)
-    nodes = await retriever.aretrieve(query)
-    return "\n\n".join(n.node.get_content() for n in nodes)
+    from interview_agent.tracing import get_tracer
+
+    tracer = get_tracer()
+    with tracer.start_as_current_span(
+        "rag.query",
+        attributes={"rag.top_k": top_k, "rag.query": query[:200]},
+    ):
+        retriever = index.as_retriever(similarity_top_k=top_k)
+        nodes = await retriever.aretrieve(query)
+        return "\n\n".join(n.node.get_content() for n in nodes)
 
 
 async def verify_claim(index: Any, claim: str) -> ClaimVerdict:
@@ -119,24 +133,35 @@ async def verify_claim(index: Any, claim: str) -> ClaimVerdict:
     fact-checking, not generic lookup — the threshold-based verdict is
     what makes the difference visible to the agent's main LLM.
     """
-    retriever = index.as_retriever(similarity_top_k=1)
-    nodes = await retriever.aretrieve(claim)
-    if not nodes:
+    from interview_agent.tracing import get_tracer
+
+    tracer = get_tracer()
+    with tracer.start_as_current_span(
+        "rag.verify-claim",
+        attributes={"claim": claim[:200]},
+    ) as span:
+        retriever = index.as_retriever(similarity_top_k=1)
+        nodes = await retriever.aretrieve(claim)
+        if not nodes:
+            span.set_attribute("verdict", "unsupported")
+            span.set_attribute("similarity", 0.0)
+            return ClaimVerdict(
+                verdict="unsupported", max_similarity=0.0, evidence=""
+            )
+
+        top = nodes[0]
+        score = float(top.score or 0.0)
+        evidence = top.node.get_content().strip()
+
+        if score >= _SIMILARITY_SUPPORTED:
+            verdict: Verdict = "supported"
+        elif score >= _SIMILARITY_AMBIGUOUS:
+            verdict = "ambiguous"
+        else:
+            verdict = "unsupported"
+
+        span.set_attribute("verdict", verdict)
+        span.set_attribute("similarity", score)
         return ClaimVerdict(
-            verdict="unsupported", max_similarity=0.0, evidence=""
+            verdict=verdict, max_similarity=score, evidence=evidence
         )
-
-    top = nodes[0]
-    score = float(top.score or 0.0)
-    evidence = top.node.get_content().strip()
-
-    if score >= _SIMILARITY_SUPPORTED:
-        verdict: Verdict = "supported"
-    elif score >= _SIMILARITY_AMBIGUOUS:
-        verdict = "ambiguous"
-    else:
-        verdict = "unsupported"
-
-    return ClaimVerdict(
-        verdict=verdict, max_similarity=score, evidence=evidence
-    )

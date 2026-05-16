@@ -31,6 +31,9 @@ class SessionData:
     job_description: str
     cv_extracted_text: str
     questions_by_persona: QuestionsByPersona
+    # W3C traceparent value written by the Next.js server action that
+    # created this session. None for legacy sessions that pre-date OTel.
+    traceparent: str | None = None
 
 
 SESSION_ROOM_PREFIX = "session-"
@@ -102,4 +105,5 @@ def load_session_data(db: Any, session_id: str) -> SessionData:
             technical=list(qbp["technical"]),
             system_design=list(qbp["systemDesign"]),
         ),
+        traceparent=session.get("traceparent"),
     )

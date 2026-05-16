@@ -1,0 +1,185 @@
+# Observability
+
+End-to-end OpenTelemetry tracing across all four processes that participate
+in a practice session: **Next.js** server actions → **Firestore** → **LiveKit**
+room → **Python agent** + LLM/STT/TTS calls. One W3C `traceparent` rides the
+session doc and is rehydrated by the agent on entry, so a single trace ID
+covers the whole flow in Honeycomb / Grafana Tempo / Jaeger.
+
+## Why this exists
+
+LLM apps without traces are unsupportable in production. The grounding
+silently-broken-bug we caught with the eval harness (Llama returning
+`"high"/"medium"/"low"` for `depth`) was visible from above in less than a
+minute — but it took an offline eval run to find it. Traces give the same
+visibility live: which phase took 8 seconds, which `verify_cv_claim` came
+back `unsupported`, which Groq call retried, where the user-perceived
+latency went.
+
+The harness covers the question-generation pipeline once a session is
+created. Tracing covers everything that happens after — the interview
+itself, where the harness can't reach.
+
+## Trace shape
+
+```
+GET /practice/new            (auto, from Next.js)
+└─ practice.create-session   (lib/actions/practice.action.ts)
+   ├─ phase1.generate-template
+   │  └─ ai.generateObject.doGenerate     (AI SDK telemetry)
+   │     - gen_ai.system=groq
+   │     - gen_ai.request.model=llama-3.3-70b-versatile
+   │     - gen_ai.usage.input_tokens, gen_ai.usage.output_tokens
+   ├─ firestore.template.write
+   ├─ phase2.reground-against-cv
+   │  └─ ai.generateObject.doGenerate
+   └─ firestore.session.write
+      [traceparent stored on session doc]
+
+  ─── process boundary (LiveKit room dispatch) ───
+
+agent.panel-session          (livekit-agent/src/interview_agent/agent.py)
+- session.id, candidate.uid, interview.role, interview.level
+- trace.propagated=true   ← link to the Next side
+├─ rag.build-index         (LlamaIndex / fastembed)
+├─ agent.on-enter          persona.id=behavioral
+├─ agent.tool.lookup_cv_jd persona.id=behavioral, rag.query="..."
+├─ agent.tool.verify_cv_claim
+│   ├─ rag.verify-claim    verdict=supported|ambiguous|unsupported, similarity=0.62
+├─ agent.transfer          from.persona=behavioral, to.persona=technical
+├─ agent.on-enter          persona.id=technical
+├─ ... (technical round)
+├─ agent.transfer          from.persona=technical, to.persona=system-design
+├─ agent.on-enter          persona.id=system-design
+├─ ... (system-design round)
+└─ agent.end-interview     persona.id=system-design
+```
+
+Each layer's tracing is opt-in via env vars — leave them unset and the
+service runs unchanged with the SDK's built-in console exporter dumping
+spans to stdout.
+
+## Backend setup (Honeycomb is the recommended default)
+
+Honeycomb's free tier gives 20M events/month and the best UX for a small
+demo. Substitute any OTLP/HTTP backend by changing the endpoint and
+dropping the Honeycomb-specific headers.
+
+```bash
+# .env.local
+OTEL_EXPORTER_OTLP_ENDPOINT=https://api.honeycomb.io/v1/traces
+HONEYCOMB_API_KEY=<your-key>
+HONEYCOMB_DATASET=interview-assistant
+```
+
+The agent picks up the same vars from `.env.local` via `_load_env()` in
+`livekit-agent/src/interview_agent/agent.py`. No separate config.
+
+Grafana Cloud Tempo:
+```bash
+OTEL_EXPORTER_OTLP_ENDPOINT=https://tempo-prod-XX-prod-XX.grafana.net/otlp/v1/traces
+# Tempo auth is Basic — pass via OTEL_EXPORTER_OTLP_HEADERS
+```
+
+Self-hosted Jaeger / OpenTelemetry Collector: point at `http://otel-collector:4318/v1/traces`.
+
+## Local dev (no signup required)
+
+Leave `OTEL_EXPORTER_OTLP_ENDPOINT` unset. Both Next.js and the agent fall
+back to `ConsoleSpanExporter`, which dumps each span as JSON to stdout.
+
+A single `GET /practice` boots the SDK and produces output like:
+
+```
+{
+  resource: { attributes: { 'service.name': 'interview-assistant-web', ... } },
+  instrumentationScope: { name: 'next.js', ... },
+  traceId: '1296d193e31fb8c84be39174b520463b',
+  parentSpanContext: { spanId: '4ed7c8f495a157c2', ... },
+  name: 'render route (app) /practice',
+  duration: 482606.3,
+  status: { code: 0 },
+  ...
+}
+```
+
+Useful for verifying the span tree is right before pointing a real backend
+at it.
+
+## How the cross-process propagation works
+
+1. The Next.js server action `createPracticeSession` opens a root span
+   `practice.create-session`. Before writing the session doc, it grabs
+   the current span's W3C traceparent via `currentTraceparent()`
+   (`lib/tracing.ts`).
+2. The traceparent string (`00-{trace_id}-{span_id}-01`) goes on the
+   session document as `session.traceparent`.
+3. When LiveKit dispatches the agent into the room `session-{id}`, the
+   agent's `entrypoint()` (`livekit-agent/src/interview_agent/agent.py`)
+   loads `SessionData`, extracting the traceparent.
+4. `context_from_traceparent()` calls `opentelemetry.propagate.extract()`
+   to rehydrate the OTel `Context`. Every span opened inside the agent's
+   `agent.panel-session` block becomes a descendant of the Next-side
+   root span — they share `trace_id`, and the agent's root span gets the
+   Next span as its parent.
+5. ContextVars propagate the active span through asyncio tasks, so
+   `on_enter`, `transfer_to_*`, tool calls, and RAG operations all nest
+   correctly without manual context plumbing.
+
+If the traceparent is absent (legacy session created before OTel was
+wired up), the agent opens a fresh root trace instead. The
+`trace.propagated=false` attribute on the agent's root span makes those
+cases easy to filter for.
+
+## What's instrumented
+
+| Layer | Spans | Notes |
+|---|---|---|
+| Next.js auto | `GET /practice`, `render route`, `build component tree`, `resolve segment modules`, ... | Free from `@vercel/otel` — every server-side request gets a span tree |
+| Server actions | `practice.create-session`, `phase1.generate-template`, `phase2.reground-against-cv`, `firestore.template.write`, `firestore.session.write` | Wrapped via `traced()` in `lib/tracing.ts` |
+| AI SDK Groq calls | `ai.generateObject.doGenerate` with `gen_ai.*` attributes (model, tokens, finish reasons) | `experimental_telemetry: { isEnabled: true }` on each call |
+| Python agent runtime | `agent.panel-session`, `agent.on-enter`, `agent.transfer`, `agent.end-interview`, `agent.tool.lookup_cv_jd`, `agent.tool.verify_cv_claim` | Manual spans in `agent.py` |
+| RAG | `rag.build-index`, `rag.query`, `rag.verify-claim` (with verdict + similarity) | Manual spans in `rag.py` |
+
+The interesting attributes on each span are deliberately small (no raw
+CV text, no full claim) so traces stay inexpensive and don't leak PII to
+the tracing backend.
+
+## What's NOT instrumented (yet)
+
+- HR-mode routes — dormant by design, will add when they come back.
+- Browser-side spans — `@vercel/otel` is server-side only. Adding a
+  browser SDK would let us trace the user's "Start Interview" click
+  → `practice.create-session`, but that's a separate workstream.
+- ElevenLabs / Deepgram HTTP calls — `livekit-agents` issues these via
+  its own HTTP clients; full instrumentation needs `opentelemetry-
+  instrumentation-httpx` or `-requests`. Out of scope for v1; the
+  per-tool spans already show the work that matters.
+- Metrics (counters / histograms). Span attributes carry enough data
+  for the v1 dashboards.
+
+## Verifying the propagation contract
+
+`livekit-agent/tests/test_tracing.py` has 5 tests covering:
+
+- `context_from_traceparent(None)` and empty string both return `None`
+- Valid traceparent yields a usable `Context`
+- `install_tracer_provider()` is idempotent (LiveKit re-runs `prewarm`
+  across workers)
+- A span opened under a propagated context inherits the exact trace_id
+  encoded in the parent traceparent
+- A span opened with no propagated context starts a fresh root trace
+
+The 4th test is the load-bearing one — if it ever fails, distributed
+traces are broken end-to-end.
+
+## Files
+
+```
+instrumentation.ts                          Next.js OTel bootstrap (registerOTel)
+lib/tracing.ts                              traced() helper + currentTraceparent()
+livekit-agent/src/interview_agent/tracing.py
+                                            Python OTel bootstrap + context_from_traceparent()
+livekit-agent/tests/test_tracing.py         5 propagation-contract tests
+docs/observability.md                       (this file)
+```

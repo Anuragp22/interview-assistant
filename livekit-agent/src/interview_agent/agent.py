@@ -60,6 +60,11 @@ from interview_agent.session_data import (
     load_session_data,
     parse_session_id_from_room,
 )
+from interview_agent.tracing import (
+    context_from_traceparent,
+    get_tracer,
+    install_tracer_provider,
+)
 
 
 def _load_env() -> None:
@@ -189,7 +194,15 @@ class InterviewerBase(Agent):
         Use when you need a concrete fact (project name, tech, dates,
         specific JD requirement) before asking a question or follow-up.
         Returns the most relevant chunks from the indexed CV+JD."""
-        return await query_index(self._index, query, top_k=3)
+        tracer = get_tracer()
+        with tracer.start_as_current_span(
+            "agent.tool.lookup_cv_jd",
+            attributes={
+                "persona.id": self._persona.id,
+                "rag.query": query[:200],
+            },
+        ):
+            return await query_index(self._index, query, top_k=3)
 
     @function_tool()
     async def verify_cv_claim(self, context: RunContext, claim: str) -> str:
@@ -201,8 +214,20 @@ class InterviewerBase(Agent):
         Pass the claim VERBATIM (or close to it). Returns one of three
         verdicts (supported / ambiguous / unsupported) with similarity
         score and supporting evidence."""
-        result = await verify_claim(self._index, claim)
-        return result.for_llm()
+        tracer = get_tracer()
+        with tracer.start_as_current_span(
+            "agent.tool.verify_cv_claim",
+            attributes={
+                "persona.id": self._persona.id,
+                "claim": claim[:200],
+            },
+        ) as span:
+            result = await verify_claim(self._index, claim)
+            # Surface the verdict + similarity on the span so we can
+            # filter "unsupported" claims in the tracing UI later.
+            span.set_attribute("verdict", result.verdict)
+            span.set_attribute("similarity", result.max_similarity)
+            return result.for_llm()
 
 
 class BehavioralInterviewer(InterviewerBase):
@@ -212,42 +237,57 @@ class BehavioralInterviewer(InterviewerBase):
         """Spoken on activation. The first agent greets the candidate;
         subsequent agents are activated by hand-off and introduce
         themselves by role (their `on_enter` overrides below)."""
-        await self.session.generate_reply(
-            instructions=(
-                f"Briefly greet {_PANEL_CONTEXT.get('candidate_name', 'the candidate')} "
-                "by name, introduce yourself as Sarah running the behavioral round of a "
-                "three-interviewer panel, and ask the first behavioral question from "
-                "your agenda."
+        tracer = get_tracer()
+        with tracer.start_as_current_span(
+            "agent.on-enter",
+            attributes={"persona.id": self._persona.id},
+        ):
+            await self.session.generate_reply(
+                instructions=(
+                    f"Briefly greet {_PANEL_CONTEXT.get('candidate_name', 'the candidate')} "
+                    "by name, introduce yourself as Sarah running the behavioral round of a "
+                    "three-interviewer panel, and ask the first behavioral question from "
+                    "your agenda."
+                )
             )
-        )
 
     @function_tool()
     async def transfer_to_technical(self, context: RunContext) -> tuple[Agent, str]:
         """Hand off to the technical interviewer when the behavioral round
         has gathered enough signal (typically after 3-6 turns).
         After 8 turns you must transfer regardless."""
-        _ACTIVE_PERSONA_ID[0] = TECHNICAL_PERSONA.id
-        next_agent = TechnicalInterviewer(
-            index=self._index,
-            session_id=self._session_id,
-            persona=TECHNICAL_PERSONA,
-            chat_ctx=self.chat_ctx,
-        )
-        return next_agent, "Transferring to the technical interviewer."
+        tracer = get_tracer()
+        with tracer.start_as_current_span(
+            "agent.transfer",
+            attributes={"from.persona": self._persona.id, "to.persona": TECHNICAL_PERSONA.id},
+        ):
+            _ACTIVE_PERSONA_ID[0] = TECHNICAL_PERSONA.id
+            next_agent = TechnicalInterviewer(
+                index=self._index,
+                session_id=self._session_id,
+                persona=TECHNICAL_PERSONA,
+                chat_ctx=self.chat_ctx,
+            )
+            return next_agent, "Transferring to the technical interviewer."
 
 
 class TechnicalInterviewer(InterviewerBase):
     """Round 2 — implementation-depth technical interviewer (Adam)."""
 
     async def on_enter(self) -> None:
-        await self.session.generate_reply(
-            instructions=(
-                "Introduce yourself briefly as Adam, the technical interviewer for "
-                "this round of the panel. Acknowledge that you've seen the candidate's "
-                "earlier answers, then ask the first technical question from your "
-                "agenda."
+        tracer = get_tracer()
+        with tracer.start_as_current_span(
+            "agent.on-enter",
+            attributes={"persona.id": self._persona.id},
+        ):
+            await self.session.generate_reply(
+                instructions=(
+                    "Introduce yourself briefly as Adam, the technical interviewer for "
+                    "this round of the panel. Acknowledge that you've seen the candidate's "
+                    "earlier answers, then ask the first technical question from your "
+                    "agenda."
+                )
             )
-        )
 
     @function_tool()
     async def transfer_to_system_design(
@@ -256,40 +296,58 @@ class TechnicalInterviewer(InterviewerBase):
         """Hand off to the system design interviewer when the technical
         round is complete (typically 3-6 turns). After 8 turns you must
         transfer regardless."""
-        _ACTIVE_PERSONA_ID[0] = SYSTEM_DESIGN_PERSONA.id
-        next_agent = SystemDesignInterviewer(
-            index=self._index,
-            session_id=self._session_id,
-            persona=SYSTEM_DESIGN_PERSONA,
-            chat_ctx=self.chat_ctx,
-        )
-        return next_agent, "Transferring to the system design interviewer."
+        tracer = get_tracer()
+        with tracer.start_as_current_span(
+            "agent.transfer",
+            attributes={
+                "from.persona": self._persona.id,
+                "to.persona": SYSTEM_DESIGN_PERSONA.id,
+            },
+        ):
+            _ACTIVE_PERSONA_ID[0] = SYSTEM_DESIGN_PERSONA.id
+            next_agent = SystemDesignInterviewer(
+                index=self._index,
+                session_id=self._session_id,
+                persona=SYSTEM_DESIGN_PERSONA,
+                chat_ctx=self.chat_ctx,
+            )
+            return next_agent, "Transferring to the system design interviewer."
 
 
 class SystemDesignInterviewer(InterviewerBase):
     """Round 3 — system design interviewer (Bella). Last in the panel."""
 
     async def on_enter(self) -> None:
-        await self.session.generate_reply(
-            instructions=(
-                "Introduce yourself briefly as Bella, the system design interviewer "
-                "for the final round. Set up the first system design problem from "
-                "your agenda — start by stating the scenario and asking the "
-                "candidate to clarify constraints before diving in."
+        tracer = get_tracer()
+        with tracer.start_as_current_span(
+            "agent.on-enter",
+            attributes={"persona.id": self._persona.id},
+        ):
+            await self.session.generate_reply(
+                instructions=(
+                    "Introduce yourself briefly as Bella, the system design interviewer "
+                    "for the final round. Set up the first system design problem from "
+                    "your agenda — start by stating the scenario and asking the "
+                    "candidate to clarify constraints before diving in."
+                )
             )
-        )
 
     @function_tool()
     async def end_interview(self, context: RunContext) -> str:
         """End the interview after the system design round.
         Call this when you have enough signal or after 8 turns. The
         candidate's recording wraps up and report generation begins."""
-        logger.info("end_interview tool invoked; signalling session close")
-        _END_INTERVIEW_FLAG.set()
-        return (
-            "Thanks for your time. The panel is complete — your report will "
-            "be ready shortly."
-        )
+        tracer = get_tracer()
+        with tracer.start_as_current_span(
+            "agent.end-interview",
+            attributes={"persona.id": self._persona.id},
+        ):
+            logger.info("end_interview tool invoked; signalling session close")
+            _END_INTERVIEW_FLAG.set()
+            return (
+                "Thanks for your time. The panel is complete — your report will "
+                "be ready shortly."
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -305,6 +363,26 @@ async def entrypoint(ctx: JobContext) -> None:
     await ctx.connect()
     db = init_firebase()
     session_data = load_session_data(db, session_id)
+
+    # Rehydrate the trace started by the Next.js server action, if any.
+    # When `traceparent` is present on the session doc, all spans below
+    # become children of the Next-side root span — one trace covers the
+    # full session create → interview → report flow across processes.
+    parent_ctx = context_from_traceparent(session_data.traceparent)
+    tracer = get_tracer()
+
+    panel_span_cm = tracer.start_as_current_span(
+        "agent.panel-session",
+        context=parent_ctx,
+        attributes={
+            "session.id": session_id,
+            "candidate.uid": session_data.candidate_uid,
+            "interview.role": session_data.role,
+            "interview.level": session_data.level,
+            "trace.propagated": session_data.traceparent is not None,
+        },
+    )
+    panel_span_cm.__enter__()
 
     index = build_index(
         cv_text=session_data.cv_extracted_text,
@@ -409,6 +487,9 @@ async def entrypoint(ctx: JobContext) -> None:
             except Exception:  # noqa: BLE001
                 # session may already be closed by _watch_for_end; ignore
                 pass
+            # Close the panel-session span last so that the close-down
+            # latency (drain + aclose) is included in its duration.
+            panel_span_cm.__exit__(None, None, None)
 
 
 async def _write_turn(repo: TurnsRepository, turn: Turn) -> None:
@@ -424,10 +505,13 @@ async def _request_fnc(req: JobRequest) -> None:
 
 
 def prewarm(proc: JobProcess) -> None:
-    """Pre-load Silero VAD + fastembed model once per worker process."""
+    """Pre-load Silero VAD + fastembed model once per worker process,
+    and install the OTel TracerProvider so every session in this worker
+    can emit spans without re-bootstrapping."""
     from livekit.plugins import silero
     from interview_agent.rag import prewarm_fastembed
 
+    install_tracer_provider()
     proc.userdata["vad"] = silero.VAD.load()
     prewarm_fastembed()
 
