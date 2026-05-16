@@ -131,6 +131,10 @@ interface Session {
   templateId: string;
   inviteToken: string;
   candidateUid: string;
+  // hrUid is denormalized from the parent template at session-create time so
+  // route handlers can authorize without an extra read. Optional because
+  // legacy data may not have it.
+  hrUid?: string;
   cvStorageRef?: string;
   cvExtractedText?: string;
   questionsGrounded?: string[];
