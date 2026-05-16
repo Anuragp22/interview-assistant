@@ -7,11 +7,15 @@ manually via the practice / candidate smoke flows.
 build_agent() and the prompts.py module were removed when agent.py
 switched to constructing GeneralInterviewer directly with persona-
 rendered instructions (v0.1 Task 18).
+
+Session-level TTS was removed when the multi-agent panel landed —
+each Agent subclass now owns its own TTS provider so the candidate
+hears different voices per round.
 """
 
 import pytest
 from livekit.agents.voice import AgentSession
-from livekit.plugins import deepgram, elevenlabs, openai, silero
+from livekit.plugins import deepgram, openai, silero
 
 from interview_agent.pipeline import (
     DEFAULT_GROQ_MODEL,
@@ -41,7 +45,8 @@ def test_build_session_returns_agent_session():
 def test_build_session_wires_expected_providers():
     session = build_session()
     assert isinstance(session.stt, deepgram.STT)
-    assert isinstance(session.tts, elevenlabs.TTS)
+    # session-level TTS is intentionally None — each Agent supplies its own
+    assert session.tts is None
     # The LLM is still openai.LLM-typed because the OpenAI plugin's client
     # is OpenAI-compatible; we just point its base_url at Groq.
     assert isinstance(session.llm, openai.LLM)

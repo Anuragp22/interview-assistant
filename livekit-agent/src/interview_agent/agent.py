@@ -1,4 +1,4 @@
-"""LiveKit agent entrypoint for the v0.1 HR interview platform.
+"""LiveKit agent entrypoint for the multi-agent interview panel.
 
 Run with:
     uv run python -m interview_agent.agent dev      # local development
@@ -6,14 +6,17 @@ Run with:
 
 Room-naming contract:
     Rooms are named `session-{sessionId}`.
-    All per-call inputs (CV, JD, grounded questions, candidate name, role,
-    level) are loaded from Firestore at dispatch time using the session id
-    extracted from the room name.
+    All per-call inputs (CV, JD, grounded questions per round, candidate
+    name, role, level) are loaded from Firestore at dispatch time using
+    the session id extracted from the room name.
 
-This module is the worker entrypoint, not unit-tested end-to-end. The
-unit-testable helpers (drain_pending_tasks, GeneralInterviewer) are
-covered in test_agent.py. Live behavior is verified via the Task 18
-integration smoke.
+Multi-agent panel:
+    The session starts with BehavioralInterviewer. Each agent's prompt
+    instructs it to call `transfer_to_<next>` after enough signal; the
+    @function_tool returns the next Agent instance, which `AgentSession`
+    swaps in place. SystemDesignInterviewer ends the panel via
+    `end_interview` — that sets a module-level Event the entrypoint
+    watches in parallel with the session task.
 """
 
 from __future__ import annotations
@@ -28,7 +31,6 @@ from typing import Any
 from dotenv import load_dotenv
 from livekit.agents import (
     Agent,
-    AgentSession,
     JobContext,
     JobProcess,
     JobRequest,
@@ -38,8 +40,16 @@ from livekit.agents import (
 )
 from livekit.agents.llm import ChatMessage
 from livekit.agents.voice.events import ConversationItemAddedEvent
+from livekit.plugins import elevenlabs
 
-from interview_agent.persona import GENERAL_PERSONA, render_system_prompt
+from interview_agent.persona import (
+    BEHAVIORAL_PERSONA,
+    PERSONA_BY_ID,
+    Persona,
+    SYSTEM_DESIGN_PERSONA,
+    TECHNICAL_PERSONA,
+    render_system_prompt,
+)
 from interview_agent.persistence.firestore import TurnsRepository, init_firebase
 from interview_agent.persistence.models import Turn
 from interview_agent.pipeline import build_session
@@ -53,24 +63,10 @@ from interview_agent.session_data import (
 
 def _load_env() -> None:
     """Load env vars from both the agent's own ``.env`` and the repo-root
-    ``.env.local`` (the Next.js side's env file).
-
-    Sharing a single ``.env.local`` in dev means we don't maintain duplicate
-    Firebase / LiveKit secrets across two files. In a Docker deploy the root
-    ``.env.local`` won't exist and only ``livekit-agent/.env`` is loaded —
-    same code, no behavior change.
-
-    Also aliases ``NEXT_PUBLIC_LIVEKIT_URL`` → ``LIVEKIT_URL`` if only the
-    Next.js name is set. The livekit-agents framework reads ``LIVEKIT_URL``
-    for worker registration, but ``.env.local`` already exposes the same
-    value as ``NEXT_PUBLIC_LIVEKIT_URL`` for the browser SDK.
-    """
-    # The repo root is `livekit-agent/src/interview_agent/agent.py` → parents[3].
+    ``.env.local``."""
     repo_root_env = Path(__file__).resolve().parents[3] / ".env.local"
     if repo_root_env.exists():
         load_dotenv(dotenv_path=repo_root_env)
-    # `.env` in CWD (typically livekit-agent/.env). Override-on-conflict so
-    # deploy-specific values win when both files set the same key.
     load_dotenv(override=True)
 
     if "LIVEKIT_URL" not in os.environ and "NEXT_PUBLIC_LIVEKIT_URL" in os.environ:
@@ -83,28 +79,42 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("interview-agent")
 
 
+# ---------------------------------------------------------------------------
+# Module-level state shared between Agent subclasses + entrypoint.
+#
+# A LiveKit worker forks a subprocess per session, so each call gets its own
+# module instance. These dicts/flags are reset at the top of `entrypoint()`
+# and consumed by the @function_tool methods on the Agent subclasses.
+# ---------------------------------------------------------------------------
+
+# Per-round grounded questions, keyed by persona id. Populated by `entrypoint`
+# from SessionData. Read by `transfer_to_<next>` tools to render the next
+# agent's system prompt.
+_NEXT_QUESTIONS_BY_PERSONA: dict[str, list[str]] = {}
+
+# Candidate-level context passed through all agents in the panel.
+_PANEL_CONTEXT: dict[str, str] = {}
+
+# Set by SystemDesignInterviewer.end_interview to signal the entrypoint that
+# the panel is finished. Also set by the 30-turn ceiling in `_on_item`.
+_END_INTERVIEW_FLAG = asyncio.Event()
+
+# Single-element list used as a mutable holder for the active persona id —
+# read by the `_on_item` turn-persistence handler so each turn is tagged
+# with the right persona. List rather than module-level string so closures
+# always see the latest write without rebinding.
+_ACTIVE_PERSONA_ID: list[str] = [BEHAVIORAL_PERSONA.id]
+
+
+# ---------------------------------------------------------------------------
+# Common helpers
+# ---------------------------------------------------------------------------
+
 async def drain_pending_tasks(tasks: set[asyncio.Task[Any]]) -> None:
-    """Await every task in ``tasks``; re-raise the first exception, if any.
-
-    The function is self-contained: it removes tasks from the set as it
-    processes them, so callers don't need to wire ``add_done_callback`` for
-    progress. It also loops in case a hook task schedules additional tasks
-    into the same set during the drain (e.g. a hook that fans out to another
-    hook).
-
-    Why ``return_exceptions=True``: the default ``gather`` short-circuits on the
-    first exception, leaving the remaining tasks pending. That dropped data
-    silently before. With ``return_exceptions=True`` every task is awaited to
-    completion; we then surface the first exception to the caller so the worker
-    log shows the real failure instead of an asyncio "Task was destroyed but it
-    is pending" warning.
-    """
+    """Await every task in ``tasks``; re-raise the first exception, if any."""
     first_exc: BaseException | None = None
     while tasks:
         snapshot = list(tasks)
-        # Pop the snapshot out of the set BEFORE awaiting so the loop can't
-        # spin forever if the caller didn't install a discard done-callback.
-        # Tasks scheduled mid-drain still show up in the set on the next pass.
         tasks.difference_update(snapshot)
         results = await asyncio.gather(*snapshot, return_exceptions=True)
         for r in results:
@@ -115,13 +125,54 @@ async def drain_pending_tasks(tasks: set[asyncio.Task[Any]]) -> None:
         raise first_exc
 
 
-class GeneralInterviewer(Agent):
-    """v0.1 single Persona. Sub-project E adds sibling Agent subclasses."""
+def _build_tts_for(persona: Persona) -> elevenlabs.TTS:
+    """Construct an ElevenLabs TTS provider configured for one persona."""
+    return elevenlabs.TTS(
+        voice_id=persona.voice_id,
+        voice_settings=elevenlabs.VoiceSettings(
+            stability=persona.voice_stability,
+            similarity_boost=persona.voice_similarity_boost,
+            style=persona.voice_style,
+            speed=persona.voice_speed,
+            use_speaker_boost=persona.voice_use_speaker_boost,
+        ),
+    )
 
-    def __init__(self, *, instructions: str, index: Any, session_id: str) -> None:
-        super().__init__(instructions=instructions)
+
+def _render_for(persona: Persona) -> str:
+    """Render `persona`'s system prompt using the current panel context +
+    the round-specific grounded questions stashed in module state."""
+    return render_system_prompt(
+        persona=persona,
+        candidate_name=_PANEL_CONTEXT["candidate_name"],
+        role=_PANEL_CONTEXT["role"],
+        level=_PANEL_CONTEXT["level"],
+        questions_grounded=_NEXT_QUESTIONS_BY_PERSONA.get(persona.id, []),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Agent subclasses
+# ---------------------------------------------------------------------------
+
+class InterviewerBase(Agent):
+    """Shared base for the 3-agent panel. Owns the common tools and per-
+    persona TTS override."""
+
+    def __init__(
+        self,
+        *,
+        index: Any,
+        session_id: str,
+        persona: Persona,
+    ) -> None:
+        super().__init__(
+            instructions=_render_for(persona),
+            tts=_build_tts_for(persona),
+        )
         self._index = index
         self._session_id = session_id
+        self._persona = persona
 
     @function_tool
     async def lookup_cv_jd(self, query: str) -> str:
@@ -138,20 +189,64 @@ class GeneralInterviewer(Agent):
         mentions a specific project, employer, technology, tenure, or
         numeric outcome that isn't already in the agenda question.
 
-        Pass the claim VERBATIM (or close to it), e.g.:
-          "led the Vespa search migration at Razorpay"
-          "two years as a backend engineer at Stripe"
-          "cut p95 latency from 340ms to 90ms"
-
-        Returns one of three verdicts:
-          - supported   → safe to treat as fact; ask a deeper follow-up.
-          - ambiguous   → CV mentions something nearby; ask to disambiguate.
-          - unsupported → nothing supports it; probe for specifics rather
-                          than accepting the claim at face value.
-        """
+        Pass the claim VERBATIM (or close to it). Returns one of three
+        verdicts (supported / ambiguous / unsupported) with similarity
+        score and supporting evidence."""
         result = await verify_claim(self._index, claim)
         return result.for_llm()
 
+
+class BehavioralInterviewer(InterviewerBase):
+    """Round 1 — STAR-method behavioral interviewer (Sarah)."""
+
+    @function_tool
+    async def transfer_to_technical(self) -> Agent:
+        """Hand off to the technical interviewer when the behavioral round
+        has gathered enough signal (typically after 3-6 turns).
+        After 8 turns you must transfer regardless."""
+        _ACTIVE_PERSONA_ID[0] = TECHNICAL_PERSONA.id
+        return TechnicalInterviewer(
+            index=self._index,
+            session_id=self._session_id,
+            persona=TECHNICAL_PERSONA,
+        )
+
+
+class TechnicalInterviewer(InterviewerBase):
+    """Round 2 — implementation-depth technical interviewer (Adam)."""
+
+    @function_tool
+    async def transfer_to_system_design(self) -> Agent:
+        """Hand off to the system design interviewer when the technical
+        round is complete (typically 3-6 turns). After 8 turns you must
+        transfer regardless."""
+        _ACTIVE_PERSONA_ID[0] = SYSTEM_DESIGN_PERSONA.id
+        return SystemDesignInterviewer(
+            index=self._index,
+            session_id=self._session_id,
+            persona=SYSTEM_DESIGN_PERSONA,
+        )
+
+
+class SystemDesignInterviewer(InterviewerBase):
+    """Round 3 — system design interviewer (Bella). Last in the panel."""
+
+    @function_tool
+    async def end_interview(self) -> str:
+        """End the interview after the system design round.
+        Call this when you have enough signal or after 8 turns. The
+        candidate's recording wraps up and report generation begins."""
+        logger.info("end_interview tool invoked; signalling session close")
+        _END_INTERVIEW_FLAG.set()
+        return (
+            "Thanks for your time. The panel is complete — your report will "
+            "be ready shortly."
+        )
+
+
+# ---------------------------------------------------------------------------
+# Entrypoint
+# ---------------------------------------------------------------------------
 
 async def entrypoint(ctx: JobContext) -> None:
     session_id = parse_session_id_from_room(ctx.room.name)
@@ -168,27 +263,40 @@ async def entrypoint(ctx: JobContext) -> None:
         jd_text=session_data.job_description,
     )
 
-    instructions = render_system_prompt(
-        persona=GENERAL_PERSONA,
-        candidate_name=session_data.candidate_name,
-        role=session_data.role,
-        level=session_data.level,
-        questions_grounded=session_data.questions_grounded,
+    # Reset module-level state so each session starts clean.
+    _NEXT_QUESTIONS_BY_PERSONA.clear()
+    _NEXT_QUESTIONS_BY_PERSONA["behavioral"] = list(
+        session_data.questions_by_persona.behavioral
     )
-    agent = GeneralInterviewer(
-        instructions=instructions,
+    _NEXT_QUESTIONS_BY_PERSONA["technical"] = list(
+        session_data.questions_by_persona.technical
+    )
+    _NEXT_QUESTIONS_BY_PERSONA["system-design"] = list(
+        session_data.questions_by_persona.system_design
+    )
+    _PANEL_CONTEXT.clear()
+    _PANEL_CONTEXT["candidate_name"] = session_data.candidate_name
+    _PANEL_CONTEXT["role"] = session_data.role
+    _PANEL_CONTEXT["level"] = session_data.level
+    _END_INTERVIEW_FLAG.clear()
+    _ACTIVE_PERSONA_ID[0] = BEHAVIORAL_PERSONA.id
+
+    # Construct the first Agent (Behavioral round). Subsequent agents are
+    # constructed by `transfer_to_*` tools when the active agent decides to
+    # hand off.
+    agent = BehavioralInterviewer(
         index=index,
         session_id=session_id,
+        persona=BEHAVIORAL_PERSONA,
     )
 
     turns_repo = TurnsRepository(db, session_id=session_id)
-    vad = ctx.proc.userdata.get("vad")  # set by prewarm; may be None on first dispatch
+    vad = ctx.proc.userdata.get("vad")
     voice_session = build_session(vad=vad)
 
     pending_hook_tasks: set[asyncio.Task[Any]] = set()
 
     def _track_task(coro: Any) -> None:
-        """Schedule a hook coroutine and track it so we can drain on shutdown."""
         task = asyncio.create_task(coro)
         pending_hook_tasks.add(task)
         task.add_done_callback(pending_hook_tasks.discard)
@@ -212,26 +320,47 @@ async def entrypoint(ctx: JobContext) -> None:
             ended_at=now,
             index=turn_index,
             metadata={
-                "personaId": GENERAL_PERSONA.id,
+                "personaId": _ACTIVE_PERSONA_ID[0],
                 "modelId": "llama-3.3-70b-versatile",
             },
         )
-        # Increment after capturing the index for this turn.
         _track_task(_write_turn(turns_repo, turn))
         turn_index += 1
+
+        # Hard ceiling: 30 turns total. Soft cap per agent (8 turns) is
+        # enforced in the persona rules.
+        if turn_index >= 30:
+            logger.warning(
+                "session %s hit 30-turn ceiling; ending", session_id
+            )
+            _END_INTERVIEW_FLAG.set()
 
     db.collection("sessions").document(session_id).update({
         "status": "in-call",
         "startedAt": datetime.now(timezone.utc).isoformat(),
     })
 
+    async def _watch_for_end() -> None:
+        """Close the session when end_interview tool fires or the 30-turn
+        ceiling trips."""
+        await _END_INTERVIEW_FLAG.wait()
+        logger.info("end-interview signal received; closing session")
+        await voice_session.aclose()
+
+    end_watcher = asyncio.create_task(_watch_for_end())
+
     try:
         await voice_session.start(agent=agent, room=ctx.room)
     finally:
+        end_watcher.cancel()
         try:
             await drain_pending_tasks(pending_hook_tasks)
         finally:
-            await voice_session.aclose()
+            try:
+                await voice_session.aclose()
+            except Exception:  # noqa: BLE001
+                # session may already be closed by _watch_for_end; ignore
+                pass
 
 
 async def _write_turn(repo: TurnsRepository, turn: Turn) -> None:
@@ -253,6 +382,21 @@ def prewarm(proc: JobProcess) -> None:
 
     proc.userdata["vad"] = silero.VAD.load()
     prewarm_fastembed()
+
+
+# Re-export PERSONA_BY_ID for test access without forcing test_agent to
+# import from persona directly (keeps the public surface of agent.py
+# coherent with what tests want to assert).
+__all__ = [
+    "BehavioralInterviewer",
+    "InterviewerBase",
+    "PERSONA_BY_ID",
+    "SystemDesignInterviewer",
+    "TechnicalInterviewer",
+    "drain_pending_tasks",
+    "entrypoint",
+    "prewarm",
+]
 
 
 if __name__ == "__main__":

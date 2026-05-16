@@ -1,19 +1,19 @@
-"""Factories for the AgentSession + Agent pair the worker dispatches per call.
+"""Factory for the provider-bound AgentSession the worker dispatches per call.
 
-`livekit-agents` 1.x split the old VoicePipelineAgent into:
-  - AgentSession: owns the providers (STT, LLM, TTS, VAD) and runs the loop.
-  - Agent: carries the system prompt (instructions) and chat context.
+`livekit-agents` 1.x splits the old VoicePipelineAgent into:
+  - AgentSession: owns the session-level providers (STT, LLM, VAD) and
+    runs the loop.
+  - Agent: carries the system prompt + tools + TTS.
+
+Multi-agent panel: TTS lives ON each Agent subclass, not on the session.
+When the active Agent swaps via a transfer_to_<next> tool, its TTS takes
+over so the candidate hears the new voice. The session therefore has no
+default TTS — each persona owns its own.
 
 Wires:
   Deepgram nova-2 STT
   Groq LLM (via OpenAI-compatible endpoint at api.groq.com/openai/v1)
-  11labs Sarah TTS (voice_id from voice_settings())
   Silero VAD
-
-Hooks are NOT wired here. The worker (agent.py / Task 7) constructs the
-session+agent via these factories, then registers hook callbacks against
-session events. This module is hook-agnostic so sub-projects B and C can
-reuse it without modification.
 """
 
 from __future__ import annotations
@@ -21,36 +21,14 @@ from __future__ import annotations
 import os
 
 from livekit.agents.voice import AgentSession
-from livekit.plugins import deepgram, elevenlabs, openai, silero
-
-
-# ElevenLabs Sarah voice settings.
-# voice_id is the public premade "Sarah" voice (EXAVITQu4vr4xnSDxMaL); the
-# other values are tuned for a slightly slower, mid-emotive, on-character
-# interviewer voice. The persona module owns the voice_id semantically
-# (GENERAL_PERSONA.voice_id matches) — if we ever ship multiple personas
-# with per-persona voices, swap this for a per-Agent TTS override.
-_VOICE_SETTINGS = {
-    "voice_id": "EXAVITQu4vr4xnSDxMaL",
-    "stability": 0.4,
-    "similarity_boost": 0.8,
-    "speed": 0.9,
-    "style": 0.5,
-    "use_speaker_boost": True,
-}
+from livekit.plugins import deepgram, openai, silero
 
 
 # Groq exposes an OpenAI-compatible Chat Completions endpoint, so the existing
 # `livekit-plugins-openai` plugin works with no extra dependency — we just
 # point its base_url at Groq and pass the Groq API key.
-# Source: https://console.groq.com/docs/openai
 GROQ_BASE_URL = "https://api.groq.com/openai/v1"
 
-# Default Groq model: their flagship general-purpose production-tier model.
-# `llama-3.3-70b-versatile` is intended for sophisticated chat use, with
-# strong reasoning + reasonable latency — appropriate for an interviewer agent.
-# Override per-deploy via GROQ_MODEL env if needed (e.g. for cost or speed
-# tuning). Models on Groq deprecate fast — confirm via console.groq.com/docs/models.
 DEFAULT_GROQ_MODEL = "llama-3.3-70b-versatile"
 
 
@@ -77,28 +55,16 @@ def _build_groq_llm() -> openai.LLM:
 def build_session(*, vad: silero.VAD | None = None) -> AgentSession:
     """Construct the provider-bound AgentSession.
 
-    Provider-only — the system prompt and chat context live on the Agent
-    (see build_agent). The session is started by the worker via
-    `await session.start(agent=agent, room=room, ...)`.
+    No TTS at session level — each Agent subclass provides its own via
+    persona-specific voice_settings (see agent.py:_build_tts_for).
 
     `vad` is an optional pre-loaded Silero VAD. The worker's prewarm
     function should load the VAD once and pass it here on each dispatch
-    to avoid reloading per session (see T7 prewarm_fnc).
+    to avoid reloading per session.
     """
-    voice = _VOICE_SETTINGS
-
     return AgentSession(
         vad=vad if vad is not None else silero.VAD.load(),
         stt=deepgram.STT(model="nova-2", language="en-US"),
         llm=_build_groq_llm(),
-        tts=elevenlabs.TTS(
-            voice_id=voice["voice_id"],
-            voice_settings=elevenlabs.VoiceSettings(
-                stability=voice["stability"],
-                similarity_boost=voice["similarity_boost"],
-                style=voice["style"],
-                speed=voice["speed"],
-                use_speaker_boost=voice["use_speaker_boost"],
-            ),
-        ),
+        # tts intentionally omitted — each Agent supplies its own.
     )
