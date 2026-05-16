@@ -166,6 +166,14 @@ interface Session {
   // context and join the same end-to-end trace. Absent on legacy sessions
   // created before OTel was wired up.
   traceparent?: string;
+  // Which persona was active when the session was last interacted with.
+  // The agent writes this on every transfer_to_* hand-off. On resume
+  // (user reopens /practice/{id} after closing the tab), the agent reads
+  // this to know whether to start the panel at Behavioral / Technical /
+  // System Design instead of always starting at Behavioral. Absent on
+  // sessions that pre-date resumable sessions — those default to
+  // "behavioral" at the agent layer.
+  currentPersonaId?: "behavioral" | "technical" | "system-design";
   // Estimated session cost in USD, broken down by provider. Written by
   // the Python agent's SessionCostAggregator at end-of-session using
   // the rate table at lib/cost-rates.ts (mirrored in

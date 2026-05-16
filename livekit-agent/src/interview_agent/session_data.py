@@ -34,6 +34,11 @@ class SessionData:
     # W3C traceparent value written by the Next.js server action that
     # created this session. None for legacy sessions that pre-date OTel.
     traceparent: str | None = None
+    # Which persona was active the last time the agent touched this
+    # session. Used by the resume path so a tab-reopened mid-interview
+    # session restarts at the correct round. None on first-call
+    # sessions; "behavioral" is the implied default at the agent layer.
+    current_persona_id: str | None = None
 
 
 SESSION_ROOM_PREFIX = "session-"
@@ -57,6 +62,11 @@ def load_session_data(db: Any, session_id: str) -> SessionData:
         raise RuntimeError(f"Session {session_id} not found")
     session = session_doc.to_dict()
 
+    # "in-call" is a valid load state because it's exactly what we hit
+    # on the resume path: the user closed the tab mid-interview, the
+    # session doc still says "in-call", and the agent re-dispatches to
+    # continue. The rehydration step in agent.entrypoint() picks up
+    # the existing turns and restores the chat context.
     if session.get("status") not in ("awaiting-call", "in-call", "reconnecting"):
         raise RuntimeError(
             f"Session {session_id} is not in a callable state: {session.get('status')}"
@@ -106,4 +116,5 @@ def load_session_data(db: Any, session_id: str) -> SessionData:
             system_design=list(qbp["systemDesign"]),
         ),
         traceparent=session.get("traceparent"),
+        current_persona_id=session.get("currentPersonaId"),
     )

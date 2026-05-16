@@ -146,3 +146,45 @@ class TurnsRepository:
                 turn.index,
                 self._interview_id,
             )
+
+    def list_turns(self) -> list[Turn]:
+        """Read all persisted turns for this session, ordered by index.
+
+        Used by the agent's resume path: when an entrypoint sees an
+        existing session with prior turns, it loads them via this
+        method and rehydrates the ChatContext so the next-spoken
+        agent persona inherits the full conversation history.
+
+        Returns an empty list when no turns exist (e.g. a fresh
+        session that crashed before its first exchange).
+        """
+        if self._session_id is None:
+            raise NotImplementedError(
+                "list_turns() is session-scoped; the interview_id path "
+                "predates resumable sessions and is not supported."
+            )
+
+        snap = (
+            self._client.collection("sessions")
+            .document(self._session_id)
+            .collection("turns")
+            .order_by("index")
+            .get()
+        )
+
+        out: list[Turn] = []
+        for doc in snap:
+            d = doc.to_dict()
+            if d is None:
+                continue
+            out.append(
+                Turn(
+                    role=d["role"],
+                    content=d["content"],
+                    started_at=d["startedAt"],
+                    ended_at=d["endedAt"],
+                    index=int(d["index"]),
+                    metadata=d.get("metadata"),
+                )
+            )
+        return out

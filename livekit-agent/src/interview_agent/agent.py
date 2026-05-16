@@ -39,7 +39,7 @@ from livekit.agents import (
     cli,
     function_tool,
 )
-from livekit.agents.llm import ChatMessage
+from livekit.agents.llm import ChatContext, ChatMessage
 from livekit.agents.voice.events import ConversationItemAddedEvent
 from livekit.plugins import elevenlabs
 
@@ -113,6 +113,37 @@ _END_INTERVIEW_FLAG = asyncio.Event()
 # always see the latest write without rebinding.
 _ACTIVE_PERSONA_ID: list[str] = [BEHAVIORAL_PERSONA.id]
 
+# Firestore handle for cross-tool currentPersonaId persistence — set in
+# entrypoint(). Per-session forked subprocess, so this is safe to be a
+# module-level singleton.
+_DB: Any = None
+
+
+def _persist_active_persona(persona_id: str) -> None:
+    """Best-effort write of ``currentPersonaId`` to the session doc.
+
+    Called from each ``transfer_to_*`` tool so a tab-reopened
+    mid-interview session knows which round to resume at. Wrapped in a
+    try/except so a Firestore blip during a transfer can't poison the
+    panel hand-off — the worst case is the next resume restarts the
+    panel at Behavioral, which is still a usable degraded experience.
+    """
+    if _DB is None:
+        return
+    session_id = _PANEL_CONTEXT.get("session_id")
+    if not session_id:
+        return
+    try:
+        _DB.collection("sessions").document(session_id).update(
+            {"currentPersonaId": persona_id}
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "failed to persist currentPersonaId=%s for session %s",
+            persona_id,
+            session_id,
+        )
+
 
 # ---------------------------------------------------------------------------
 # Common helpers
@@ -185,6 +216,12 @@ class InterviewerBase(Agent):
     persists across hand-offs (the canonical livekit-agents handoff
     pattern). Without this, the next interviewer doesn't see what the
     candidate already answered to the previous one.
+
+    `resume_mode=True` suppresses the per-persona ``on_enter`` greeting.
+    Set only for the FIRST agent constructed when a session is being
+    resumed mid-flight — re-greeting the candidate ("Hi, I'm Sarah
+    again") after they reopen a tab feels broken. Subsequent personas
+    activated via ``transfer_to_*`` always intro themselves as usual.
     """
 
     def __init__(
@@ -194,6 +231,7 @@ class InterviewerBase(Agent):
         session_id: str,
         persona: Persona,
         chat_ctx: Any = None,
+        resume_mode: bool = False,
     ) -> None:
         super().__init__(
             instructions=_render_for(persona),
@@ -203,6 +241,7 @@ class InterviewerBase(Agent):
         self._index = index
         self._session_id = session_id
         self._persona = persona
+        self._resume_mode = resume_mode
 
     @function_tool()
     async def lookup_cv_jd(self, context: RunContext, query: str) -> str:
@@ -252,7 +291,16 @@ class BehavioralInterviewer(InterviewerBase):
     async def on_enter(self) -> None:
         """Spoken on activation. The first agent greets the candidate;
         subsequent agents are activated by hand-off and introduce
-        themselves by role (their `on_enter` overrides below)."""
+        themselves by role (their `on_enter` overrides below).
+
+        On resume (``resume_mode=True``), the greeting is suppressed and
+        the agent waits for the candidate to speak — re-introducing
+        Sarah after the candidate just reopened the tab would feel
+        broken.
+        """
+        if self._resume_mode:
+            logger.info("BehavioralInterviewer.on_enter: resume_mode, skipping greeting")
+            return
         tracer = get_tracer()
         with tracer.start_as_current_span(
             "agent.on-enter",
@@ -278,6 +326,7 @@ class BehavioralInterviewer(InterviewerBase):
             attributes={"from.persona": self._persona.id, "to.persona": TECHNICAL_PERSONA.id},
         ):
             _ACTIVE_PERSONA_ID[0] = TECHNICAL_PERSONA.id
+            _persist_active_persona(TECHNICAL_PERSONA.id)
             next_agent = TechnicalInterviewer(
                 index=self._index,
                 session_id=self._session_id,
@@ -291,6 +340,9 @@ class TechnicalInterviewer(InterviewerBase):
     """Round 2 — implementation-depth technical interviewer (Adam)."""
 
     async def on_enter(self) -> None:
+        if self._resume_mode:
+            logger.info("TechnicalInterviewer.on_enter: resume_mode, skipping greeting")
+            return
         tracer = get_tracer()
         with tracer.start_as_current_span(
             "agent.on-enter",
@@ -321,6 +373,7 @@ class TechnicalInterviewer(InterviewerBase):
             },
         ):
             _ACTIVE_PERSONA_ID[0] = SYSTEM_DESIGN_PERSONA.id
+            _persist_active_persona(SYSTEM_DESIGN_PERSONA.id)
             next_agent = SystemDesignInterviewer(
                 index=self._index,
                 session_id=self._session_id,
@@ -334,6 +387,9 @@ class SystemDesignInterviewer(InterviewerBase):
     """Round 3 — system design interviewer (Bella). Last in the panel."""
 
     async def on_enter(self) -> None:
+        if self._resume_mode:
+            logger.info("SystemDesignInterviewer.on_enter: resume_mode, skipping greeting")
+            return
         tracer = get_tracer()
         with tracer.start_as_current_span(
             "agent.on-enter",
@@ -370,6 +426,53 @@ class SystemDesignInterviewer(InterviewerBase):
 # Entrypoint
 # ---------------------------------------------------------------------------
 
+def _build_chat_ctx_from_turns(turns: list[Any]) -> ChatContext:
+    """Replay persisted turns into a fresh ChatContext.
+
+    Used by the resume path. We use ``ChatContext.empty()`` + per-turn
+    ``add_message()`` rather than ``ChatContext.from_dict()`` because the
+    Firestore turn shape is our own (role/content/index/metadata) and
+    doesn't match the SDK's chat-context serialization.
+
+    Turns are written ordered (`turns_repo.list_turns` does an
+    `order_by("index")`) so we replay them in conversation order.
+    """
+    ctx = ChatContext.empty()
+    for t in turns:
+        ctx.add_message(role=t.role, content=t.content)
+    return ctx
+
+
+def _starting_persona_for_resume(persona_id: str | None) -> Persona:
+    """Resolve a stored ``currentPersonaId`` string back to a Persona.
+
+    Unknown / missing values fall back to Behavioral, which is the
+    correct degraded behaviour: starting one persona earlier than ideal
+    is much less disruptive than crashing the resume entirely.
+    """
+    if persona_id == TECHNICAL_PERSONA.id:
+        return TECHNICAL_PERSONA
+    if persona_id == SYSTEM_DESIGN_PERSONA.id:
+        return SYSTEM_DESIGN_PERSONA
+    return BEHAVIORAL_PERSONA
+
+
+def starting_persona_cls_for(persona: Persona) -> type["InterviewerBase"]:
+    """Map a Persona to its Agent subclass.
+
+    Used by the entrypoint when constructing the first agent: on a
+    fresh session it's always BehavioralInterviewer; on a resume it
+    might be any of the three depending on where the candidate left
+    off. The transfer_to_* tools don't need this — they already know
+    the next class by name.
+    """
+    if persona.id == TECHNICAL_PERSONA.id:
+        return TechnicalInterviewer
+    if persona.id == SYSTEM_DESIGN_PERSONA.id:
+        return SystemDesignInterviewer
+    return BehavioralInterviewer
+
+
 async def entrypoint(ctx: JobContext) -> None:
     session_id = parse_session_id_from_room(ctx.room.name)
     if session_id is None:
@@ -379,6 +482,12 @@ async def entrypoint(ctx: JobContext) -> None:
     await ctx.connect()
     db = init_firebase()
     session_data = load_session_data(db, session_id)
+
+    # Make Firestore + session id reachable from the transfer tools so
+    # they can persist currentPersonaId. Module-level singletons are
+    # fine because each session runs in its own worker subprocess.
+    global _DB
+    _DB = db
 
     # Rehydrate the trace started by the Next.js server action, if any.
     # When `traceparent` is present on the session doc, all spans below
@@ -417,22 +526,50 @@ async def entrypoint(ctx: JobContext) -> None:
         session_data.questions_by_persona.system_design
     )
     _PANEL_CONTEXT.clear()
+    _PANEL_CONTEXT["session_id"] = session_id
     _PANEL_CONTEXT["candidate_name"] = session_data.candidate_name
     _PANEL_CONTEXT["role"] = session_data.role
     _PANEL_CONTEXT["level"] = session_data.level
     _END_INTERVIEW_FLAG.clear()
-    _ACTIVE_PERSONA_ID[0] = BEHAVIORAL_PERSONA.id
-
-    # Construct the first Agent (Behavioral round). Subsequent agents are
-    # constructed by `transfer_to_*` tools when the active agent decides to
-    # hand off.
-    agent = BehavioralInterviewer(
-        index=index,
-        session_id=session_id,
-        persona=BEHAVIORAL_PERSONA,
-    )
 
     turns_repo = TurnsRepository(db, session_id=session_id)
+
+    # Resume detection. If the session already has persisted turns,
+    # we are NOT starting fresh — we're picking up after a tab close
+    # (or a crash + restart). Load them, rebuild a ChatContext, start
+    # at the persona that was active last time, and suppress on_enter
+    # greetings on the first agent so we don't re-introduce Sarah/Adam/
+    # Bella to a candidate who's been talking to her for 6 turns already.
+    existing_turns = turns_repo.list_turns()
+    is_resume = len(existing_turns) > 0
+    starting_persona = (
+        _starting_persona_for_resume(session_data.current_persona_id)
+        if is_resume
+        else BEHAVIORAL_PERSONA
+    )
+    _ACTIVE_PERSONA_ID[0] = starting_persona.id
+
+    if is_resume:
+        logger.info(
+            "resuming session %s with %d existing turn(s) at persona=%s",
+            session_id,
+            len(existing_turns),
+            starting_persona.id,
+        )
+
+    initial_chat_ctx = (
+        _build_chat_ctx_from_turns(existing_turns) if is_resume else None
+    )
+
+    # Construct the first Agent. Subsequent agents are constructed by
+    # `transfer_to_*` tools when the active agent decides to hand off.
+    agent = starting_persona_cls_for(starting_persona)(
+        index=index,
+        session_id=session_id,
+        persona=starting_persona,
+        chat_ctx=initial_chat_ctx,
+        resume_mode=is_resume,
+    )
     vad = ctx.proc.userdata.get("vad")
     voice_session = build_session(vad=vad)
 
@@ -453,7 +590,10 @@ async def entrypoint(ctx: JobContext) -> None:
         pending_hook_tasks.add(task)
         task.add_done_callback(pending_hook_tasks.discard)
 
-    turn_index = 0
+    # On resume, new turns continue from where the persisted history
+    # left off — preserves the monotonic-index invariant the Firestore
+    # rules and the report generator depend on.
+    turn_index = len(existing_turns)
 
     @voice_session.on("conversation_item_added")
     def _on_item(event: ConversationItemAddedEvent) -> None:
