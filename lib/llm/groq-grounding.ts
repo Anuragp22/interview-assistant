@@ -51,14 +51,14 @@ For each question, produce a CV-personalised version. If the candidate's CV ment
 Respond as a single JSON object matching this shape exactly:
 
 {
-  "questionsGrounded": [<string>, <string>, ...],   // same length as input
-  "rubricsGrounded":   [                              // same length as input
+  "questionsGrounded": [<string>, <string>, ...],
+  "rubricsGrounded":   [
     {
-      "expectedConcepts":  [...],   // preserve from input
-      "expectedSpecifics": [...],   // preserve from input
-      "depth":             "...",   // preserve from input
+      "expectedConcepts":  [<string>, ...],
+      "expectedSpecifics": [<string>, ...],
+      "depth":             "foundational" | "intermediate" | "advanced",
       "priority":          1 | 2 | 3,
-      "cvReference":       <string optional>          // e.g. "Razorpay search project (2023)"
+      "cvReference":       <string optional>
     },
     ...
   ]
@@ -66,6 +66,9 @@ Respond as a single JSON object matching this shape exactly:
 
 Rules:
 - questionsGrounded.length MUST equal questionsBase.length and have the same ordering.
+- "depth" must be EXACTLY one of: "foundational", "intermediate", "advanced".
+  Do not use synonyms like "high", "medium", "low", "easy", "hard".
+- "priority" must be the integer 1, 2, or 3.
 - Output JSON only — no preamble, no code fences.
     `,
   });
@@ -167,10 +170,10 @@ Respond with ONE JSON object:
 
 Each grounded rubric extends the base rubric with cvReference:
 {
-  "expectedConcepts":  [...],
-  "expectedSpecifics": [...],
-  "depth":             "...",
-  "priority":          ...,
+  "expectedConcepts":  [<string>, ...],
+  "expectedSpecifics": [<string>, ...],
+  "depth":             "foundational" | "intermediate" | "advanced",
+  "priority":          1 | 2 | 3,
   "cvReference":       "..."
 }
 
@@ -178,6 +181,9 @@ Critical rules:
 - Preserve question count: 3 per bucket, in original order.
 - Reference specific CV details - companies, projects, tech - when natural.
 - If a question doesn't map to anything in the CV, keep it close to the base version (don't fabricate CV facts).
+- "depth" must be EXACTLY one of "foundational", "intermediate", "advanced" -
+  do NOT substitute synonyms like "high", "medium", "low", "easy", "hard".
+- "priority" must be the integer 1, 2, or 3.
 - Output JSON only.
     `,
   });
