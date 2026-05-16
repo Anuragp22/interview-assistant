@@ -15,14 +15,10 @@ service cloud.firestore {
       allow read, write: if isOwner(uid);
     }
 
-    // Templates — only HR owns them; only the owner can read/write
+    // Templates — owner-based (works for HR users AND practice users).
     match /templates/{templateId} {
-      allow read: if hasRole('hr')
-        && resource.data.hrUid == request.auth.uid;
-      allow update, delete: if hasRole('hr')
-        && resource.data.hrUid == request.auth.uid;
-      allow create: if hasRole('hr')
-        && request.resource.data.hrUid == request.auth.uid;
+      allow read, update, delete: if isOwner(resource.data.hrUid);
+      allow create: if isOwner(request.resource.data.hrUid);
     }
 
     // Invites — read by anyone with the token (the URL); write by HR
@@ -33,25 +29,27 @@ service cloud.firestore {
       allow write: if hasRole('hr');
     }
 
-    // Sessions — readable by candidate (own session) and HR (template owner);
-    // mutations come through server actions using Admin SDK only.
+    // Sessions — owner-based on either side (candidate OR template owner).
+    // Mutations go through server actions using Admin SDK only.
     match /sessions/{sessionId} {
-      allow read: if (isOwner(resource.data.candidateUid))
-        || (hasRole('hr') && resource.data.hrUid == request.auth.uid);
+      allow read: if isOwner(resource.data.candidateUid)
+        || isOwner(resource.data.hrUid);
       allow write: if false;   // server-only via Admin SDK
     }
 
-    // Turn data + reports — server-write only via Admin SDK.
+    // Turn data — same access rule as the parent session.
     match /sessions/{sessionId}/turns/{turnId} {
       allow read: if
         isOwner(get(/databases/$(database)/documents/sessions/$(sessionId)).data.candidateUid)
-        || (hasRole('hr')
-            && get(/databases/$(database)/documents/sessions/$(sessionId)).data.hrUid == request.auth.uid);
+        || isOwner(get(/databases/$(database)/documents/sessions/$(sessionId)).data.hrUid);
       allow write: if false;
     }
+
+    // Reports — owner of the parent session (candidate OR hr-owner).
     match /reports/{sessionId} {
-      allow read: if hasRole('hr')
-        && get(/databases/$(database)/documents/sessions/$(sessionId)).data.hrUid == request.auth.uid;
+      allow read: if
+        isOwner(get(/databases/$(database)/documents/sessions/$(sessionId)).data.candidateUid)
+        || isOwner(get(/databases/$(database)/documents/sessions/$(sessionId)).data.hrUid);
       allow write: if false;
     }
 
