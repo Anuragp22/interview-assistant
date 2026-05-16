@@ -31,10 +31,18 @@ interface CreateFeedbackParams {
   feedbackId?: string;
 }
 
+interface UserCv {
+  extractedText: string;
+  storageRef: string;
+  filename: string;
+  uploadedAt: string;
+}
+
 interface User {
   name: string;
   email: string;
   id: string;
+  cv?: UserCv;
 }
 
 interface InterviewCardProps {
