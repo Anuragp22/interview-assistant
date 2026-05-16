@@ -3,7 +3,7 @@
 import { generateObject } from "ai";
 import { groq } from "@ai-sdk/groq";
 
-import { groundingSchema } from "@/constants";
+import { groundingSchema, partitionedGroundingSchema } from "@/constants";
 
 const GROQ_MODEL = process.env.GROQ_MODEL ?? "llama-3.3-70b-versatile";
 
@@ -73,5 +73,127 @@ Rules:
   return {
     questionsGrounded: object.questionsGrounded,
     rubricsGrounded: object.rubricsGrounded as RubricGrounded[],
+  };
+}
+
+
+/**
+ * Phase 2 - partitioned reground for the 3-agent panel. Takes the three
+ * buckets of base questions/rubrics, regrounds each against the CV in a
+ * single Groq call, and returns the same shape with grounded versions
+ * plus optional cvReference on each rubric.
+ */
+export async function regroundPartitionedQuestions(input: {
+  questionsByPersona: {
+    behavioral: string[];
+    technical: string[];
+    systemDesign: string[];
+  };
+  rubricsByPersona: {
+    behavioral: RubricBase[];
+    technical: RubricBase[];
+    systemDesign: RubricBase[];
+  };
+  jobDescription: string;
+  cvText: string;
+}): Promise<{
+  behavioral: { questionsGrounded: string[]; rubricsGrounded: RubricGrounded[] };
+  technical: { questionsGrounded: string[]; rubricsGrounded: RubricGrounded[] };
+  systemDesign: { questionsGrounded: string[]; rubricsGrounded: RubricGrounded[] };
+}> {
+  const renderBucket = (
+    name: string,
+    qs: string[],
+    rs: RubricBase[],
+  ) =>
+    `## ${name}\n` +
+    qs
+      .map(
+        (q, i) =>
+          `Q${i + 1}: ${q}\n` +
+          `  expectedConcepts: ${rs[i].expectedConcepts.join(", ")}\n` +
+          `  expectedSpecifics: ${rs[i].expectedSpecifics.join(", ")}`,
+      )
+      .join("\n");
+
+  const block =
+    renderBucket(
+      "Behavioral",
+      input.questionsByPersona.behavioral,
+      input.rubricsByPersona.behavioral,
+    ) +
+    "\n\n" +
+    renderBucket(
+      "Technical",
+      input.questionsByPersona.technical,
+      input.rubricsByPersona.technical,
+    ) +
+    "\n\n" +
+    renderBucket(
+      "SystemDesign",
+      input.questionsByPersona.systemDesign,
+      input.rubricsByPersona.systemDesign,
+    );
+
+  const { object } = await generateObject({
+    model: groq(GROQ_MODEL),
+    providerOptions: { groq: { structuredOutputs: false } },
+    schema: partitionedGroundingSchema,
+    system:
+      "You re-ground base interview questions in the candidate's CV. Output a single JSON object matching the schema.",
+    prompt: `
+Re-ground the base questions below in the candidate's CV. For each
+question, rewrite it to reference specific projects, companies, or
+technologies from the CV when relevant. For each rubric, add a
+"cvReference" field pointing to the specific CV detail the question
+targets.
+
+Job description:
+${input.jobDescription}
+
+Candidate CV:
+${input.cvText}
+
+Base questions (3 per round):
+${block}
+
+Respond with ONE JSON object:
+
+{
+  "behavioral":   { "questionsGrounded": [...3 strings...], "rubricsGrounded": [...3 rubric+cvReference objects...] },
+  "technical":    { "questionsGrounded": [...], "rubricsGrounded": [...] },
+  "systemDesign": { "questionsGrounded": [...], "rubricsGrounded": [...] }
+}
+
+Each grounded rubric extends the base rubric with cvReference:
+{
+  "expectedConcepts":  [...],
+  "expectedSpecifics": [...],
+  "depth":             "...",
+  "priority":          ...,
+  "cvReference":       "..."
+}
+
+Critical rules:
+- Preserve question count: 3 per bucket, in original order.
+- Reference specific CV details - companies, projects, tech - when natural.
+- If a question doesn't map to anything in the CV, keep it close to the base version (don't fabricate CV facts).
+- Output JSON only.
+    `,
+  });
+
+  return {
+    behavioral: object.behavioral as {
+      questionsGrounded: string[];
+      rubricsGrounded: RubricGrounded[];
+    },
+    technical: object.technical as {
+      questionsGrounded: string[];
+      rubricsGrounded: RubricGrounded[];
+    },
+    systemDesign: object.systemDesign as {
+      questionsGrounded: string[];
+      rubricsGrounded: RubricGrounded[];
+    },
   };
 }
