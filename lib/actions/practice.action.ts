@@ -7,8 +7,8 @@ import { randomBytes } from "crypto";
 
 import { auth, db } from "@/firebase/admin";
 import { extractResumeText, CvParseError } from "@/lib/cv-parse";
-import { generateQuestionsAndRubrics } from "@/lib/llm/groq-template";
-import { regroundQuestions } from "@/lib/llm/groq-grounding";
+import { generatePartitionedQuestions } from "@/lib/llm/groq-template";
+import { regroundPartitionedQuestions } from "@/lib/llm/groq-grounding";
 
 const SESSION_COOKIE = "session";
 
@@ -135,15 +135,27 @@ export async function createPracticeSession(input: {
       };
     }
 
-    // 2. Phase 1 — questions + base rubrics from role/level/JD only.
-    const { questions: questionsBase, rubrics: rubricsBase } =
-      await generateQuestionsAndRubrics({
-        role: input.role,
-        level: input.level,
-        jobDescription: input.jobDescription,
-      });
+    // 2. Phase 1 — partitioned questions/rubrics across 3 personas.
+    const phase1 = await generatePartitionedQuestions({
+      role: input.role,
+      level: input.level,
+      jobDescription: input.jobDescription,
+    });
 
-    // 3. Create the template doc (hrUid = owner). Title auto-generated.
+    // Flat concatenation for the template doc and the report generator,
+    // which still walks the full transcript holistically.
+    const flatQuestionsBase = [
+      ...phase1.behavioral.questions,
+      ...phase1.technical.questions,
+      ...phase1.systemDesign.questions,
+    ];
+    const flatRubricsBase = [
+      ...phase1.behavioral.rubrics,
+      ...phase1.technical.rubrics,
+      ...phase1.systemDesign.rubrics,
+    ];
+
+    // 3. Create the template doc (hrUid = owner).
     const tref = db.collection("templates").doc();
     const now = new Date().toISOString();
     await tref.set({
@@ -153,24 +165,44 @@ export async function createPracticeSession(input: {
       role: input.role,
       level: input.level,
       jobDescription: input.jobDescription,
-      questionsBase,
-      rubricsBase,
+      questionsBase: flatQuestionsBase,
+      rubricsBase: flatRubricsBase,
       status: "draft" as const,
       createdAt: now,
       updatedAt: now,
     });
 
-    // 4. Phase 2 — reground against the candidate's CV.
-    const { questionsGrounded, rubricsGrounded } = await regroundQuestions({
-      questionsBase,
-      rubricsBase,
+    // 4. Phase 2 — partitioned reground against the CV.
+    const phase2 = await regroundPartitionedQuestions({
+      questionsByPersona: {
+        behavioral: phase1.behavioral.questions,
+        technical: phase1.technical.questions,
+        systemDesign: phase1.systemDesign.questions,
+      },
+      rubricsByPersona: {
+        behavioral: phase1.behavioral.rubrics,
+        technical: phase1.technical.rubrics,
+        systemDesign: phase1.systemDesign.rubrics,
+      },
       jobDescription: input.jobDescription,
       cvText: cv.extractedText,
     });
 
-    // 5. Create the session doc. inviteToken = "practice" sentinel marks
-    //    practice-origin sessions so the dashboard can filter them
-    //    without an extra origin field.
+    const flatQuestionsGrounded = [
+      ...phase2.behavioral.questionsGrounded,
+      ...phase2.technical.questionsGrounded,
+      ...phase2.systemDesign.questionsGrounded,
+    ];
+    const flatRubricsGrounded = [
+      ...phase2.behavioral.rubricsGrounded,
+      ...phase2.technical.rubricsGrounded,
+      ...phase2.systemDesign.rubricsGrounded,
+    ];
+
+    // 5. Create the session doc with BOTH partitioned and flat shapes.
+    //    The Python agent reads questionsByPersona; the report generator
+    //    reads the flat versions. inviteToken="practice" sentinel marks
+    //    practice-origin sessions for the dashboard filter.
     const sref = db.collection("sessions").doc();
     await sref.set({
       id: sref.id,
@@ -180,8 +212,18 @@ export async function createPracticeSession(input: {
       hrUid: uid,
       cvStorageRef: cv.storageRef,
       cvExtractedText: cv.extractedText,
-      questionsGrounded,
-      rubricsGrounded,
+      questionsGrounded: flatQuestionsGrounded,
+      rubricsGrounded: flatRubricsGrounded,
+      questionsByPersona: {
+        behavioral: phase2.behavioral.questionsGrounded,
+        technical: phase2.technical.questionsGrounded,
+        systemDesign: phase2.systemDesign.questionsGrounded,
+      },
+      rubricsByPersona: {
+        behavioral: phase2.behavioral.rubricsGrounded,
+        technical: phase2.technical.rubricsGrounded,
+        systemDesign: phase2.systemDesign.rubricsGrounded,
+      },
       status: "awaiting-call" as const,
       livekitRoomName: `session-${sref.id}`,
       createdAt: new Date().toISOString(),
