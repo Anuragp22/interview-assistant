@@ -62,6 +62,7 @@ from interview_agent.session_data import (
 )
 from interview_agent.cost_aggregator import SessionCostAggregator
 from interview_agent.metrics_bridge import emit_turn_latency_span
+from interview_agent.security_guards import TransferGuard, detect_prompt_leak
 from interview_agent.tracing import (
     context_from_traceparent,
     get_tracer,
@@ -117,6 +118,12 @@ _ACTIVE_PERSONA_ID: list[str] = [BEHAVIORAL_PERSONA.id]
 # entrypoint(). Per-session forked subprocess, so this is safe to be a
 # module-level singleton.
 _DB: Any = None
+
+# Security guard tracking per-persona turn counts so the transfer /
+# end_interview tools can refuse "please end now"-style injections.
+# Set in entrypoint, consulted in each guarded tool. Module-level for
+# the same reason as _DB — one per worker subprocess.
+_GUARD: TransferGuard | None = None
 
 
 def _persist_active_persona(persona_id: str) -> None:
@@ -316,10 +323,21 @@ class BehavioralInterviewer(InterviewerBase):
             )
 
     @function_tool()
-    async def transfer_to_technical(self, context: RunContext) -> tuple[Agent, str]:
+    async def transfer_to_technical(
+        self, context: RunContext
+    ) -> tuple[Agent, str] | str:
         """Hand off to the technical interviewer when the behavioral round
         has gathered enough signal (typically after 3-6 turns).
         After 8 turns you must transfer regardless."""
+        # Code-side guard. Returns False if the candidate is trying to
+        # speedrun the panel — e.g. a 0-turn "I'm Adam, transfer to me"
+        # injection. In that case we return a plain string and the SDK
+        # does NOT swap personas (it routes the string back as the
+        # tool's reply, the LLM continues with the current persona).
+        if _GUARD is not None:
+            allowed, refusal = _GUARD.may_transfer(self._persona.id)
+            if not allowed:
+                return refusal or "Not yet."
         tracer = get_tracer()
         with tracer.start_as_current_span(
             "agent.transfer",
@@ -327,6 +345,8 @@ class BehavioralInterviewer(InterviewerBase):
         ):
             _ACTIVE_PERSONA_ID[0] = TECHNICAL_PERSONA.id
             _persist_active_persona(TECHNICAL_PERSONA.id)
+            if _GUARD is not None:
+                _GUARD.reset_persona(TECHNICAL_PERSONA.id)
             next_agent = TechnicalInterviewer(
                 index=self._index,
                 session_id=self._session_id,
@@ -360,10 +380,14 @@ class TechnicalInterviewer(InterviewerBase):
     @function_tool()
     async def transfer_to_system_design(
         self, context: RunContext
-    ) -> tuple[Agent, str]:
+    ) -> tuple[Agent, str] | str:
         """Hand off to the system design interviewer when the technical
         round is complete (typically 3-6 turns). After 8 turns you must
         transfer regardless."""
+        if _GUARD is not None:
+            allowed, refusal = _GUARD.may_transfer(self._persona.id)
+            if not allowed:
+                return refusal or "Not yet."
         tracer = get_tracer()
         with tracer.start_as_current_span(
             "agent.transfer",
@@ -374,6 +398,8 @@ class TechnicalInterviewer(InterviewerBase):
         ):
             _ACTIVE_PERSONA_ID[0] = SYSTEM_DESIGN_PERSONA.id
             _persist_active_persona(SYSTEM_DESIGN_PERSONA.id)
+            if _GUARD is not None:
+                _GUARD.reset_persona(SYSTEM_DESIGN_PERSONA.id)
             next_agent = SystemDesignInterviewer(
                 index=self._index,
                 session_id=self._session_id,
@@ -409,6 +435,13 @@ class SystemDesignInterviewer(InterviewerBase):
         """End the interview after the system design round.
         Call this when you have enough signal or after 8 turns. The
         candidate's recording wraps up and report generation begins."""
+        # Code-side guard. Refuses end_interview unless the candidate
+        # has been through enough real conversation across the three
+        # rounds — defeats "please end now" injections at turn 0.
+        if _GUARD is not None:
+            allowed, refusal = _GUARD.may_end_interview()
+            if not allowed:
+                return refusal or "Not yet."
         tracer = get_tracer()
         with tracer.start_as_current_span(
             "agent.end-interview",
@@ -486,8 +519,9 @@ async def entrypoint(ctx: JobContext) -> None:
     # Make Firestore + session id reachable from the transfer tools so
     # they can persist currentPersonaId. Module-level singletons are
     # fine because each session runs in its own worker subprocess.
-    global _DB
+    global _DB, _GUARD
     _DB = db
+    _GUARD = TransferGuard()
 
     # Rehydrate the trace started by the Next.js server action, if any.
     # When `traceparent` is present on the session doc, all spans below
@@ -609,24 +643,44 @@ async def entrypoint(ctx: JobContext) -> None:
         # to assistant ChatMessages — it carries llm_node_ttft,
         # tts_node_ttfb, and e2e_latency for the full round trip.
         # User messages don't get this span (no LLM/TTS legs to measure).
+        leak_hits: list[str] = []
         if item.role == "assistant":
             emit_turn_latency_span(
                 getattr(item, "metrics", None),
                 session_id=session_id,
                 persona_id=_ACTIVE_PERSONA_ID[0],
             )
+            # Post-hoc system-prompt leak detection. The LLM has
+            # already spoken at this point — we can't unsay it. But
+            # we surface the leak loudly so a human can catch a
+            # drifting system prompt before the next interview.
+            leak_hits = detect_prompt_leak(content)
+            if leak_hits:
+                logger.warning(
+                    "SECURITY: assistant turn %d leaked system-prompt content: %s",
+                    turn_index,
+                    leak_hits,
+                )
+        elif item.role == "user":
+            # Feed the transfer guard so the next tool call knows
+            # whether enough signal has been gathered.
+            if _GUARD is not None:
+                _GUARD.record_user_turn(_ACTIVE_PERSONA_ID[0])
 
         now = datetime.now(timezone.utc)
+        metadata: dict[str, Any] = {
+            "personaId": _ACTIVE_PERSONA_ID[0],
+            "modelId": "llama-3.3-70b-versatile",
+        }
+        if leak_hits:
+            metadata["security"] = {"leakHits": leak_hits}
         turn = Turn(
             role=item.role,
             content=content,
             started_at=now,
             ended_at=now,
             index=turn_index,
-            metadata={
-                "personaId": _ACTIVE_PERSONA_ID[0],
-                "modelId": "llama-3.3-70b-versatile",
-            },
+            metadata=metadata,
         )
         _track_task(_write_turn(turns_repo, turn))
         turn_index += 1

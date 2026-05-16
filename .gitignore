@@ -47,3 +47,7 @@ next-env.d.ts
 # Sample dumps for the README go in docs/observability-samples/ instead.
 /eval/sessions/
 *.spans.jsonl
+
+# Security audit per-run JSON dumps (input to baseline-recorded comparison).
+# Baseline file (security_baseline.json at repo root) IS committed.
+/livekit-agent/security_audit_*.json
