@@ -2,7 +2,6 @@ import { NextRequest } from "next/server";
 import { cookies } from "next/headers";
 import { db, auth } from "@/firebase/admin";
 import { mintSessionRoomToken } from "@/lib/livekit";
-import { resolveRoleForSession } from "@/lib/role-resolution";
 
 export const runtime = "nodejs";
 
@@ -13,21 +12,28 @@ export async function POST(
   const { id } = await ctx.params;
   const sessionCookie = (await cookies()).get("session")?.value;
   if (!sessionCookie) {
-    return Response.json({ success: false, error: "Not signed in" }, { status: 401 });
+    return Response.json(
+      { success: false, error: "Not signed in" },
+      { status: 401 },
+    );
   }
   const decoded = await auth.verifySessionCookie(sessionCookie, true);
-  const role = await resolveRoleForSession(decoded);
-  if (role !== "candidate") {
-    return Response.json({ success: false, error: "Candidate only" }, { status: 403 });
-  }
 
   const sessionDoc = await db.collection("sessions").doc(id).get();
   if (!sessionDoc.exists) {
-    return Response.json({ success: false, error: "Session not found" }, { status: 404 });
+    return Response.json(
+      { success: false, error: "Session not found" },
+      { status: 404 },
+    );
   }
   const session = sessionDoc.data() as Session;
+  // Owner check covers both v0.1 candidates (their candidateUid is set at
+  // invite redemption) and practice users (candidateUid = their own uid).
   if (session.candidateUid !== decoded.uid) {
-    return Response.json({ success: false, error: "Not your session" }, { status: 403 });
+    return Response.json(
+      { success: false, error: "Not your session" },
+      { status: 403 },
+    );
   }
   if (session.status !== "awaiting-call" && session.status !== "in-call") {
     return Response.json(
