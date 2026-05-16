@@ -20,12 +20,24 @@ from __future__ import annotations
 
 import os
 
-from livekit.agents import llm
-from livekit.agents.voice import Agent, AgentSession
+from livekit.agents.voice import AgentSession
 from livekit.plugins import deepgram, elevenlabs, openai, silero
 
-from interview_agent.persistence.models import InterviewContext
-from interview_agent.prompts import build_system_prompt, voice_settings
+
+# ElevenLabs Sarah voice settings.
+# voice_id is the public premade "Sarah" voice (EXAVITQu4vr4xnSDxMaL); the
+# other values are tuned for a slightly slower, mid-emotive, on-character
+# interviewer voice. The persona module owns the voice_id semantically
+# (GENERAL_PERSONA.voice_id matches) — if we ever ship multiple personas
+# with per-persona voices, swap this for a per-Agent TTS override.
+_VOICE_SETTINGS = {
+    "voice_id": "EXAVITQu4vr4xnSDxMaL",
+    "stability": 0.4,
+    "similarity_boost": 0.8,
+    "speed": 0.9,
+    "style": 0.5,
+    "use_speaker_boost": True,
+}
 
 
 # Groq exposes an OpenAI-compatible Chat Completions endpoint, so the existing
@@ -73,7 +85,7 @@ def build_session(*, vad: silero.VAD | None = None) -> AgentSession:
     function should load the VAD once and pass it here on each dispatch
     to avoid reloading per session (see T7 prewarm_fnc).
     """
-    voice = voice_settings()
+    voice = _VOICE_SETTINGS
 
     return AgentSession(
         vad=vad if vad is not None else silero.VAD.load(),
@@ -89,12 +101,4 @@ def build_session(*, vad: silero.VAD | None = None) -> AgentSession:
                 use_speaker_boost=voice["use_speaker_boost"],
             ),
         ),
-    )
-
-
-def build_agent(ctx: InterviewContext) -> Agent:
-    """Construct the per-interview Agent with the rendered system prompt."""
-    return Agent(
-        instructions=build_system_prompt(ctx),
-        chat_ctx=llm.ChatContext(),
     )
