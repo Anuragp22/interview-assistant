@@ -139,6 +139,18 @@ interface Session {
   cvExtractedText?: string;
   questionsGrounded?: string[];
   rubricsGrounded?: RubricGrounded[];
+  // Multi-agent panel: questions/rubrics split per persona.
+  // When present, the Python agent reads these instead of the flat versions.
+  questionsByPersona?: {
+    behavioral: string[];
+    technical: string[];
+    systemDesign: string[];
+  };
+  rubricsByPersona?: {
+    behavioral: RubricGrounded[];
+    technical: RubricGrounded[];
+    systemDesign: RubricGrounded[];
+  };
   status:
     | "awaiting-cv"
     | "awaiting-call"
