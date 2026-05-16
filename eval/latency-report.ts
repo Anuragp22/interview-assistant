@@ -48,6 +48,14 @@ interface TurnLatency {
   e2e_ms: number;
 }
 
+interface SessionCost {
+  groq_usd: number;
+  tts_usd: number;
+  stt_usd: number;
+  livekit_usd: number;
+  total_usd: number;
+}
+
 function parseArgs(argv: string[]): { path: string; strict: boolean } {
   const positional: string[] = [];
   let strict = false;
@@ -64,12 +72,18 @@ function parseArgs(argv: string[]): { path: string; strict: boolean } {
   return { path: resolve(positional[0]), strict };
 }
 
-function loadTurns(path: string): TurnLatency[] {
+interface Loaded {
+  turns: TurnLatency[];
+  sessions: SessionCost[];
+}
+
+function load(path: string): Loaded {
   if (!existsSync(path)) {
     console.error(`File not found: ${path}`);
     process.exit(2);
   }
   const turns: TurnLatency[] = [];
+  const sessions: SessionCost[] = [];
   const lines = readFileSync(path, "utf8").split("\n");
   for (const line of lines) {
     if (!line.trim()) continue;
@@ -81,22 +95,43 @@ function loadTurns(path: string): TurnLatency[] {
       // (Ctrl-C during a session) leave a half-written final line.
       continue;
     }
-    if (span.name !== "agent.turn-latency") continue;
-    const eou = span.attributes["latency.eou_ms"];
-    const llm = span.attributes["latency.llm_ttft_ms"];
-    const tts = span.attributes["latency.tts_ttfb_ms"];
-    const e2e = span.attributes["latency.e2e_ms"];
-    if (
-      typeof eou !== "number" ||
-      typeof llm !== "number" ||
-      typeof tts !== "number" ||
-      typeof e2e !== "number"
-    ) {
-      continue;
+    if (span.name === "agent.turn-latency") {
+      const eou = span.attributes["latency.eou_ms"];
+      const llm = span.attributes["latency.llm_ttft_ms"];
+      const tts = span.attributes["latency.tts_ttfb_ms"];
+      const e2e = span.attributes["latency.e2e_ms"];
+      if (
+        typeof eou === "number" &&
+        typeof llm === "number" &&
+        typeof tts === "number" &&
+        typeof e2e === "number"
+      ) {
+        turns.push({ eou_ms: eou, llm_ttft_ms: llm, tts_ttfb_ms: tts, e2e_ms: e2e });
+      }
+    } else if (span.name === "session.cost") {
+      const total = span.attributes["cost.total_usd"];
+      const groq = span.attributes["cost.groq_usd"];
+      const tts = span.attributes["cost.tts_usd"];
+      const stt = span.attributes["cost.stt_usd"];
+      const lk = span.attributes["cost.livekit_usd"];
+      if (
+        typeof total === "number" &&
+        typeof groq === "number" &&
+        typeof tts === "number" &&
+        typeof stt === "number" &&
+        typeof lk === "number"
+      ) {
+        sessions.push({
+          groq_usd: groq,
+          tts_usd: tts,
+          stt_usd: stt,
+          livekit_usd: lk,
+          total_usd: total,
+        });
+      }
     }
-    turns.push({ eou_ms: eou, llm_ttft_ms: llm, tts_ttfb_ms: tts, e2e_ms: e2e });
   }
-  return turns;
+  return { turns, sessions };
 }
 
 /**
@@ -126,16 +161,15 @@ function statusFor(p95: number, budget: number): string {
   return p95 <= budget ? "  OK " : " MISS";
 }
 
-function main(): void {
-  const { path, strict } = parseArgs(process.argv.slice(2));
-  const turns = loadTurns(path);
+function formatUsd(x: number): string {
+  if (!Number.isFinite(x) || x < 0) return "    -";
+  return ("$" + x.toFixed(3)).padStart(7);
+}
 
+function reportLatency(turns: TurnLatency[]): boolean {
   if (turns.length === 0) {
-    console.error(`No agent.turn-latency spans found in ${path}.`);
-    console.error(
-      "Did you run the agent with OTEL_TRACES_FILE pointing at this file?",
-    );
-    process.exit(2);
+    console.log("No agent.turn-latency spans found — skipping latency table.");
+    return false;
   }
 
   const eouVals = turns.map((t) => t.eou_ms);
@@ -150,7 +184,7 @@ function main(): void {
     { label: "E2E     ", vals: e2eVals, budget: BUDGETS_MS.e2e_turn },
   ];
 
-  console.log(`\n## Latency (${turns.length} turns from ${path})\n`);
+  console.log(`\n## Latency (${turns.length} turns)\n`);
   console.log("| Stage    |   p50 |   p95 |   p99 | Budget | Status |");
   console.log("|----------|-------|-------|-------|--------|--------|");
 
@@ -167,15 +201,81 @@ function main(): void {
         .padStart(6)} |  ${status.trim().padEnd(5)} |`,
     );
   }
+  return anyViolation;
+}
+
+function reportCost(sessions: SessionCost[]): void {
+  if (sessions.length === 0) {
+    // Don't complain — a capture from a session that ended in error
+    // won't have a session.cost span. Latency-only reports are fine.
+    return;
+  }
+
+  const totals = sessions.map((s) => s.total_usd);
+  const groqs = sessions.map((s) => s.groq_usd);
+  const ttses = sessions.map((s) => s.tts_usd);
+  const stts = sessions.map((s) => s.stt_usd);
+  const lks = sessions.map((s) => s.livekit_usd);
+  const sum = totals.reduce((a, b) => a + b, 0);
+
+  console.log(
+    `\n## Cost (${sessions.length} session${sessions.length === 1 ? "" : "s"})\n`,
+  );
+  console.log("| Leg       |    p50 |    p95 |    p99 |");
+  console.log("|-----------|--------|--------|--------|");
+  console.log(
+    `| Groq      | ${formatUsd(percentile(groqs, 50))} | ${formatUsd(
+      percentile(groqs, 95),
+    )} | ${formatUsd(percentile(groqs, 99))} |`,
+  );
+  console.log(
+    `| TTS       | ${formatUsd(percentile(ttses, 50))} | ${formatUsd(
+      percentile(ttses, 95),
+    )} | ${formatUsd(percentile(ttses, 99))} |`,
+  );
+  console.log(
+    `| STT       | ${formatUsd(percentile(stts, 50))} | ${formatUsd(
+      percentile(stts, 95),
+    )} | ${formatUsd(percentile(stts, 99))} |`,
+  );
+  console.log(
+    `| LiveKit   | ${formatUsd(percentile(lks, 50))} | ${formatUsd(
+      percentile(lks, 95),
+    )} | ${formatUsd(percentile(lks, 99))} |`,
+  );
+  console.log(
+    `| **Total** | ${formatUsd(percentile(totals, 50))} | ${formatUsd(
+      percentile(totals, 95),
+    )} | ${formatUsd(percentile(totals, 99))} |`,
+  );
+  console.log(`\nCumulative across all sessions: ${formatUsd(sum).trim()}.`);
+}
+
+function main(): void {
+  const { path, strict } = parseArgs(process.argv.slice(2));
+  const { turns, sessions } = load(path);
+
+  if (turns.length === 0 && sessions.length === 0) {
+    console.error(
+      `No agent.turn-latency or session.cost spans found in ${path}.`,
+    );
+    console.error(
+      "Did you run the agent with OTEL_TRACES_FILE pointing at this file?",
+    );
+    process.exit(2);
+  }
+
+  const anyViolation = reportLatency(turns);
+  reportCost(sessions);
 
   console.log();
   if (anyViolation) {
-    console.log("At least one p95 metric exceeds budget.");
+    console.log("At least one p95 latency metric exceeds budget.");
     if (strict) {
       process.exit(1);
     }
-  } else {
-    console.log("All p95 metrics within budget.");
+  } else if (turns.length > 0) {
+    console.log("All p95 latency metrics within budget.");
   }
 }
 

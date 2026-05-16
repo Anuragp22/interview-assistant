@@ -5,9 +5,11 @@ import { Button } from "@/components/ui/button";
 import {
   getPracticeHistory,
   getPracticeScoreHistory,
+  type PracticeHistoryRow,
 } from "@/lib/actions/practice.action";
 import PracticeRow from "@/components/practice/PracticeRow";
 import ScoreSparkline from "@/components/practice/ScoreSparkline";
+import { formatUsd } from "@/lib/cost-rates";
 
 export const dynamic = "force-dynamic";
 
@@ -40,6 +42,8 @@ export default async function PracticeDashboard() {
         </div>
       )}
 
+      <CumulativeCost history={history} />
+
       {history.length === 0 ? (
         <EmptyState />
       ) : (
@@ -54,6 +58,32 @@ export default async function PracticeDashboard() {
           </ul>
         </section>
       )}
+    </div>
+  );
+}
+
+function CumulativeCost({ history }: { history: PracticeHistoryRow[] }) {
+  const priced = history.filter((r) => r.estimatedTotalUsd !== null);
+  if (priced.length === 0) return null;
+
+  const total = priced.reduce(
+    (acc, r) => acc + (r.estimatedTotalUsd ?? 0),
+    0,
+  );
+  const mean = total / priced.length;
+
+  return (
+    <div className="card-border p-4 flex items-center justify-between text-sm">
+      <span className="text-fg-muted">
+        Estimated provider cost across {priced.length} session
+        {priced.length === 1 ? "" : "s"}
+      </span>
+      <span className="tabular-nums text-fg-strong">
+        {formatUsd(total)}
+        <span className="text-fg-muted ml-2">
+          ({formatUsd(mean)} avg)
+        </span>
+      </span>
     </div>
   );
 }

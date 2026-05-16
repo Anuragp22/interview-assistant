@@ -166,6 +166,20 @@ interface Session {
   // context and join the same end-to-end trace. Absent on legacy sessions
   // created before OTel was wired up.
   traceparent?: string;
+  // Estimated session cost in USD, broken down by provider. Written by
+  // the Python agent's SessionCostAggregator at end-of-session using
+  // the rate table at lib/cost-rates.ts (mirrored in
+  // livekit-agent/src/interview_agent/cost_rates.py). Absent on
+  // sessions that ended before cost telemetry was wired up, or that
+  // crashed before the aggregator could finalize.
+  estimatedCost?: {
+    groqUsd: number;
+    ttsUsd: number;
+    sttUsd: number;
+    livekitUsd: number;
+    totalUsd: number;
+    ratesSourcedAt: string;
+  };
 }
 
 type Recommendation =

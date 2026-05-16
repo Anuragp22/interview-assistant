@@ -60,6 +60,7 @@ from interview_agent.session_data import (
     load_session_data,
     parse_session_id_from_room,
 )
+from interview_agent.cost_aggregator import SessionCostAggregator
 from interview_agent.metrics_bridge import emit_turn_latency_span
 from interview_agent.tracing import (
     context_from_traceparent,
@@ -435,6 +436,16 @@ async def entrypoint(ctx: JobContext) -> None:
     vad = ctx.proc.userdata.get("vad")
     voice_session = build_session(vad=vad)
 
+    # Per-session $$$ aggregator. Subscribes to session_usage_updated
+    # (SDK-recommended path; the older metrics_collected event is
+    # deprecated for usage tracking). On end-of-session we ask it for
+    # the final CostBreakdown, write to Firestore, and emit a span.
+    cost_aggregator = SessionCostAggregator(session_id=session_id)
+
+    @voice_session.on("session_usage_updated")
+    def _on_usage(event: Any) -> None:
+        cost_aggregator.handle_usage_event(event)
+
     pending_hook_tasks: set[asyncio.Task[Any]] = set()
 
     def _track_task(coro: Any) -> None:
@@ -514,8 +525,24 @@ async def entrypoint(ctx: JobContext) -> None:
             except Exception:  # noqa: BLE001
                 # session may already be closed by _watch_for_end; ignore
                 pass
+
+            # Final cost rollup. Always runs (even on error paths) so a
+            # crashed session still gets its partial bill recorded.
+            # Wrapped in try/except so a cost-side failure can't
+            # poison the session-close path.
+            try:
+                breakdown = cost_aggregator.finalize()
+                db.collection("sessions").document(session_id).update(
+                    {"estimatedCost": breakdown.to_firestore_dict()}
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "failed to write session.estimatedCost for %s", session_id
+                )
+
             # Close the panel-session span last so that the close-down
-            # latency (drain + aclose) is included in its duration.
+            # latency (drain + aclose + cost write) is included in its
+            # duration.
             panel_span_cm.__exit__(None, None, None)
 
 

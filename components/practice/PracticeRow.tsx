@@ -2,6 +2,7 @@ import Link from "next/link";
 import { ArrowRight, Calendar, Clock } from "lucide-react";
 
 import { cn } from "@/lib/utils";
+import { formatUsd } from "@/lib/cost-rates";
 import type { PracticeHistoryRow } from "@/lib/actions/practice.action";
 
 const STATUS_CONFIG: Record<
@@ -63,6 +64,14 @@ export default function PracticeRow({ row }: { row: PracticeHistoryRow }) {
               <Clock className="size-3" />
               {statusCfg.label}
             </span>
+            {row.estimatedTotalUsd !== null ? (
+              <span
+                className="tabular-nums text-fg-subtle"
+                title="Estimated provider cost (Groq + ElevenLabs + Deepgram + LiveKit)"
+              >
+                {formatUsd(row.estimatedTotalUsd)}
+              </span>
+            ) : null}
           </div>
         </div>
 

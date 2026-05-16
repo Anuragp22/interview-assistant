@@ -295,6 +295,7 @@ export type PracticeHistoryRow = {
   status: Session["status"];
   createdAt: string;
   completedAt: string | null;
+  estimatedTotalUsd: number | null;
 };
 
 export async function getPracticeHistory(): Promise<PracticeHistoryRow[]> {
@@ -349,6 +350,7 @@ export async function getPracticeHistory(): Promise<PracticeHistoryRow[]> {
       status: s.status,
       createdAt: s.createdAt,
       completedAt: s.completedAt ?? null,
+      estimatedTotalUsd: s.estimatedCost?.totalUsd ?? null,
     });
   }
 

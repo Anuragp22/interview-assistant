@@ -239,17 +239,76 @@ Output (sample, real numbers depend on your session):
 Captured session JSONLs live under `eval/sessions/` and are gitignored
 — commit only sanitised numbers, not raw transcripts.
 
+## Cost telemetry
+
+Every session writes an estimated dollar cost broken down by provider.
+Sources of truth: `lib/cost-rates.ts` (TypeScript) and
+`livekit-agent/src/interview_agent/cost_rates.py` (Python mirror). Both
+files carry `RATES_SOURCED_AT = "YYYY-MM-DD"` — bump in both whenever
+you refresh prices.
+
+Current rates (as of `RATES_SOURCED_AT`):
+
+| Provider     | Model                   | Pricing dimension     | Rate                            |
+|--------------|-------------------------|-----------------------|---------------------------------|
+| Groq         | llama-3.3-70b-versatile | Input / output tokens | $0.59 / 1M in, $0.79 / 1M out   |
+| ElevenLabs   | eleven_turbo_v2_5       | Characters synthesized| $0.18 / 1k chars (Creator tier) |
+| Deepgram     | nova-3                  | Audio minutes         | $0.0058 / minute streaming      |
+| LiveKit      | Cloud Build             | Participant-minutes   | $0.005 × 2 participants         |
+
+**How it flows:**
+
+1. Python agent subscribes to `session_usage_updated` (SDK-recommended;
+   the older `metrics_collected` event is deprecated for usage
+   tracking). `SessionCostAggregator` keeps the latest cumulative
+   counts from each `model_usage` entry.
+2. On session end the aggregator's `finalize()` rolls counts through
+   the price registry into a `CostBreakdown`, writes
+   `sessions/{id}.estimatedCost` to Firestore (camelCase keys matching
+   the TS type), and emits a `session.cost` OTel span carrying every
+   leg.
+3. The practice dashboard reads `Session.estimatedCost` and renders
+   `$0.14` per row plus a cumulative-cost card across sessions.
+
+**Disclaimer:** this is an estimate. Subscription plans, free tiers,
+volume discounts, and regional pricing all change the real bill. The
+date stamp on `RATES_SOURCED_AT` is your signal to revisit.
+
+**Offline analyzer (`npm run latency-report`):** the replay tool now
+ingests `session.cost` spans alongside `agent.turn-latency` and emits
+a per-leg p50/p95/p99 cost table plus a cumulative total. Sample:
+
+```
+## Cost (3 sessions)
+
+| Leg       |    p50 |    p95 |    p99 |
+|-----------|--------|--------|--------|
+| Groq      |  $0.012 |  $0.017 |  $0.018 |
+| TTS       |  $0.087 |  $0.101 |  $0.103 |
+| STT       |  $0.004 |  $0.005 |  $0.005 |
+| LiveKit   |  $0.018 |  $0.023 |  $0.024 |
+| **Total** |  $0.121 |  $0.147 |  $0.149 |
+
+Cumulative across all sessions: $0.367.
+```
+
 ## Files
 
 ```
 instrumentation.ts                          Next.js OTel bootstrap (registerOTel)
 lib/tracing.ts                              traced() helper + currentTraceparent()
+lib/cost-rates.ts                           TS price registry + rollUpCost()
 livekit-agent/src/interview_agent/
   tracing.py                                Python OTel bootstrap + JSONLSpanExporter
   latency_budget.py                         Per-stage p95 thresholds + violated()
   metrics_bridge.py                         MetricsReport → agent.turn-latency span
-livekit-agent/tests/test_tracing.py         5 propagation-contract tests
-livekit-agent/tests/test_latency.py         8 budget + bridge tests
-eval/latency-report.ts                      Offline percentile analyzer + budget gate
+  cost_rates.py                             Python price mirror + roll_up_cost()
+  cost_aggregator.py                        SessionCostAggregator (session.cost span + Firestore write)
+livekit-agent/tests/
+  test_tracing.py                           5 propagation-contract tests
+  test_latency.py                           8 budget + bridge tests
+  test_cost.py                              10 cost-rate + aggregator tests
+tests/cost-rates.test.ts                    12 TS cost-rate tests
+eval/latency-report.ts                      Offline percentile analyzer (latency + cost)
 docs/observability.md                       (this file)
 ```
