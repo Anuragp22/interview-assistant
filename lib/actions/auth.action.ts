@@ -2,7 +2,6 @@
 
 import { auth, db } from "@/firebase/admin";
 import { cookies } from "next/headers";
-import { setUserRole } from "@/lib/admin-claims";
 
 // Session duration (1 week)
 const SESSION_DURATION = 60 * 60 * 24 * 7;
@@ -42,12 +41,7 @@ export async function signUp(params: SignUpParams) {
     await db.collection("users").doc(uid).set({
       name,
       email,
-      // profileURL,
-      // resumeURL,
     });
-
-    // stamp HR role on signup
-    await setUserRole(uid, "hr");
 
     return {
       success: true,
