@@ -50,6 +50,13 @@ def _make_db(session_data, template_data, user_data):
     return db
 
 
+_VALID_QBP = {
+    "behavioral": ["Q-b1", "Q-b2"],
+    "technical": ["Q-t1", "Q-t2"],
+    "systemDesign": ["Q-sd1"],
+}
+
+
 def test_load_session_data_happy_path():
     db = _make_db(
         session_data={
@@ -57,7 +64,7 @@ def test_load_session_data_happy_path():
             "candidateUid": "u1",
             "status": "awaiting-call",
             "cvExtractedText": "CV text",
-            "questionsGrounded": ["Q1", "Q2"],
+            "questionsByPersona": _VALID_QBP,
         },
         template_data={
             "role": "Senior Frontend",
@@ -73,7 +80,9 @@ def test_load_session_data_happy_path():
     assert sd.role == "Senior Frontend"
     assert sd.level == "Senior"
     assert sd.cv_extracted_text == "CV text"
-    assert sd.questions_grounded == ["Q1", "Q2"]
+    assert sd.questions_by_persona.behavioral == ["Q-b1", "Q-b2"]
+    assert sd.questions_by_persona.technical == ["Q-t1", "Q-t2"]
+    assert sd.questions_by_persona.system_design == ["Q-sd1"]
 
 
 def test_load_session_data_raises_when_missing_cv_text():
@@ -82,7 +91,7 @@ def test_load_session_data_raises_when_missing_cv_text():
             "templateId": "tpl1",
             "candidateUid": "u1",
             "status": "awaiting-call",
-            "questionsGrounded": ["Q1"],
+            "questionsByPersona": _VALID_QBP,
         },
         template_data={
             "role": "x",
@@ -102,7 +111,7 @@ def test_load_session_data_raises_when_session_not_callable():
             "candidateUid": "u1",
             "status": "completed",
             "cvExtractedText": "x",
-            "questionsGrounded": ["Q1"],
+            "questionsByPersona": _VALID_QBP,
         },
         template_data={
             "role": "x",
@@ -112,4 +121,42 @@ def test_load_session_data_raises_when_session_not_callable():
         user_data={"displayName": "x"},
     )
     with pytest.raises(RuntimeError, match="not in a callable state"):
+        load_session_data(db, "sess1")
+
+
+def test_load_session_data_raises_when_missing_questions_by_persona():
+    """Sessions created before the multi-agent rollout must fail loud."""
+    db = _make_db(
+        session_data={
+            "templateId": "tpl1",
+            "candidateUid": "u1",
+            "status": "awaiting-call",
+            "cvExtractedText": "CV text",
+            # no questionsByPersona
+        },
+        template_data={"role": "x", "level": "Mid", "jobDescription": "x"},
+        user_data={"displayName": "x"},
+    )
+    with pytest.raises(RuntimeError, match="questionsByPersona"):
+        load_session_data(db, "sess1")
+
+
+def test_load_session_data_raises_when_qbp_bucket_missing():
+    """Even if questionsByPersona is present, a missing bucket fails."""
+    db = _make_db(
+        session_data={
+            "templateId": "tpl1",
+            "candidateUid": "u1",
+            "status": "awaiting-call",
+            "cvExtractedText": "CV text",
+            "questionsByPersona": {
+                "behavioral": ["Q-b1"],
+                "technical": [],  # empty bucket
+                "systemDesign": ["Q-sd1"],
+            },
+        },
+        template_data={"role": "x", "level": "Mid", "jobDescription": "x"},
+        user_data={"displayName": "x"},
+    )
+    with pytest.raises(RuntimeError, match="missing bucket"):
         load_session_data(db, "sess1")

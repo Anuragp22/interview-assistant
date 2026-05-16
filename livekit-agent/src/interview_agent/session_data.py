@@ -1,9 +1,4 @@
-"""Loads per-session interview data from Firestore.
-
-Replaces the previous per-interview metadata loader. The agent reads
-the session at room dispatch (session id is encoded in the room name
-as `session-{sessionId}`) and pulls all per-call inputs together.
-"""
+"""Loads per-session interview data from Firestore."""
 
 from __future__ import annotations
 
@@ -13,6 +8,15 @@ from typing import Any
 
 
 logger = logging.getLogger("interview-agent.session_data")
+
+
+@dataclass(frozen=True)
+class QuestionsByPersona:
+    """Questions partitioned across the 3-agent panel."""
+
+    behavioral: list[str]
+    technical: list[str]
+    system_design: list[str]
 
 
 @dataclass(frozen=True)
@@ -26,17 +30,14 @@ class SessionData:
     level: str
     job_description: str
     cv_extracted_text: str
-    questions_grounded: list[str]
+    questions_by_persona: QuestionsByPersona
 
 
 SESSION_ROOM_PREFIX = "session-"
 
 
 def parse_session_id_from_room(room_name: str) -> str | None:
-    """Extract the session id from a LiveKit room name.
-
-    Returns None when the room isn't ours (lets the worker reject).
-    """
+    """Extract the session id from a LiveKit room name."""
     if not room_name.startswith(SESSION_ROOM_PREFIX):
         return None
     return room_name[len(SESSION_ROOM_PREFIX):]
@@ -45,8 +46,8 @@ def parse_session_id_from_room(room_name: str) -> str | None:
 def load_session_data(db: Any, session_id: str) -> SessionData:
     """Load a session + the parent template + the candidate user doc.
 
-    Raises if any required field is missing — we want a fail-fast at
-    dispatch instead of a half-broken call.
+    Raises if any required field is missing — fail fast at dispatch
+    rather than halfway through a call.
     """
     session_doc = db.collection("sessions").document(session_id).get()
     if not session_doc.exists:
@@ -61,9 +62,18 @@ def load_session_data(db: Any, session_id: str) -> SessionData:
     cv_text = session.get("cvExtractedText")
     if not cv_text:
         raise RuntimeError(f"Session {session_id} has no cvExtractedText")
-    questions_grounded = session.get("questionsGrounded")
-    if not questions_grounded:
-        raise RuntimeError(f"Session {session_id} has no questionsGrounded")
+
+    qbp = session.get("questionsByPersona")
+    if not qbp:
+        raise RuntimeError(
+            f"Session {session_id} has no questionsByPersona — created before "
+            "multi-agent panel rollout, ask the user to start a new practice."
+        )
+    for key in ("behavioral", "technical", "systemDesign"):
+        if not qbp.get(key):
+            raise RuntimeError(
+                f"Session {session_id} questionsByPersona missing bucket: {key}"
+            )
 
     template_doc = (
         db.collection("templates").document(session["templateId"]).get()
@@ -87,5 +97,9 @@ def load_session_data(db: Any, session_id: str) -> SessionData:
         level=template["level"],
         job_description=template["jobDescription"],
         cv_extracted_text=cv_text,
-        questions_grounded=list(questions_grounded),
+        questions_by_persona=QuestionsByPersona(
+            behavioral=list(qbp["behavioral"]),
+            technical=list(qbp["technical"]),
+            system_design=list(qbp["systemDesign"]),
+        ),
     )

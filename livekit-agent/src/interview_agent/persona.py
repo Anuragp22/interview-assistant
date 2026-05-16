@@ -1,10 +1,9 @@
-"""Persona definitions for the interviewer agent.
+"""Persona definitions for the multi-agent interview panel.
 
-v0.1 has one Persona — the GeneralInterviewer (Sarah). Sub-project E
-adds Behavioral / Technical / SystemDesign personas plus the LiveKit-
-native multi-Agent supervisor scaffolding (transfer_to_<persona>
-function tools). v0.1 deliberately keeps the shape so additions are
-non-breaking.
+Three personas, each with its own voice + system-prompt rules. The
+agent.py module exposes one Agent subclass per persona; hand-off
+between them uses LiveKit Agents 1.5's native @function_tool return-
+Agent pattern.
 """
 
 from __future__ import annotations
@@ -28,20 +27,31 @@ COMMON_RULES = """\
   ("Can you walk me through where you did that?") rather than accepting at face value.
 """
 
+
+HANDOFF_RULE = """\
+- You are part of a 3-interviewer panel. After ~3-6 substantive turns of dialogue
+  with the candidate, call `transfer_to_<next>` (or `end_interview` for the last
+  agent) to move the panel forward. After 8 turns you MUST transfer regardless of
+  signal. Do NOT announce the hand-off as a separate utterance — the next
+  interviewer will introduce themselves naturally when activated.
+"""
+
+
 GENERAL_TEMPLATE = """\
 You are {name}, a {expertise_area}.
 
 You are interviewing {candidate_name} for {role} ({level}).
 
-Your interview agenda — these questions are already grounded in the candidate's CV
-and the job description. Reference specifics naturally; e.g. when a question mentions
-"Razorpay", you can ask about it directly without disclaiming.
+Your interview agenda for this round — these questions are already grounded in
+the candidate's CV and the job description. Reference specifics naturally; e.g.
+when a question mentions "Razorpay", you can ask about it directly without
+disclaiming.
 
 {questions_block}
 
 Tools available:
 - lookup_cv_jd(query): retrieve concrete details from the candidate's CV or JD.
-  Use sparingly — only when you need a specific fact you can't infer from the agenda.
+- verify_cv_claim(claim): check whether a candidate-stated claim is supported.
 
 Conduct rules:
 {rules}
@@ -50,30 +60,112 @@ Conduct rules:
 
 @dataclass(frozen=True)
 class Persona:
-    """Configuration object for one interviewer persona.
-
-    The same Persona shape ships in v0.1 (one constant — GENERAL_PERSONA)
-    and grows in Sub-project E (BEHAVIORAL_PERSONA, TECHNICAL_PERSONA,
-    SYSTEM_DESIGN_PERSONA), and the LiveKit Agent subclasses for E hand
-    off via transfer_to_<persona> function tools — no Persona shape change.
-    """
+    """Per-persona config: identity + voice + prompt rules + next-in-panel."""
 
     id: str
     name: str
     expertise_area: str
     voice_id: str
+    voice_stability: float
+    voice_similarity_boost: float
+    voice_speed: float
+    voice_style: float
+    voice_use_speaker_boost: bool
     system_prompt_template: str
     rules: str
+    next_persona_id: str | None  # for hand-off; None on the last persona
 
 
-GENERAL_PERSONA = Persona(
-    id="general",
-    name="Sarah",
-    expertise_area="general technical interviewer",
-    voice_id="EXAVITQu4vr4xnSDxMaL",
-    system_prompt_template=GENERAL_TEMPLATE,
-    rules=COMMON_RULES,
+_BEHAVIORAL_RULES = (
+    COMMON_RULES
+    + "\n"
+    + """\
+- Use the STAR framework: probe for Situation, Task, Action, Result. If a candidate
+  stops at the surface, ask one follow-up to get to the action or result.
+- Don't ask theoretical "what if" questions — anchor in real past experience from the
+  candidate's CV.
+"""
+    + HANDOFF_RULE
 )
+
+
+_TECHNICAL_RULES = (
+    COMMON_RULES
+    + "\n"
+    + """\
+- Push on concrete implementation details: data structures used, time complexity
+  reasoning, code-level trade-offs.
+- Ask "why" more than "what". If the candidate gives a high-level answer, ask them to
+  walk through a specific decision they made.
+"""
+    + HANDOFF_RULE
+)
+
+
+_SYSTEM_DESIGN_RULES = (
+    COMMON_RULES
+    + "\n"
+    + """\
+- Begin with constraints and assumptions before the candidate draws anything. Force
+  them to articulate at least one bottleneck and one trade-off.
+- Probe scalability + failure modes once the happy path is sketched.
+"""
+    + HANDOFF_RULE
+)
+
+
+BEHAVIORAL_PERSONA = Persona(
+    id="behavioral",
+    name="Sarah",
+    expertise_area="behavioral interviewer specialising in STAR-framework probes",
+    voice_id="EXAVITQu4vr4xnSDxMaL",
+    voice_stability=0.4,
+    voice_similarity_boost=0.8,
+    voice_speed=0.9,
+    voice_style=0.5,
+    voice_use_speaker_boost=True,
+    system_prompt_template=GENERAL_TEMPLATE,
+    rules=_BEHAVIORAL_RULES,
+    next_persona_id="technical",
+)
+
+
+TECHNICAL_PERSONA = Persona(
+    id="technical",
+    name="Adam",
+    expertise_area="senior technical interviewer who probes implementation depth",
+    voice_id="pNInz6obpgDQGcFmaJgB",
+    voice_stability=0.5,
+    voice_similarity_boost=0.85,
+    voice_speed=1.0,
+    voice_style=0.3,
+    voice_use_speaker_boost=True,
+    system_prompt_template=GENERAL_TEMPLATE,
+    rules=_TECHNICAL_RULES,
+    next_persona_id="system-design",
+)
+
+
+SYSTEM_DESIGN_PERSONA = Persona(
+    id="system-design",
+    name="Bella",
+    expertise_area="senior systems engineer focused on distributed-systems design",
+    voice_id="oWAxZDx7w5VEj9dCyTzz",
+    voice_stability=0.5,
+    voice_similarity_boost=0.8,
+    voice_speed=0.85,
+    voice_style=0.4,
+    voice_use_speaker_boost=True,
+    system_prompt_template=GENERAL_TEMPLATE,
+    rules=_SYSTEM_DESIGN_RULES,
+    next_persona_id=None,
+)
+
+
+# Convenience lookup so other modules don't import the constants directly.
+PERSONA_BY_ID: dict[str, Persona] = {
+    p.id: p for p in (BEHAVIORAL_PERSONA, TECHNICAL_PERSONA, SYSTEM_DESIGN_PERSONA)
+}
 
 
 def render_system_prompt(
@@ -83,12 +175,7 @@ def render_system_prompt(
     level: str,
     questions_grounded: list[str],
 ) -> str:
-    """Render the persona's template with the per-session interview data.
-
-    Deliberately does NOT include raw CV or JD text — those live in the
-    LlamaIndex vector store and are retrieved via lookup_cv_jd on demand.
-    Keeps the system prompt under ~1000 tokens so attention stays sharp.
-    """
+    """Render this persona's template with the round's questions."""
     questions_block = "\n".join(
         f"{i + 1}. {q}" for i, q in enumerate(questions_grounded)
     )
