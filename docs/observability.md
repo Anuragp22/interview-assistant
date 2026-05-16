@@ -173,13 +173,83 @@ the tracing backend.
 The 4th test is the load-bearing one — if it ever fails, distributed
 traces are broken end-to-end.
 
+## Latency budget
+
+Every assistant turn emits an `agent.turn-latency` span with four
+deterministic timing legs and a budget verdict. Budgets are p95
+targets, not averages — tail latency drives the perceived feel of a
+voice interview far more than mean.
+
+| Stage    | p95 budget | Why |
+|----------|-----------:|-----|
+| EOU      |     300 ms | STT commit overhead after speech ends. The 800ms `min_delay` is wait time, not commit time. |
+| LLM TTFT |     500 ms | Groq llama-3.3-70b first-token. Groq publishes 80-150 ms warm; we budget 500 to absorb cold-connect and retry. |
+| TTS TTFB |     500 ms | ElevenLabs `eleven_turbo_v2_5` over multi-stream WebSocket with `streaming_latency=3`. ElevenLabs SLO is ~200 ms. |
+| E2E turn |    1500 ms | User-stops-speaking → user-hears-first-audio. Above 2s users start repeating themselves. |
+
+Source of truth: `livekit-agent/src/interview_agent/latency_budget.py`.
+The replay analyzer (`eval/latency-report.ts`) hard-codes the same
+thresholds — keep them in sync if you tighten.
+
+**Streaming path:** `livekit-plugins-elevenlabs` already uses the
+WebSocket multi-stream-input endpoint by default (verified by
+inspecting `livekit/plugins/elevenlabs/tts.py`). We opt into
+`streaming_latency=3` in `_build_tts_for` (`agent.py`) for the
+"max latency optimization" profile without disabling text
+normalization (4 disables normalization and risks mispronouncing
+numbers/abbreviations).
+
+## Capturing a session for the replay analyzer
+
+The Python tracing module supports an optional `OTEL_TRACES_FILE` env
+var. When set, every span the agent emits is written as a one-per-line
+JSON object to that file, in addition to whatever primary exporter is
+configured (console / Honeycomb / Tempo).
+
+```bash
+# Inside the agent process env (e.g., .env.local at the repo root)
+OTEL_TRACES_FILE=eval/sessions/2026-05-16-mvp.spans.jsonl
+```
+
+Run a session normally, then point the analyzer at the file:
+
+```bash
+npm run latency-report -- eval/sessions/2026-05-16-mvp.spans.jsonl
+
+# Exit non-zero if any p95 leg exceeds its budget (useful from CI):
+npm run latency-report -- eval/sessions/2026-05-16-mvp.spans.jsonl --strict
+```
+
+The analyzer ignores non-`agent.turn-latency` spans, so capturing
+everything is fine — no need to filter the JSONL first.
+
+Output (sample, real numbers depend on your session):
+
+```
+## Latency (10 turns from .../session.spans.jsonl)
+
+| Stage    |   p50 |   p95 |   p99 | Budget | Status |
+|----------|-------|-------|-------|--------|--------|
+| EOU      |   208 |   251 |   258 |    300 |  OK    |
+| LLM TTFT |   290 |   453 |   475 |    500 |  OK    |
+| TTS TTFB |   313 |   407 |   426 |    500 |  OK    |
+| E2E      |   800 |  1111 |  1158 |   1500 |  OK    |
+```
+
+Captured session JSONLs live under `eval/sessions/` and are gitignored
+— commit only sanitised numbers, not raw transcripts.
+
 ## Files
 
 ```
 instrumentation.ts                          Next.js OTel bootstrap (registerOTel)
 lib/tracing.ts                              traced() helper + currentTraceparent()
-livekit-agent/src/interview_agent/tracing.py
-                                            Python OTel bootstrap + context_from_traceparent()
+livekit-agent/src/interview_agent/
+  tracing.py                                Python OTel bootstrap + JSONLSpanExporter
+  latency_budget.py                         Per-stage p95 thresholds + violated()
+  metrics_bridge.py                         MetricsReport → agent.turn-latency span
 livekit-agent/tests/test_tracing.py         5 propagation-contract tests
+livekit-agent/tests/test_latency.py         8 budget + bridge tests
+eval/latency-report.ts                      Offline percentile analyzer + budget gate
 docs/observability.md                       (this file)
 ```

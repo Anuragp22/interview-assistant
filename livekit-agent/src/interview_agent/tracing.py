@@ -18,9 +18,11 @@ Exporter selection mirrors the Next side:
 
 from __future__ import annotations
 
+import json
 import logging
 import os
-from typing import Optional
+from pathlib import Path
+from typing import Optional, Sequence
 
 from opentelemetry import propagate, trace
 from opentelemetry.context import Context
@@ -28,11 +30,13 @@ from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
     OTLPSpanExporter as HTTPSpanExporter,
 )
 from opentelemetry.sdk.resources import Resource
-from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
 from opentelemetry.sdk.trace.export import (
     BatchSpanProcessor,
     ConsoleSpanExporter,
     SimpleSpanProcessor,
+    SpanExporter,
+    SpanExportResult,
 )
 
 logger = logging.getLogger("interview-agent.tracing")
@@ -82,8 +86,74 @@ def install_tracer_provider() -> None:
             "stdout console exporter"
         )
 
+    # Optional JSONL capture for offline analysis (eval/latency-report.ts).
+    # Independent of the primary backend: set OTEL_TRACES_FILE alongside
+    # Honeycomb to get both live tracing AND a replayable artifact.
+    traces_file = os.environ.get("OTEL_TRACES_FILE")
+    if traces_file:
+        provider.add_span_processor(
+            SimpleSpanProcessor(JSONLSpanExporter(Path(traces_file)))
+        )
+        logger.info("OTel: also writing spans as JSONL to %s", traces_file)
+
     trace.set_tracer_provider(provider)
     _PROVIDER_INSTALLED = True
+
+
+class JSONLSpanExporter(SpanExporter):
+    """One-span-per-line JSON exporter for offline analysis.
+
+    The standard ConsoleSpanExporter pretty-prints each span across many
+    lines — easy for humans, painful to parse. This exporter writes a
+    single compact JSON object per span, terminated by a newline, so
+    eval/latency-report.ts (and any other downstream tool) can ingest
+    the file with a streaming JSONL reader.
+
+    Files are opened in append mode so reruns accumulate. The reader
+    side filters to ``agent.turn-latency`` spans, so other spans being
+    captured is harmless — they're just ignored.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+
+    def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
+        try:
+            with self._path.open("a", encoding="utf-8") as f:
+                for span in spans:
+                    f.write(json.dumps(self._serialize(span)) + "\n")
+            return SpanExportResult.SUCCESS
+        except Exception:  # noqa: BLE001
+            logger.exception("JSONL export failed for %s", self._path)
+            return SpanExportResult.FAILURE
+
+    def shutdown(self) -> None:
+        # File-per-write; nothing to flush.
+        return
+
+    @staticmethod
+    def _serialize(span: ReadableSpan) -> dict[str, object]:
+        ctx = span.get_span_context()
+        # Hex-encode the 128-bit trace id and 64-bit span id so the
+        # analyzer never has to deal with Python ints.
+        return {
+            "name": span.name,
+            "trace_id": format(ctx.trace_id, "032x"),
+            "span_id": format(ctx.span_id, "016x"),
+            "parent_span_id": (
+                format(span.parent.span_id, "016x") if span.parent else None
+            ),
+            "start_time_ns": span.start_time,
+            "end_time_ns": span.end_time,
+            "duration_ms": (
+                (span.end_time - span.start_time) / 1_000_000
+                if span.end_time and span.start_time
+                else None
+            ),
+            "attributes": dict(span.attributes or {}),
+            "status": span.status.status_code.name if span.status else "UNSET",
+        }
 
 
 def get_tracer() -> trace.Tracer:

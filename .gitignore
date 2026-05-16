@@ -43,3 +43,7 @@ next-env.d.ts
 
 # eval — the latest report regenerates on every run; baselines.json is committed
 /eval/report.json
+# Captured OTel span dumps from voice sessions (input to latency-report).
+# Sample dumps for the README go in docs/observability-samples/ instead.
+/eval/sessions/
+*.spans.jsonl

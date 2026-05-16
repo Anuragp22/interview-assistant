@@ -10,7 +10,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "eval": "tsx eval/run.ts",
-    "eval:baseline": "tsx eval/run.ts --baseline"
+    "eval:baseline": "tsx eval/run.ts --baseline",
+    "latency-report": "tsx eval/latency-report.ts"
   },
   "dependencies": {
     "@ai-sdk/groq": "^3.0.39",

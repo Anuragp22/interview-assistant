@@ -60,6 +60,7 @@ from interview_agent.session_data import (
     load_session_data,
     parse_session_id_from_room,
 )
+from interview_agent.metrics_bridge import emit_turn_latency_span
 from interview_agent.tracing import (
     context_from_traceparent,
     get_tracer,
@@ -132,7 +133,20 @@ async def drain_pending_tasks(tasks: set[asyncio.Task[Any]]) -> None:
 
 
 def _build_tts_for(persona: Persona) -> elevenlabs.TTS:
-    """Construct an ElevenLabs TTS provider configured for one persona."""
+    """Construct an ElevenLabs TTS provider configured for one persona.
+
+    The plugin's default transport is already the multi-stream-input
+    WebSocket endpoint (wss://api.elevenlabs.io/.../multi-stream-input),
+    confirmed by inspecting livekit-plugins-elevenlabs/tts.py. We don't
+    need to opt into streaming — but we DO need to opt into latency
+    optimization, which is off by default.
+
+    streaming_latency=3 enables ElevenLabs' "max latency optimization"
+    profile (still keeping text normalization on; 4 disables it and
+    risks mispronouncing numbers / abbreviations in the interview
+    domain). Combined with the eleven_turbo_v2_5 model, this targets
+    ~200ms first-audio-byte on warm WebSocket connections.
+    """
     return elevenlabs.TTS(
         voice_id=persona.voice_id,
         voice_settings=elevenlabs.VoiceSettings(
@@ -142,6 +156,7 @@ def _build_tts_for(persona: Persona) -> elevenlabs.TTS:
             speed=persona.voice_speed,
             use_speaker_boost=persona.voice_use_speaker_boost,
         ),
+        streaming_latency=3,
     )
 
 
@@ -438,6 +453,18 @@ async def entrypoint(ctx: JobContext) -> None:
         content = "".join(c for c in item.content if isinstance(c, str))
         if not content:
             return
+
+        # Per-turn latency telemetry. The SDK attaches a MetricsReport
+        # to assistant ChatMessages — it carries llm_node_ttft,
+        # tts_node_ttfb, and e2e_latency for the full round trip.
+        # User messages don't get this span (no LLM/TTS legs to measure).
+        if item.role == "assistant":
+            emit_turn_latency_span(
+                getattr(item, "metrics", None),
+                session_id=session_id,
+                persona_id=_ACTIVE_PERSONA_ID[0],
+            )
+
         now = datetime.now(timezone.utc)
         turn = Turn(
             role=item.role,
