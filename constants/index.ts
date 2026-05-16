@@ -192,6 +192,29 @@ export const groundingSchema = z.object({
   rubricsGrounded: z.array(rubricGroundedSchema).min(5).max(12),
 });
 
+// Multi-agent panel: one bucket = questions + base rubrics for one persona.
+const partitionedBucketSchema = z.object({
+  questions: z.array(z.string()).min(2).max(5),
+  rubrics: z.array(rubricBaseSchema).min(2).max(5),
+});
+
+export const partitionedTemplateSchema = z.object({
+  behavioral: partitionedBucketSchema,
+  technical: partitionedBucketSchema,
+  systemDesign: partitionedBucketSchema,
+});
+
+const partitionedGroundedBucketSchema = z.object({
+  questionsGrounded: z.array(z.string()).min(2).max(5),
+  rubricsGrounded: z.array(rubricGroundedSchema).min(2).max(5),
+});
+
+export const partitionedGroundingSchema = z.object({
+  behavioral: partitionedGroundedBucketSchema,
+  technical: partitionedGroundedBucketSchema,
+  systemDesign: partitionedGroundedBucketSchema,
+});
+
 export const reportSchema = z.object({
   totalScore: z.number().min(0).max(100),
   categoryScores: z.array(
