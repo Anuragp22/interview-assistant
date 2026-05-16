@@ -32,6 +32,11 @@ export async function generateQuestionsAndRubrics(input: {
     model: groq(GROQ_MODEL),
     providerOptions: { groq: { structuredOutputs: false } },
     schema: templateGenerationSchema,
+    experimental_telemetry: {
+      isEnabled: true,
+      functionId: "groq.generate-questions-and-rubrics",
+      metadata: { role: input.role, level: input.level, count },
+    },
     system:
       "You are a senior technical interviewer designing a structured interview rubric. Output a single JSON object exactly matching the schema described in the user message.",
     prompt: `
@@ -90,6 +95,11 @@ export async function generatePartitionedQuestions(input: {
     model: groq(GROQ_MODEL),
     providerOptions: { groq: { structuredOutputs: false } },
     schema: partitionedTemplateSchema,
+    experimental_telemetry: {
+      isEnabled: true,
+      functionId: "groq.generate-partitioned-questions",
+      metadata: { role: input.role, level: input.level },
+    },
     system:
       "You are an expert technical interviewer designing a 3-round panel.",
     prompt: `

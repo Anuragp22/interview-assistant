@@ -30,6 +30,11 @@ export async function regroundQuestions(input: {
     model: groq(GROQ_MODEL),
     providerOptions: { groq: { structuredOutputs: false } },
     schema: groundingSchema,
+    experimental_telemetry: {
+      isEnabled: true,
+      functionId: "groq.reground-questions",
+      metadata: { questionCount: input.questionsBase.length },
+    },
     system:
       "You personalise interview questions for a specific candidate. Output a single JSON object exactly matching the schema described in the user message.",
     prompt: `
@@ -142,6 +147,14 @@ export async function regroundPartitionedQuestions(input: {
     model: groq(GROQ_MODEL),
     providerOptions: { groq: { structuredOutputs: false } },
     schema: partitionedGroundingSchema,
+    experimental_telemetry: {
+      isEnabled: true,
+      functionId: "groq.reground-partitioned-questions",
+      metadata: {
+        cvLength: input.cvText.length,
+        jdLength: input.jobDescription.length,
+      },
+    },
     system:
       "You re-ground base interview questions in the candidate's CV. Output a single JSON object matching the schema.",
     prompt: `

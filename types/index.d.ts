@@ -161,6 +161,11 @@ interface Session {
   startedAt?: string;
   completedAt?: string;
   createdAt: string;
+  // W3C `traceparent` value (e.g. "00-{trace_id}-{span_id}-01"). Written
+  // at session-create time so the Python agent can extract the trace
+  // context and join the same end-to-end trace. Absent on legacy sessions
+  // created before OTel was wired up.
+  traceparent?: string;
 }
 
 type Recommendation =

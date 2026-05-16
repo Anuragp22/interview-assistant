@@ -9,6 +9,7 @@ import { auth, db } from "@/firebase/admin";
 import { extractResumeText, CvParseError } from "@/lib/cv-parse";
 import { generatePartitionedQuestions } from "@/lib/llm/groq-template";
 import { regroundPartitionedQuestions } from "@/lib/llm/groq-grounding";
+import { traced, currentTraceparent } from "@/lib/tracing";
 
 const SESSION_COOKIE = "session";
 
@@ -119,125 +120,170 @@ export async function createPracticeSession(input: {
     filename: string;
   };
 }): Promise<ActionResult<{ sessionId: string }>> {
-  try {
-    const uid = await requireUid();
+  return traced(
+    "practice.create-session",
+    { "interview.role": input.role, "interview.level": input.level },
+    async (rootSpan) => {
+      try {
+        const uid = await requireUid();
+        rootSpan.setAttribute("user.id", uid);
 
-    // 1. Ensure we have a CV. Replace if a new one was provided.
-    if (input.newCv) {
-      const r = await replaceCv(input.newCv);
-      if (!r.success) return { success: false, message: r.message };
-    }
-    const cv = await getSavedCv();
-    if (!cv) {
-      return {
-        success: false,
-        message: "CV required — upload one to start practising.",
-      };
-    }
+        // 1. Ensure we have a CV. Replace if a new one was provided.
+        if (input.newCv) {
+          const r = await replaceCv(input.newCv);
+          if (!r.success) return { success: false, message: r.message };
+        }
+        const cv = await getSavedCv();
+        if (!cv) {
+          return {
+            success: false,
+            message: "CV required — upload one to start practising.",
+          };
+        }
+        rootSpan.setAttribute("cv.length", cv.extractedText.length);
 
-    // 2. Phase 1 — partitioned questions/rubrics across 3 personas.
-    const phase1 = await generatePartitionedQuestions({
-      role: input.role,
-      level: input.level,
-      jobDescription: input.jobDescription,
-    });
+        // 2. Phase 1 — partitioned questions/rubrics across 3 personas.
+        //    AI SDK experimental_telemetry emits the actual gen_ai.* span
+        //    inside generatePartitionedQuestions — this wrapper just gives
+        //    us our own application-level marker.
+        const phase1 = await traced(
+          "phase1.generate-template",
+          {},
+          () =>
+            generatePartitionedQuestions({
+              role: input.role,
+              level: input.level,
+              jobDescription: input.jobDescription,
+            }),
+        );
 
-    // Flat concatenation for the template doc and the report generator,
-    // which still walks the full transcript holistically.
-    const flatQuestionsBase = [
-      ...phase1.behavioral.questions,
-      ...phase1.technical.questions,
-      ...phase1.systemDesign.questions,
-    ];
-    const flatRubricsBase = [
-      ...phase1.behavioral.rubrics,
-      ...phase1.technical.rubrics,
-      ...phase1.systemDesign.rubrics,
-    ];
+        // Flat concatenation for the template doc and the report generator,
+        // which still walks the full transcript holistically.
+        const flatQuestionsBase = [
+          ...phase1.behavioral.questions,
+          ...phase1.technical.questions,
+          ...phase1.systemDesign.questions,
+        ];
+        const flatRubricsBase = [
+          ...phase1.behavioral.rubrics,
+          ...phase1.technical.rubrics,
+          ...phase1.systemDesign.rubrics,
+        ];
 
-    // 3. Create the template doc (hrUid = owner).
-    const tref = db.collection("templates").doc();
-    const now = new Date().toISOString();
-    await tref.set({
-      id: tref.id,
-      hrUid: uid,
-      title: `Practice: ${input.role}`,
-      role: input.role,
-      level: input.level,
-      jobDescription: input.jobDescription,
-      questionsBase: flatQuestionsBase,
-      rubricsBase: flatRubricsBase,
-      status: "draft" as const,
-      createdAt: now,
-      updatedAt: now,
-    });
+        // 3. Create the template doc (hrUid = owner).
+        const tref = db.collection("templates").doc();
+        const now = new Date().toISOString();
+        await traced(
+          "firestore.template.write",
+          { "firestore.doc": `templates/${tref.id}` },
+          () =>
+            tref.set({
+              id: tref.id,
+              hrUid: uid,
+              title: `Practice: ${input.role}`,
+              role: input.role,
+              level: input.level,
+              jobDescription: input.jobDescription,
+              questionsBase: flatQuestionsBase,
+              rubricsBase: flatRubricsBase,
+              status: "draft" as const,
+              createdAt: now,
+              updatedAt: now,
+            }),
+        );
 
-    // 4. Phase 2 — partitioned reground against the CV.
-    const phase2 = await regroundPartitionedQuestions({
-      questionsByPersona: {
-        behavioral: phase1.behavioral.questions,
-        technical: phase1.technical.questions,
-        systemDesign: phase1.systemDesign.questions,
-      },
-      rubricsByPersona: {
-        behavioral: phase1.behavioral.rubrics,
-        technical: phase1.technical.rubrics,
-        systemDesign: phase1.systemDesign.rubrics,
-      },
-      jobDescription: input.jobDescription,
-      cvText: cv.extractedText,
-    });
+        // 4. Phase 2 — partitioned reground against the CV.
+        const phase2 = await traced(
+          "phase2.reground-against-cv",
+          {},
+          () =>
+            regroundPartitionedQuestions({
+              questionsByPersona: {
+                behavioral: phase1.behavioral.questions,
+                technical: phase1.technical.questions,
+                systemDesign: phase1.systemDesign.questions,
+              },
+              rubricsByPersona: {
+                behavioral: phase1.behavioral.rubrics,
+                technical: phase1.technical.rubrics,
+                systemDesign: phase1.systemDesign.rubrics,
+              },
+              jobDescription: input.jobDescription,
+              cvText: cv.extractedText,
+            }),
+        );
 
-    const flatQuestionsGrounded = [
-      ...phase2.behavioral.questionsGrounded,
-      ...phase2.technical.questionsGrounded,
-      ...phase2.systemDesign.questionsGrounded,
-    ];
-    const flatRubricsGrounded = [
-      ...phase2.behavioral.rubricsGrounded,
-      ...phase2.technical.rubricsGrounded,
-      ...phase2.systemDesign.rubricsGrounded,
-    ];
+        const flatQuestionsGrounded = [
+          ...phase2.behavioral.questionsGrounded,
+          ...phase2.technical.questionsGrounded,
+          ...phase2.systemDesign.questionsGrounded,
+        ];
+        const flatRubricsGrounded = [
+          ...phase2.behavioral.rubricsGrounded,
+          ...phase2.technical.rubricsGrounded,
+          ...phase2.systemDesign.rubricsGrounded,
+        ];
 
-    // 5. Create the session doc with BOTH partitioned and flat shapes.
-    //    The Python agent reads questionsByPersona; the report generator
-    //    reads the flat versions. inviteToken="practice" sentinel marks
-    //    practice-origin sessions for the dashboard filter.
-    const sref = db.collection("sessions").doc();
-    await sref.set({
-      id: sref.id,
-      templateId: tref.id,
-      inviteToken: "practice",
-      candidateUid: uid,
-      hrUid: uid,
-      cvStorageRef: cv.storageRef,
-      cvExtractedText: cv.extractedText,
-      questionsGrounded: flatQuestionsGrounded,
-      rubricsGrounded: flatRubricsGrounded,
-      questionsByPersona: {
-        behavioral: phase2.behavioral.questionsGrounded,
-        technical: phase2.technical.questionsGrounded,
-        systemDesign: phase2.systemDesign.questionsGrounded,
-      },
-      rubricsByPersona: {
-        behavioral: phase2.behavioral.rubricsGrounded,
-        technical: phase2.technical.rubricsGrounded,
-        systemDesign: phase2.systemDesign.rubricsGrounded,
-      },
-      status: "awaiting-call" as const,
-      livekitRoomName: `session-${sref.id}`,
-      createdAt: new Date().toISOString(),
-    });
+        // 5. Create the session doc with BOTH partitioned and flat shapes.
+        //    The Python agent reads questionsByPersona; the report generator
+        //    reads the flat versions. inviteToken="practice" sentinel marks
+        //    practice-origin sessions for the dashboard filter.
+        //
+        //    The `traceparent` field carries the W3C trace context for
+        //    *this* server action's span — the Python agent reads it on
+        //    entry and continues the same trace across the process
+        //    boundary, so the entire panel + Groq/ElevenLabs/Deepgram
+        //    activity nests under this very span in Honeycomb.
+        const sref = db.collection("sessions").doc();
+        const traceparent = currentTraceparent();
+        await traced(
+          "firestore.session.write",
+          {
+            "firestore.doc": `sessions/${sref.id}`,
+            "trace.propagated": traceparent !== null,
+          },
+          () =>
+            sref.set({
+              id: sref.id,
+              templateId: tref.id,
+              inviteToken: "practice",
+              candidateUid: uid,
+              hrUid: uid,
+              cvStorageRef: cv.storageRef,
+              cvExtractedText: cv.extractedText,
+              questionsGrounded: flatQuestionsGrounded,
+              rubricsGrounded: flatRubricsGrounded,
+              questionsByPersona: {
+                behavioral: phase2.behavioral.questionsGrounded,
+                technical: phase2.technical.questionsGrounded,
+                systemDesign: phase2.systemDesign.questionsGrounded,
+              },
+              rubricsByPersona: {
+                behavioral: phase2.behavioral.rubricsGrounded,
+                technical: phase2.technical.rubricsGrounded,
+                systemDesign: phase2.systemDesign.rubricsGrounded,
+              },
+              status: "awaiting-call" as const,
+              livekitRoomName: `session-${sref.id}`,
+              ...(traceparent ? { traceparent } : {}),
+              createdAt: new Date().toISOString(),
+            }),
+        );
 
-    return { success: true, data: { sessionId: sref.id } };
-  } catch (e) {
-    console.error("createPracticeSession failed:", e);
-    return {
-      success: false,
-      message:
-        e instanceof Error ? e.message : "Failed to create practice session",
-    };
-  }
+        rootSpan.setAttribute("session.id", sref.id);
+        return { success: true, data: { sessionId: sref.id } };
+      } catch (e) {
+        console.error("createPracticeSession failed:", e);
+        return {
+          success: false,
+          message:
+            e instanceof Error
+              ? e.message
+              : "Failed to create practice session",
+        };
+      }
+    },
+  );
 }
 
 export type PracticeHistoryRow = {
