@@ -34,6 +34,7 @@ from livekit.agents import (
     JobContext,
     JobProcess,
     JobRequest,
+    RunContext,
     WorkerOptions,
     cli,
     function_tool,
@@ -157,7 +158,13 @@ def _render_for(persona: Persona) -> str:
 
 class InterviewerBase(Agent):
     """Shared base for the 3-agent panel. Owns the common tools and per-
-    persona TTS override."""
+    persona TTS override.
+
+    `chat_ctx` is forwarded to the parent Agent so conversation history
+    persists across hand-offs (the canonical livekit-agents handoff
+    pattern). Without this, the next interviewer doesn't see what the
+    candidate already answered to the previous one.
+    """
 
     def __init__(
         self,
@@ -165,25 +172,27 @@ class InterviewerBase(Agent):
         index: Any,
         session_id: str,
         persona: Persona,
+        chat_ctx: Any = None,
     ) -> None:
         super().__init__(
             instructions=_render_for(persona),
             tts=_build_tts_for(persona),
+            chat_ctx=chat_ctx,
         )
         self._index = index
         self._session_id = session_id
         self._persona = persona
 
-    @function_tool
-    async def lookup_cv_jd(self, query: str) -> str:
+    @function_tool()
+    async def lookup_cv_jd(self, context: RunContext, query: str) -> str:
         """Look up specifics from the candidate's CV or the job description.
         Use when you need a concrete fact (project name, tech, dates,
         specific JD requirement) before asking a question or follow-up.
         Returns the most relevant chunks from the indexed CV+JD."""
         return await query_index(self._index, query, top_k=3)
 
-    @function_tool
-    async def verify_cv_claim(self, claim: str) -> str:
+    @function_tool()
+    async def verify_cv_claim(self, context: RunContext, claim: str) -> str:
         """Verify whether a candidate's stated claim is supported by their
         CV or the job description. Call this whenever the candidate
         mentions a specific project, employer, technology, tenure, or
@@ -199,40 +208,79 @@ class InterviewerBase(Agent):
 class BehavioralInterviewer(InterviewerBase):
     """Round 1 — STAR-method behavioral interviewer (Sarah)."""
 
-    @function_tool
-    async def transfer_to_technical(self) -> Agent:
+    async def on_enter(self) -> None:
+        """Spoken on activation. The first agent greets the candidate;
+        subsequent agents are activated by hand-off and introduce
+        themselves by role (their `on_enter` overrides below)."""
+        await self.session.generate_reply(
+            instructions=(
+                f"Briefly greet {_PANEL_CONTEXT.get('candidate_name', 'the candidate')} "
+                "by name, introduce yourself as Sarah running the behavioral round of a "
+                "three-interviewer panel, and ask the first behavioral question from "
+                "your agenda."
+            )
+        )
+
+    @function_tool()
+    async def transfer_to_technical(self, context: RunContext) -> tuple[Agent, str]:
         """Hand off to the technical interviewer when the behavioral round
         has gathered enough signal (typically after 3-6 turns).
         After 8 turns you must transfer regardless."""
         _ACTIVE_PERSONA_ID[0] = TECHNICAL_PERSONA.id
-        return TechnicalInterviewer(
+        next_agent = TechnicalInterviewer(
             index=self._index,
             session_id=self._session_id,
             persona=TECHNICAL_PERSONA,
+            chat_ctx=self.chat_ctx,
         )
+        return next_agent, "Transferring to the technical interviewer."
 
 
 class TechnicalInterviewer(InterviewerBase):
     """Round 2 — implementation-depth technical interviewer (Adam)."""
 
-    @function_tool
-    async def transfer_to_system_design(self) -> Agent:
+    async def on_enter(self) -> None:
+        await self.session.generate_reply(
+            instructions=(
+                "Introduce yourself briefly as Adam, the technical interviewer for "
+                "this round of the panel. Acknowledge that you've seen the candidate's "
+                "earlier answers, then ask the first technical question from your "
+                "agenda."
+            )
+        )
+
+    @function_tool()
+    async def transfer_to_system_design(
+        self, context: RunContext
+    ) -> tuple[Agent, str]:
         """Hand off to the system design interviewer when the technical
         round is complete (typically 3-6 turns). After 8 turns you must
         transfer regardless."""
         _ACTIVE_PERSONA_ID[0] = SYSTEM_DESIGN_PERSONA.id
-        return SystemDesignInterviewer(
+        next_agent = SystemDesignInterviewer(
             index=self._index,
             session_id=self._session_id,
             persona=SYSTEM_DESIGN_PERSONA,
+            chat_ctx=self.chat_ctx,
         )
+        return next_agent, "Transferring to the system design interviewer."
 
 
 class SystemDesignInterviewer(InterviewerBase):
     """Round 3 — system design interviewer (Bella). Last in the panel."""
 
-    @function_tool
-    async def end_interview(self) -> str:
+    async def on_enter(self) -> None:
+        await self.session.generate_reply(
+            instructions=(
+                "Introduce yourself briefly as Bella, the system design interviewer "
+                "for the final round. Set up the first system design problem from "
+                "your agenda — start by stating the scenario and asking the "
+                "candidate to clarify constraints before diving in."
+            )
+        )
+
+    @function_tool()
+    async def end_interview(self, context: RunContext) -> str:
         """End the interview after the system design round.
         Call this when you have enough signal or after 8 turns. The
         candidate's recording wraps up and report generation begins."""

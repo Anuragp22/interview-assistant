@@ -98,62 +98,160 @@ def test_every_subclass_exposes_lookup_cv_jd_and_verify_cv_claim(cls, persona):
 
 @pytest.mark.asyncio
 async def test_lookup_cv_jd_delegates_to_query_index_on_behavioral():
+    """The @function_tool decorator wraps the method; the raw method is
+    callable via .__wrapped__ or via the FunctionTool's underlying coro.
+    Testing the public behaviour by patching query_index is enough."""
     index = MagicMock()
     agent = BehavioralInterviewer(
         index=index, session_id="sess_abc", persona=BEHAVIORAL_PERSONA
     )
+    ctx = MagicMock()  # RunContext stand-in
     with patch(
         "interview_agent.agent.query_index",
         new=AsyncMock(return_value="chunk"),
     ) as mock_qi:
-        result = await agent.lookup_cv_jd("What tech stack?")
+        # Call the underlying coro; function_tool exposes the wrapped fn
+        # so the method is still callable in tests.
+        result = await agent.lookup_cv_jd(ctx, "What tech stack?")
     mock_qi.assert_called_once_with(index, "What tech stack?", top_k=3)
     assert result == "chunk"
 
 
 # ---------------------------------------------------------------------------
-# Transfer tools return the next Agent subclass
+# Transfer tools return (Agent, message) tuple per livekit-agents docs
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_behavioral_transfer_returns_technical_interviewer():
+async def test_behavioral_transfer_returns_technical_interviewer_and_message():
     agent = _make(BehavioralInterviewer, BEHAVIORAL_PERSONA)
-    next_agent = await agent.transfer_to_technical()
+    ctx = MagicMock()
+    result = await agent.transfer_to_technical(ctx)
+    assert isinstance(result, tuple) and len(result) == 2
+    next_agent, message = result
     assert isinstance(next_agent, TechnicalInterviewer)
     assert next_agent._persona is TECHNICAL_PERSONA
+    assert isinstance(message, str) and len(message) > 0
 
 
 @pytest.mark.asyncio
-async def test_technical_transfer_returns_system_design_interviewer():
+async def test_technical_transfer_returns_system_design_interviewer_and_message():
     agent = _make(TechnicalInterviewer, TECHNICAL_PERSONA)
-    next_agent = await agent.transfer_to_system_design()
+    ctx = MagicMock()
+    result = await agent.transfer_to_system_design(ctx)
+    assert isinstance(result, tuple) and len(result) == 2
+    next_agent, message = result
     assert isinstance(next_agent, SystemDesignInterviewer)
     assert next_agent._persona is SYSTEM_DESIGN_PERSONA
 
 
 @pytest.mark.asyncio
+async def test_behavioral_transfer_propagates_chat_ctx():
+    """Hand-off must pass the parent's chat_ctx into the new agent's
+    constructor so conversation history flows forward.
+
+    livekit-agents wraps the stored ChatContext in `_ReadOnlyChatContext`,
+    so the .chat_ctx property doesn't return the bare object passed in —
+    comparing with `is` fails. Instead, spy on the constructor and assert
+    that chat_ctx WAS passed through.
+    """
+    from interview_agent.agent import TechnicalInterviewer as TC
+
+    init_kwargs: dict = {}
+    real_init = TC.__init__
+
+    def capture_init(self, **kwargs):
+        init_kwargs.update(kwargs)
+        real_init(self, **kwargs)
+
+    with patch.object(TC, "__init__", capture_init):
+        agent = _make(BehavioralInterviewer, BEHAVIORAL_PERSONA)
+        ctx = MagicMock()
+        await agent.transfer_to_technical(ctx)
+
+    # The chat_ctx kwarg must be present and non-None. The Agent.chat_ctx
+    # property returns a fresh _ReadOnlyChatContext wrapper on each call,
+    # so identity comparison against a later property read doesn't work —
+    # the kwarg simply needs to have been passed through.
+    assert "chat_ctx" in init_kwargs
+    assert init_kwargs["chat_ctx"] is not None
+
+
+@pytest.mark.asyncio
 async def test_system_design_end_interview_sets_module_flag():
-    """The end tool signals via _END_INTERVIEW_FLAG so the entrypoint's
-    watcher task can close the session."""
     import interview_agent.agent as agent_module
 
     agent_module._END_INTERVIEW_FLAG.clear()
     agent = _make(SystemDesignInterviewer, SYSTEM_DESIGN_PERSONA)
-    result = await agent.end_interview()
+    ctx = MagicMock()
+    result = await agent.end_interview(ctx)
     assert agent_module._END_INTERVIEW_FLAG.is_set()
     assert "panel is complete" in result.lower() or "thanks" in result.lower()
 
 
 @pytest.mark.asyncio
 async def test_transfer_to_technical_updates_active_persona_id():
-    """The transfer tool flips _ACTIVE_PERSONA_ID so turn-metadata writes
-    correctly attribute subsequent turns to the new persona."""
     import interview_agent.agent as agent_module
 
     agent_module._ACTIVE_PERSONA_ID[0] = BEHAVIORAL_PERSONA.id
     agent = _make(BehavioralInterviewer, BEHAVIORAL_PERSONA)
-    await agent.transfer_to_technical()
+    ctx = MagicMock()
+    await agent.transfer_to_technical(ctx)
     assert agent_module._ACTIVE_PERSONA_ID[0] == TECHNICAL_PERSONA.id
+
+
+# ---------------------------------------------------------------------------
+# on_enter introductions — each subclass introduces itself when activated
+# ---------------------------------------------------------------------------
+
+def _stub_session_on(agent):
+    """Inject a mock AgentActivity so Agent.session resolves without a
+    running session. livekit-agents 1.5 routes self.session via
+    self._activity.session, raising RuntimeError when _activity is None.
+    """
+    fake_session = MagicMock()
+    fake_session.generate_reply = AsyncMock()
+    fake_activity = MagicMock()
+    fake_activity.session = fake_session
+    agent._activity = fake_activity  # type: ignore[attr-defined]
+    return fake_session
+
+
+@pytest.mark.asyncio
+async def test_behavioral_on_enter_generates_greeting():
+    agent = _make(BehavioralInterviewer, BEHAVIORAL_PERSONA)
+    fake_session = _stub_session_on(agent)
+    await agent.on_enter()
+    fake_session.generate_reply.assert_called_once()
+    instructions = fake_session.generate_reply.call_args.kwargs.get(
+        "instructions", ""
+    )
+    assert "Sarah" in instructions
+    assert "behavioral" in instructions.lower()
+
+
+@pytest.mark.asyncio
+async def test_technical_on_enter_introduces_adam():
+    agent = _make(TechnicalInterviewer, TECHNICAL_PERSONA)
+    fake_session = _stub_session_on(agent)
+    await agent.on_enter()
+    fake_session.generate_reply.assert_called_once()
+    instructions = fake_session.generate_reply.call_args.kwargs.get(
+        "instructions", ""
+    )
+    assert "Adam" in instructions
+    assert "technical" in instructions.lower()
+
+
+@pytest.mark.asyncio
+async def test_system_design_on_enter_introduces_bella():
+    agent = _make(SystemDesignInterviewer, SYSTEM_DESIGN_PERSONA)
+    fake_session = _stub_session_on(agent)
+    await agent.on_enter()
+    fake_session.generate_reply.assert_called_once()
+    instructions = fake_session.generate_reply.call_args.kwargs.get(
+        "instructions", ""
+    )
+    assert "Bella" in instructions
 
 
 # ---------------------------------------------------------------------------
