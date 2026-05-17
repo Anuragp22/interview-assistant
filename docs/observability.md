@@ -1,10 +1,13 @@
 # Observability
 
-End-to-end OpenTelemetry tracing across all four processes that participate
-in a practice session: **Next.js** server actions → **Firestore** → **LiveKit**
-room → **Python agent** + LLM/STT/TTS calls. One W3C `traceparent` rides the
-session doc and is rehydrated by the agent on entry, so a single trace ID
-covers the whole flow in Honeycomb / Grafana Tempo / Jaeger.
+End-to-end OpenTelemetry tracing across the practice-session flow:
+**Next.js** server actions → **Firestore** (carries the trace) → **LiveKit**
+room → **Python agent** + LLM/STT/TTS calls. Two of those are OTel-instrumented
+processes we own and emit spans (Next.js and the Python agent); Firestore is
+the carrier (a W3C `traceparent` field rides on the session doc and is
+rehydrated by the agent on entry); LiveKit is the transport (it dispatches
+the agent into the room). One trace ID covers the whole flow in Honeycomb /
+Grafana Tempo / Jaeger.
 
 ## Why this exists
 
