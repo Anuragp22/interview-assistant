@@ -1,232 +1,235 @@
-# Interview Assistant - AI-Powered Voice Interview Practice Platform
+# JobVoice — Real-Time AI Interview Simulator
 
-Interview Assistant is an advanced AI-powered interview practice platform that helps job seekers prepare for technical and behavioral interviews through realistic voice-based simulations using cutting-edge AI and voice technologies.
+A voice-driven mock-interview platform. The candidate joins a LiveKit room and
+speaks with a **three-interviewer panel** — Sarah (behavioral) hands off to
+Adam (technical), who hands off to Bella (system design) — each with their own
+voice and rubric. Questions are grounded in the candidate's CV + the job
+description; claims are fact-checked live against the CV with a RAG tool call;
+and a per-session report is generated when the panel concludes.
 
-## About the Application
+Live demo: <https://interview-assistant-nu.vercel.app/>
 
-Interview Assistant creates a realistic interview environment by leveraging multiple AI services to simulate job interviews. The application allows users to practice their interview skills with an AI interviewer that can ask relevant questions based on job roles, experience levels, and technology stacks, providing comprehensive feedback after each session.
+## What this is, in one diagram
 
-## Key Features
+```
+┌─────────┐ WebRTC  ┌────────────┐  dispatch  ┌──────────────────────┐
+│ Browser │ ───────▶│ LiveKit    │ ─────────▶ │  Python agent worker │
+│ (Next)  │ ◀─────── │  Cloud SFU │ ◀──────── │  (livekit-agent/)    │
+└─────────┘  audio  └────────────┘   audio    └──────────┬───────────┘
+     │                                                    │
+     │                                          STT (Deepgram Nova-2)
+     │                                          LLM (Groq Llama-3.3 70B)
+     │                                          TTS (ElevenLabs turbo_v2_5)
+     │                                          RAG (LlamaIndex over CV + JD)
+     │                                                    │
+     ▼                                                    ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                    Firestore (sessions, turns, reports)             │
+└─────────────────────────────────────────────────────────────────────┘
+```
 
-- **Personalized Interview Generation**: Create custom interview sessions based on job role, experience level, and specific technology stack
-- **Real-time Voice Conversations**: Engage in natural voice conversations with an AI interviewer using advanced speech synthesis
-- **Multiple Interview Types**: Practice technical interviews, behavioral interviews, or mixed format sessions
-- **Comprehensive AI Feedback**: Receive detailed analysis and feedback on your interview performance using structured evaluation
-- **Progress Tracking**: Monitor your improvement over time across different interview sessions
-- **Tech Stack Visualization**: See technology icons for each interview type
-- **Interview History**: Track all your past interviews and feedback
+## Key features
 
-## Technology Stack
+- **3-agent voice panel** — Behavioral → Technical → System Design, each with
+  a distinct ElevenLabs voice, persona-specific rubric, and LiveKit-native
+  `@function_tool` hand-off. Per-persona question lists are partitioned at
+  generation time, so each round has its own agenda.
+- **In-session CV/JD fact-checking** — `verify_cv_claim` and `lookup_cv_jd`
+  tool calls run LlamaIndex retrieval over the candidate's CV and the job
+  description, so the interviewer asks about *that* project at *that* company
+  rather than generic placeholders.
+- **Multi-layer prompt-injection defense** — DeBERTa input classifier
+  (sequential or speculative-parallel mode) + deterministic `TransferGuard`
+  preconditions on hand-off / end-interview tools + post-hoc system-prompt
+  leak detection. See `docs/security.md`.
+- **50-prompt adversarial audit** — versioned corpus (`security/injection_corpus.py`)
+  with declarative `must_not_call_tools` predicates; runs against the real
+  rendered system prompt and gates regressions via `security_baseline.json`.
+- **LLM eval harness** — 10-fixture offline regression gate
+  (`eval/`) for question generation; fails CI on any per-fixture metric
+  dropping more than 10 percentage points.
+- **Per-stage latency budgets** — `latency_budget.py` enforces wall-clock
+  budgets per turn stage (STT, LLM TTFT, TTS first audio); replay analyzer
+  walks past sessions and reports budget violations.
+- **Per-session cost telemetry** — `cost_aggregator.py` rolls up provider
+  spend (Groq tokens, Deepgram seconds, ElevenLabs characters, LiveKit
+  minutes) at session end and surfaces it in the practice dashboard.
+- **End-to-end OpenTelemetry tracing** — one trace ID spans the Next.js
+  server action → Firestore session doc → Python agent worker, propagated
+  via a W3C `traceparent` field written onto the session document.
+- **Mid-interview resume** — closing the tab mid-call and reopening
+  continues at the persona the panel was on, not from scratch.
+- **Practice dashboard** — score sparkline, session history, CV management
+  (view / replace / remove) at `/practice/settings`.
 
-- **Frontend**: Next.js 15, React 19, Tailwind CSS 4
-- **Backend**: Next.js API Routes, Server Actions
-- **Database**: Firebase Firestore
-- **Authentication**: Firebase Authentication with session cookies
-- **Real-time transport**: LiveKit Cloud (WebRTC SFU) + LiveKit Agents (Python worker)
-- **Speech-to-Text**: Deepgram Nova-2 (driven by the agent, not a hosted service)
-- **Text-to-Speech**: 11labs "Sarah" voice (driven by the agent)
-- **Conversation AI**: Groq Llama-3.3 70B (called via the OpenAI-compatible client; driven by the agent)
-- **Feedback AI**: Groq Llama-3.3 70B via `@ai-sdk/groq` (server action, post-call; same provider used for question generation and the live conversation)
-- **UI Components**: Radix UI, Lucide React icons
-- **Form Handling**: React Hook Form with Zod validation
+## Tech stack
 
-## How the Voice Flow Works
+| Layer | Tech |
+|---|---|
+| Frontend | Next.js 15 (App Router), React 19, Tailwind CSS 4, Radix UI |
+| Auth + DB | Firebase Auth (session cookies) + Firestore |
+| Real-time transport | LiveKit Cloud (WebRTC SFU) |
+| Agent runtime | Python 3.11 + LiveKit Agents 1.5 |
+| STT | Deepgram Nova-2 |
+| LLM (interview + question generation + feedback) | Groq `llama-3.3-70b-versatile` |
+| TTS | ElevenLabs `eleven_turbo_v2_5` (per-persona voice IDs) |
+| RAG | LlamaIndex with FastEmbed BGE-small embeddings |
+| Prompt-injection classifier | HuggingFace `protectai/deberta-v3-base-prompt-injection-v2` via `optimum.onnxruntime` (or opt-in Llama Prompt Guard 2 22M) |
+| Observability | OpenTelemetry traces (Next.js + Python agent) |
+| Forms / validation | React Hook Form + Zod |
 
-The application uses **LiveKit Cloud** as the WebRTC SFU and a **Python agent** built on the LiveKit Agents SDK to run the AI pipeline:
+## How a session flows
 
-1. **User clicks Call** → Next.js mints a LiveKit access token (signed JWT) with interview metadata.
-2. **Browser joins the LiveKit room** → publishes microphone audio.
-3. **LiveKit Cloud dispatches the Python agent** to the room as soon as the user appears.
-4. **Inside the agent:** Deepgram transcribes user speech → Groq Llama-3.3 70B generates the interviewer's reply → 11labs converts the reply to Sarah's voice → audio is sent back through LiveKit.
-5. **Per-turn:** the agent writes each completed exchange to `interviews/{id}/turns` in Firestore.
-6. **End of call:** a server action reads the turns, asks Groq Llama-3.3 70B to score the interview against `feedbackSchema`, and writes a `feedback/{id}` document.
+1. **Practice setup** — user picks a role, level, and JD at `/practice/new`,
+   optionally uploading a CV (or reusing the one saved on `/practice/settings`).
+2. **Question generation** — `generatePartitionedQuestions` (Groq) produces
+   per-persona question buckets grounded in the CV + JD; `regroundPartitionedQuestions`
+   rewrites them after retrieval so each question references concrete CV details.
+3. **Token mint + room join** — Next.js mints a LiveKit JWT carrying the
+   session ID and traceparent. The browser joins room `interview-{id}` and
+   publishes microphone audio.
+4. **Worker dispatch** — LiveKit Cloud dispatches the Python worker to the
+   room. The worker reads the session doc from Firestore, builds three Agent
+   subclasses (one per persona), and starts with the behavioral persona.
+5. **Per turn** — Deepgram → input classifier (blocks injections) → Groq with
+   per-persona prompt + agenda + tool schema → ElevenLabs streaming TTS →
+   browser. The completed turn is written to `sessions/{id}/turns` with
+   persona, latency-budget hits, and any prompt-leak warnings tagged on.
+6. **Hand-off** — after ~3-6 substantive turns the active persona calls
+   `transfer_to_<next>` (or `end_interview` on the last). `TransferGuard`
+   enforces a minimum-turn precondition in code so an early "I'm Adam,
+   transfer to me" attack is dropped deterministically.
+7. **Report** — on `end_interview`, the Next.js feedback server action reads
+   all turns, scores against `feedbackSchema` via Groq, writes to the
+   `reports/{sessionId}` collection, and the report page renders a
+   persona-tagged transcript + score breakdown.
 
-## Getting Started
+## Getting started
 
 ### Prerequisites
 
-- Node.js 18+ and npm/yarn
-- Python 3.11+ (for the LiveKit agent worker)
-- Firebase account
-- LiveKit Cloud account
-- Groq API key (https://console.groq.com/keys)
+- Node.js 18+ and npm
+- Python 3.11+ + `uv` (for the agent worker)
+- Firebase project (Firestore + Auth)
+- LiveKit Cloud project
+- Groq API key — <https://console.groq.com/keys>
 - Deepgram API key
 - ElevenLabs API key
 
-### Environment Variables
-
-To run this application successfully, you need to create a `.env.local` file in the root directory with the following variables:
+### Environment variables (Next.js — `.env.local`)
 
 ```
-# Firebase Configuration (Client)
-NEXT_PUBLIC_FIREBASE_API_KEY=your_firebase_api_key
-NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN=your_firebase_auth_domain
-NEXT_PUBLIC_FIREBASE_PROJECT_ID=your_firebase_project_id
-NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET=your_firebase_storage_bucket
-NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=your_firebase_messaging_sender_id
-NEXT_PUBLIC_FIREBASE_APP_ID=your_firebase_app_id
-NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID=your_firebase_measurement_id
+# Firebase (client)
+NEXT_PUBLIC_FIREBASE_API_KEY=
+NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN=
+NEXT_PUBLIC_FIREBASE_PROJECT_ID=
+NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET=
+NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=
+NEXT_PUBLIC_FIREBASE_APP_ID=
 
-# Firebase Configuration (Admin)
-FIREBASE_PROJECT_ID=your_firebase_project_id
-FIREBASE_CLIENT_EMAIL=your_firebase_client_email
-FIREBASE_PRIVATE_KEY=your_firebase_private_key
+# Firebase (admin — server actions)
+FIREBASE_PROJECT_ID=
+FIREBASE_CLIENT_EMAIL=
+FIREBASE_PRIVATE_KEY=
 
-# Groq — drives question generation, live interview LLM, and post-call feedback
-GROQ_API_KEY=your_groq_api_key
-# Optional override (defaults to llama-3.3-70b-versatile)
-# GROQ_MODEL=llama-3.3-70b-versatile
-
-# Speech / TTS providers (used by the Python agent — read here too because
-# the agent loads this same .env.local in dev)
-DEEPGRAM_API_KEY=your_deepgram_api_key
-ELEVEN_API_KEY=your_elevenlabs_api_key
+# Groq — question generation + post-call feedback
+GROQ_API_KEY=
+# GROQ_MODEL=llama-3.3-70b-versatile  # optional override
 
 # LiveKit
 LIVEKIT_API_KEY=
 LIVEKIT_API_SECRET=
 NEXT_PUBLIC_LIVEKIT_URL=wss://your-project.livekit.cloud
 
-# Optional: Analytics
-NEXT_PUBLIC_ANALYTICS_ID=your_analytics_id
+# Provider keys read by both the Next.js app and the agent in dev
+DEEPGRAM_API_KEY=
+ELEVEN_API_KEY=
+
+# OpenTelemetry (optional — exporter endpoint)
+# OTEL_EXPORTER_OTLP_ENDPOINT=
 ```
 
-The Python agent under `livekit-agent/` has its own `.env` with provider keys — see `livekit-agent/README.md` for the full list (LiveKit credentials, Groq, Deepgram, ElevenLabs, and a Firebase service-account JSON for per-turn writes).
+The Python agent has its own `livekit-agent/.env` with the same provider
+keys plus a Firebase service-account JSON for per-turn writes. See
+`livekit-agent/README.md`.
 
-You can obtain these keys by:
+### Run locally
 
-1. Creating a Firebase project at [Firebase Console](https://console.firebase.google.com/)
-2. ~~Setting up a Google AI Studio account for the Gemini API key~~ — removed; Groq covers all LLM workloads now
-3. Getting a Groq API key at [console.groq.com/keys](https://console.groq.com/keys)
-4. Registering at [LiveKit Cloud](https://livekit.io/) for a project URL, API key, and secret
-5. Creating accounts at [Deepgram](https://deepgram.com/) and [ElevenLabs](https://elevenlabs.io/) for the agent
+```bash
+# 1. Install Next.js deps
+npm install
 
-### Running the Python agent
+# 2. Start the web app
+npm run dev   # http://localhost:3000
 
-The voice pipeline runs in a separate Python service under `livekit-agent/`. See `livekit-agent/README.md` for setup. The Next.js app cannot conduct an interview on its own — both services must be running.
+# 3. In a second terminal — start the Python agent worker
+cd livekit-agent
+uv sync --extra dev
+uv run python -m interview_agent.agent dev
+```
 
-### Installation
+Both processes must be running — the Next.js app issues LiveKit tokens, but
+the actual interview pipeline (STT/LLM/TTS) lives in the agent.
 
-1. Clone the repository
+## Tests + audits
 
-   ```bash
-   git clone https://github.com/Anuragp22/interview-assistant
-   cd interview-assistant
-   ```
+```bash
+# Next.js unit tests (Vitest)
+npm test
 
-2. Install dependencies
+# Python agent tests (142 tests covering personas, hand-off, classifier,
+# guards, latency budget, cost aggregator)
+cd livekit-agent && uv run pytest -v
 
-   ```bash
-   npm install
-   # or
-   yarn install
-   ```
+# Question-generation eval harness — gates CI on per-fixture metric drift
+npm run eval
 
-3. Create a `.env.local` file in the root directory with your API keys (see environment variables section above)
+# Prompt-injection audit (smoke: ~10s, ~$0.01)
+cd livekit-agent
+uv run python -m interview_agent.security.run_audit --smoke
 
-4. Start the development server
+# Full audit (50 cases × 3 personas = 150, ~3 min, ~$0.15)
+uv run python -m interview_agent.security.run_audit
+```
 
-   ```bash
-   npm run dev
-   # or
-   yarn dev
-   ```
-
-5. In a separate terminal, start the Python agent (see `livekit-agent/README.md`).
-
-6. Navigate to `http://localhost:3000` to see the application.
-
-## How to Use
-
-1. **Create an Account**: Sign up with your email and password using Firebase Authentication
-2. **Generate an Interview**: Use the interview generation form to create custom interviews with specific questions
-3. **Start the Interview**: Begin the voice-based interview session with the AI interviewer
-4. **Complete the Session**: Answer all questions to the best of your ability through voice conversation
-5. **Review Feedback**: Receive detailed feedback on your performance with strengths and areas for improvement
-
-## Features in Detail
-
-### Interview Generation
-
-- **Role Selection**: Choose from a variety of job roles (Frontend, Backend, Full Stack, etc.)
-- **Experience Level**: Select Junior, Mid-level, or Senior
-- **Tech Stack**: Specify the technologies relevant to the position
-- **Interview Type**: Technical, Behavioral, or Mixed format
-- **Question Count**: Customize the number of questions for your interview
-
-### Voice Interaction
-
-The application uses advanced speech-to-text and text-to-speech technologies to create a realistic interview environment:
-
-- **Deepgram Nova-2**: Real-time speech recognition to capture your responses
-- **11labs Sarah Voice**: Natural-sounding AI interviewer voice
-- **Real-time Transcription**: See your responses transcribed as you speak
-- **Contextual Understanding**: AI maintains conversation context throughout the interview
-
-### Feedback Analysis
-
-After each interview, receive comprehensive feedback including:
-
-- **Overall Score**: Total performance score out of 100
-- **Category Breakdown**: Scores in 5 key areas:
-  - Communication Skills
-  - Technical Knowledge
-  - Problem Solving
-  - Cultural Fit
-  - Confidence and Clarity
-- **Specific Strengths**: Identified areas of excellence
-- **Areas for Improvement**: Actionable recommendations
-- **Final Assessment**: Comprehensive summary of performance
-
-### Technical Architecture
-
-- **App Router**: Next.js 15 with app directory structure
-- **Server Actions**: Server-side data mutations and API calls
-- **Session Management**: Secure cookie-based authentication
-- **Real-time Voice**: WebRTC via LiveKit Cloud, with a Python agent worker running the STT/LLM/TTS pipeline
-- **Responsive Design**: Mobile-first design with Tailwind CSS
-- **Type Safety**: Full TypeScript implementation with Zod validation
-
-## Project Structure
+## Project structure
 
 ```
 interview-assistant/
 ├── app/
-│   ├── (auth)/                    # Authentication pages
-│   ├── (root)/                    # Main application pages
-│   │   └── interview/             # Interview generation + live room + feedback
-│   ├── api/interviews/generate/   # POST: Groq Llama-3.3 70B → questions → Firestore
-│   └── globals.css                # Global styles
-├── components/                    # Shared React components (auth form, cards, icons)
+│   ├── (auth)/                       sign-in / sign-up
+│   ├── (practice)/practice/          dashboard, /new, /settings, [sessionId]/interview, [sessionId]/report
+│   └── api/practice/                 CV upload + session creation routes
+├── components/                       shared React components
 ├── lib/
-│   ├── actions/                   # Server actions (auth, interview token, feedback)
-│   ├── livekit.ts                 # LiveKit JWT minting helper
-│   └── utils.ts                   # Utility functions
-├── livekit-agent/                 # Python LiveKit Agents worker (separate service)
-│   ├── src/interview_agent/       # Agent entrypoint, prompts, persistence
-│   ├── pyproject.toml
+│   ├── actions/                      server actions (auth, practice, token, feedback)
+│   ├── llm/                          question generation + regrounding (Groq)
+│   ├── livekit.ts                    JWT minting + traceparent propagation
+│   └── tracing.ts                    OpenTelemetry setup
+├── eval/                             offline question-generation regression harness
+├── livekit-agent/                    Python LiveKit Agents worker
+│   ├── src/interview_agent/
+│   │   ├── agent.py                  3 Agent subclasses + entrypoint
+│   │   ├── persona.py                Sarah / Adam / Bella personas + voices + rules
+│   │   ├── input_classifier.py       DeBERTa prompt-injection scanner
+│   │   ├── security_guards.py        TransferGuard + leak detector
+│   │   ├── security/                 50-case audit corpus + runner + baseline
+│   │   ├── rag.py                    LlamaIndex CV/JD retriever
+│   │   ├── latency_budget.py         per-stage budgets + violation reporting
+│   │   ├── cost_aggregator.py        per-session provider spend roll-up
+│   │   └── tracing.py                OTel setup (continues traceparent from web)
+│   ├── tests/
 │   └── README.md
-├── firebase/                      # Firebase configuration (client + admin)
-├── constants/                     # Application constants (tech-icon map, feedback schema)
-└── types/                         # TypeScript type definitions (incl. types/livekit.d.ts)
+├── docs/
+│   ├── security.md                   threat model + defense-in-depth design
+│   └── observability.md              tracing + latency budget + cost telemetry
+├── firebase/                         client + admin SDK setup
+└── types/                            shared TypeScript + livekit.d.ts
 ```
 
-## Voice Configuration
+## Documentation
 
-The AI interviewer uses the following voice configuration (now defined in Python — `livekit-agent/src/interview_agent/prompts.py` `voice_settings()`, not `constants/index.ts`):
-- **Voice Provider**: 11labs
-- **Voice ID**: Sarah (ElevenLabs voice ID `EXAVITQu4vr4xnSDxMaL`)
-- **Stability**: 0.4 (balanced naturalness)
-- **Similarity Boost**: 0.8 (consistent voice)
-- **Speed**: 0.9 (slightly slower for clarity)
-- **Style**: 0.5 (professional tone)
-
-## v0.1 schema migration
-
-Runs once after deploying v0.1, before retiring the legacy single-user flow:
-
-```bash
-npx tsx scripts/migrate-v0.1.ts
-```
-
-The migration is idempotent (re-running is safe) and non-destructive (legacy `interviews/` and `feedback/` collections are not deleted).
+- [`docs/security.md`](docs/security.md) — prompt-injection threat model, 4-layer defense stack, audit harness design
+- [`docs/observability.md`](docs/observability.md) — OTel tracing setup, latency-budget gates, cost telemetry
+- [`livekit-agent/README.md`](livekit-agent/README.md) — agent worker dev setup + deployment (Render, Fly.io)
+- [`eval/README.md`](eval/README.md) — question-generation regression harness
