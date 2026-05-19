@@ -11,14 +11,14 @@ RUN apt-get update \
  && pip install --no-cache-dir uv==0.11.15
 
 WORKDIR /app
+COPY . .
 
-COPY livekit-agent/pyproject.toml livekit-agent/uv.lock livekit-agent/.python-version ./
-COPY livekit-agent/src ./src
-COPY livekit-agent/tests ./tests
-
+WORKDIR /app/livekit-agent
 RUN uv pip install --system --no-cache \
     --extra-index-url https://download.pytorch.org/whl/cpu \
     --index-strategy unsafe-best-match \
     'torch==2.10.0+cpu' '.[dev]'
 
-CMD ["pytest", "tests/"]
+WORKDIR /app
+
+CMD ["pytest", "livekit-agent/tests/"]
