@@ -38,10 +38,10 @@ Live demo: <https://interview-assistant-nu.vercel.app/>
   tool calls run LlamaIndex retrieval over the candidate's CV and the job
   description, so the interviewer asks about *that* project at *that* company
   rather than generic placeholders.
-- **Multi-layer prompt-injection defense** — DeBERTa input classifier
-  (sequential or speculative-parallel mode) + deterministic `TransferGuard`
+- **Deterministic prompt-injection defense** — `TransferGuard` turn-count
   preconditions on hand-off / end-interview tools + post-hoc system-prompt
-  leak detection. See `docs/security.md`.
+  leak detection, both code-level (no probabilistic classifier in the hot
+  path). See `docs/security.md`.
 - **50-prompt adversarial audit** — versioned corpus (`security/injection_corpus.py`)
   with declarative `must_not_call_tools` predicates; runs against the real
   rendered system prompt and gates regressions via `security_baseline.json`.
@@ -74,7 +74,6 @@ Live demo: <https://interview-assistant-nu.vercel.app/>
 | LLM (interview + question generation + feedback) | Groq `llama-3.3-70b-versatile` |
 | TTS | ElevenLabs `eleven_turbo_v2_5` (per-persona voice IDs) |
 | RAG | LlamaIndex with FastEmbed BGE-small embeddings |
-| Prompt-injection classifier | HuggingFace `protectai/deberta-v3-base-prompt-injection-v2` via `optimum.onnxruntime` (or opt-in Llama Prompt Guard 2 22M) |
 | Observability | OpenTelemetry traces (Next.js + Python agent) |
 | Forms / validation | React Hook Form + Zod |
 
@@ -91,7 +90,7 @@ Live demo: <https://interview-assistant-nu.vercel.app/>
 4. **Worker dispatch** — LiveKit Cloud dispatches the Python worker to the
    room. The worker reads the session doc from Firestore, builds three Agent
    subclasses (one per persona), and starts with the behavioral persona.
-5. **Per turn** — Deepgram → input classifier (blocks injections) → Groq with
+5. **Per turn** — Deepgram → Groq with
    per-persona prompt + agenda + tool schema → ElevenLabs streaming TTS →
    browser. The completed turn is written to `sessions/{id}/turns` with
    persona, latency-budget hits, and any prompt-leak warnings tagged on.
@@ -177,8 +176,8 @@ the actual interview pipeline (STT/LLM/TTS) lives in the agent.
 # Next.js unit tests (Vitest)
 npm test
 
-# Python agent tests (142 tests covering personas, hand-off, classifier,
-# guards, latency budget, cost aggregator)
+# Python agent tests (127 tests covering personas, hand-off, guards,
+# latency budget, cost aggregator)
 cd livekit-agent && uv run pytest -v
 
 # Question-generation eval harness — gates CI on per-fixture metric drift
@@ -211,7 +210,6 @@ interview-assistant/
 │   ├── src/interview_agent/
 │   │   ├── agent.py                  3 Agent subclasses + entrypoint
 │   │   ├── persona.py                Sarah / Adam / Bella personas + voices + rules
-│   │   ├── input_classifier.py       DeBERTa prompt-injection scanner
 │   │   ├── security_guards.py        TransferGuard + leak detector
 │   │   ├── security/                 50-case audit corpus + runner + baseline
 │   │   ├── rag.py                    LlamaIndex CV/JD retriever

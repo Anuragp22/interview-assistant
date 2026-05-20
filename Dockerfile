@@ -14,10 +14,7 @@ WORKDIR /app
 COPY . .
 
 WORKDIR /app/livekit-agent
-RUN uv pip install --system --no-cache \
-    --extra-index-url https://download.pytorch.org/whl/cpu \
-    --index-strategy unsafe-best-match \
-    'torch==2.10.0+cpu' '.[dev]'
+RUN uv pip install --system --no-cache '.[dev]'
 
 WORKDIR /app
 
