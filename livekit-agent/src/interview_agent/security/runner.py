@@ -154,7 +154,7 @@ def _make_client() -> OpenAI:
             "GROQ_API_KEY not set. Source .env.local or export it before "
             "running the security audit."
         )
-    return OpenAI(api_key=api_key, base_url=GROQ_BASE_URL)
+    return OpenAI(api_key=api_key, base_url=GROQ_BASE_URL, max_retries=10)
 
 
 def evaluate(
