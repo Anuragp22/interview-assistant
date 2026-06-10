@@ -40,7 +40,12 @@ jobs:
         with:
           node-version: "20"
           cache: npm
-      - run: npm ci
+      # `npm install` (not `npm ci`): the committed package-lock.json is
+      # missing some platform-specific optional deps (Tailwind 4's native
+      # @tailwindcss/oxide / @emnapi bindings for linux), so `npm ci`'s
+      # strict lock check fails on the CI runner. Follow-up: regenerate the
+      # lockfile on linux and switch back to `npm ci`.
+      - run: npm install --no-audit --no-fund
       - name: Typecheck
         run: npx tsc --noEmit
       - name: Lint
@@ -74,7 +79,12 @@ jobs:
         with:
           node-version: "20"
           cache: npm
-      - run: npm ci
+      # `npm install` (not `npm ci`): the committed package-lock.json is
+      # missing some platform-specific optional deps (Tailwind 4's native
+      # @tailwindcss/oxide / @emnapi bindings for linux), so `npm ci`'s
+      # strict lock check fails on the CI runner. Follow-up: regenerate the
+      # lockfile on linux and switch back to `npm ci`.
+      - run: npm install --no-audit --no-fund
       - name: Eval (fails on >10pp drop vs eval/baselines.json)
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
