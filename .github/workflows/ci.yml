@@ -5,9 +5,10 @@
 #   - "eval harness gating CI on drift"-> eval-gate (10pp regression vs eval/baselines.json)
 #   - "gated by a 50-prompt audit"     -> security-audit (50 cases x 3 personas vs baseline)
 #
-# The LLM-backed gates need Groq keys as repo secrets: GROQ_API_KEY1/2/3
-# (3-account failover) and/or legacy GROQ_API_KEY (Settings -> Secrets and
-# variables -> Actions). Without any of them the eval + audit jobs SKIP cleanly.
+# The LLM-backed gates need Groq keys as repo secrets (Settings -> Secrets and
+# variables -> Actions): up to three separate Groq accounts for failover, plus
+# an optional legacy single key. The exact secret names are in the env blocks
+# on each gate job below. Without any of them the eval + audit jobs SKIP cleanly.
 # Both baselines are committed (eval/baselines.json, security_baseline.json).
 #
 # The two LLM gates are NONDETERMINISTIC, so they run ONLY on the weekly
@@ -91,7 +92,7 @@ jobs:
           GROQ_API_KEY3: ${{ secrets.GROQ_API_KEY3 }}
           GROQ_MODEL: ${{ secrets.GROQ_MODEL }}
         run: |
-          if [ -z "$GROQ_API_KEY$GROQ_API_KEY1$GROQ_API_KEY2$GROQ_API_KEY3" ]; then
+          if [ -z "$GROQ_API_KEY" ] && [ -z "$GROQ_API_KEY1" ] && [ -z "$GROQ_API_KEY2" ] && [ -z "$GROQ_API_KEY3" ]; then
             echo "::warning::GROQ_API_KEY not set - skipping question-gen drift gate."
             exit 0
           fi
@@ -121,7 +122,7 @@ jobs:
           GROQ_API_KEY3: ${{ secrets.GROQ_API_KEY3 }}
           GROQ_MODEL: ${{ secrets.GROQ_MODEL }}
         run: |
-          if [ -z "$GROQ_API_KEY$GROQ_API_KEY1$GROQ_API_KEY2$GROQ_API_KEY3" ]; then
+          if [ -z "$GROQ_API_KEY" ] && [ -z "$GROQ_API_KEY1" ] && [ -z "$GROQ_API_KEY2" ] && [ -z "$GROQ_API_KEY3" ]; then
             echo "::warning::GROQ_API_KEY not set - skipping prompt-injection audit gate."
             exit 0
           fi
