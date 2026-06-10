@@ -53,7 +53,7 @@ export default function RoomClient({
   const [connectionState, setConnectionState] =
     useState<ConnectionState>("idle");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [turns, setTurns] = useState<Turn[]>([]);
+  const [, setTurns] = useState<Turn[]>([]);
   const [agentSpeaking, setAgentSpeaking] = useState(false);
   const [elapsedMs, setElapsedMs] = useState(0);
   const [micEnabled, setMicEnabled] = useState(true);

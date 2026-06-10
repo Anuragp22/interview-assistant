@@ -1,14 +1,12 @@
 "use server";
 
 import { generateObject } from "ai";
-import { groq } from "@ai-sdk/groq";
 
 import {
   partitionedTemplateSchema,
   templateGenerationSchema,
 } from "@/constants";
-
-const GROQ_MODEL = process.env.GROQ_MODEL ?? "llama-3.3-70b-versatile";
+import { withGroqModel } from "@/lib/groq";
 
 /**
  * Phase 1 generation: from role + level + JD only, produce N questions
@@ -19,6 +17,9 @@ const GROQ_MODEL = process.env.GROQ_MODEL ?? "llama-3.3-70b-versatile";
  * @ai-sdk/groq guidance — Llama 3.3 doesn't support json_schema strict
  * mode. The literal word "JSON" is required in the prompt, and the
  * shape is described inline so the model has something to constrain to.
+ *
+ * The Groq call is wrapped in withGroqModel for multi-account failover
+ * (GROQ_API_KEY1/2/3) on a daily-quota 429.
  */
 export async function generateQuestionsAndRubrics(input: {
   role: string;
@@ -28,18 +29,19 @@ export async function generateQuestionsAndRubrics(input: {
 }): Promise<{ questions: string[]; rubrics: RubricBase[] }> {
   const count = input.count ?? 8;
 
-  const { object } = await generateObject({
-    model: groq(GROQ_MODEL),
-    providerOptions: { groq: { structuredOutputs: false } },
-    schema: templateGenerationSchema,
-    experimental_telemetry: {
-      isEnabled: true,
-      functionId: "groq.generate-questions-and-rubrics",
-      metadata: { role: input.role, level: input.level, count },
-    },
-    system:
-      "You are a senior technical interviewer designing a structured interview rubric. Output a single JSON object exactly matching the schema described in the user message.",
-    prompt: `
+  const { object } = await withGroqModel((model) =>
+    generateObject({
+      model,
+      providerOptions: { groq: { structuredOutputs: false } },
+      schema: templateGenerationSchema,
+      experimental_telemetry: {
+        isEnabled: true,
+        functionId: "groq.generate-questions-and-rubrics",
+        metadata: { role: input.role, level: input.level, count },
+      },
+      system:
+        "You are a senior technical interviewer designing a structured interview rubric. Output a single JSON object exactly matching the schema described in the user message.",
+      prompt: `
 You are designing the question bank + scoring rubric for an interview at the role/level/JD below.
 
 Generate ${count} questions appropriate for ${input.level} ${input.role}, grounded in the job description. Each question gets a per-question rubric.
@@ -68,7 +70,8 @@ Rules:
 - Specifics should be concrete (e.g. "mentions retain cycles" not "mentions memory issues").
 - Output JSON only — no preamble, no code fences, no trailing prose.
     `,
-  });
+    }),
+  );
 
   return {
     questions: object.questions,
@@ -91,18 +94,19 @@ export async function generatePartitionedQuestions(input: {
   technical: { questions: string[]; rubrics: RubricBase[] };
   systemDesign: { questions: string[]; rubrics: RubricBase[] };
 }> {
-  const { object } = await generateObject({
-    model: groq(GROQ_MODEL),
-    providerOptions: { groq: { structuredOutputs: false } },
-    schema: partitionedTemplateSchema,
-    experimental_telemetry: {
-      isEnabled: true,
-      functionId: "groq.generate-partitioned-questions",
-      metadata: { role: input.role, level: input.level },
-    },
-    system:
-      "You are an expert technical interviewer designing a 3-round panel.",
-    prompt: `
+  const { object } = await withGroqModel((model) =>
+    generateObject({
+      model,
+      providerOptions: { groq: { structuredOutputs: false } },
+      schema: partitionedTemplateSchema,
+      experimental_telemetry: {
+        isEnabled: true,
+        functionId: "groq.generate-partitioned-questions",
+        metadata: { role: input.role, level: input.level },
+      },
+      system:
+        "You are an expert technical interviewer designing a 3-round panel.",
+      prompt: `
 Design an interview panel for a ${input.role} (${input.level}) role. The
 panel has THREE rounds, each conducted by a different interviewer:
 
@@ -141,7 +145,8 @@ Critical rules:
 - System Design questions are open-ended (no single right answer).
 - Output JSON only - no preamble, no code fences.
     `,
-  });
+    }),
+  );
 
   return {
     behavioral: object.behavioral as {

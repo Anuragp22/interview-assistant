@@ -1,0 +1,139 @@
+# CI for JobVoice / Interview Assistant.
+#
+# This file makes the resume claims literally true:
+#   - "tests run in CI"                -> web-checks + agent-checks (always run, no keys)
+#   - "eval harness gating CI on drift"-> eval-gate (10pp regression vs eval/baselines.json)
+#   - "gated by a 50-prompt audit"     -> security-audit (50 cases x 3 personas vs baseline)
+#
+# TWO manual prerequisites to make the LLM-backed gates actually run:
+#   1. Add a repository secret GROQ_API_KEY (Settings -> Secrets and variables ->
+#      Actions). Optional: GROQ_MODEL. Without it, the eval + audit jobs SKIP
+#      cleanly (so forks / contributors without the key don't get red builds).
+#   2. The eval baseline is already committed (eval/baselines.json). The security
+#      audit baseline is NOT committed yet; until it is, the audit runs but cannot
+#      gate (run_audit returns 0 when there's no baseline to compare against).
+#      Generate + commit it once:
+#         cd livekit-agent
+#         uv run python -m interview_agent.security.run_audit --baseline
+#         git add livekit-agent/src/interview_agent/security/security_baseline.json
+#
+# Cost note: with the secret set, each run makes real Groq calls
+# (~10-fixture eval + 150-case audit, roughly $0.15). If you'd rather not pay
+# per push, move eval-gate / security-audit to `on: schedule` or
+# `on: workflow_dispatch` only — see the commented block at the bottom.
+
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  web-checks:
+    name: Web - typecheck, lint, unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+      # `npm install` (not `npm ci`): the committed package-lock.json is
+      # missing some platform-specific optional deps (Tailwind 4's native
+      # @tailwindcss/oxide / @emnapi bindings for linux), so `npm ci`'s
+      # strict lock check fails on the CI runner. Follow-up: regenerate the
+      # lockfile on linux and switch back to `npm ci`.
+      - run: npm install --no-audit --no-fund
+      - name: Typecheck
+        run: npx tsc --noEmit
+      - name: Lint
+        run: npm run lint
+      - name: Unit tests (Vitest)
+        run: npm test
+
+  agent-checks:
+    name: Agent - pytest
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: livekit-agent
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --extra dev
+      - name: Unit tests (pytest)
+        run: uv run pytest -q
+
+  eval-gate:
+    name: Question-gen drift gate
+    runs-on: ubuntu-latest
+    needs: web-checks
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+      # `npm install` (not `npm ci`): the committed package-lock.json is
+      # missing some platform-specific optional deps (Tailwind 4's native
+      # @tailwindcss/oxide / @emnapi bindings for linux), so `npm ci`'s
+      # strict lock check fails on the CI runner. Follow-up: regenerate the
+      # lockfile on linux and switch back to `npm ci`.
+      - run: npm install --no-audit --no-fund
+      - name: Eval (fails on >10pp drop vs eval/baselines.json)
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GROQ_API_KEY1: ${{ secrets.GROQ_API_KEY1 }}
+          GROQ_API_KEY2: ${{ secrets.GROQ_API_KEY2 }}
+          GROQ_API_KEY3: ${{ secrets.GROQ_API_KEY3 }}
+          GROQ_MODEL: ${{ secrets.GROQ_MODEL }}
+        run: |
+          if [ -z "$GROQ_API_KEY$GROQ_API_KEY1$GROQ_API_KEY2$GROQ_API_KEY3" ]; then
+            echo "::warning::GROQ_API_KEY not set - skipping question-gen drift gate."
+            exit 0
+          fi
+          npm run eval
+
+  security-audit:
+    name: Prompt-injection audit gate
+    runs-on: ubuntu-latest
+    needs: agent-checks
+    defaults:
+      run:
+        working-directory: livekit-agent
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --extra dev
+      - name: Injection audit (fails on regression vs committed baseline)
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GROQ_API_KEY1: ${{ secrets.GROQ_API_KEY1 }}
+          GROQ_API_KEY2: ${{ secrets.GROQ_API_KEY2 }}
+          GROQ_API_KEY3: ${{ secrets.GROQ_API_KEY3 }}
+          GROQ_MODEL: ${{ secrets.GROQ_MODEL }}
+        run: |
+          if [ -z "$GROQ_API_KEY$GROQ_API_KEY1$GROQ_API_KEY2$GROQ_API_KEY3" ]; then
+            echo "::warning::GROQ_API_KEY not set - skipping prompt-injection audit gate."
+            exit 0
+          fi
+          uv run python -m interview_agent.security.run_audit
+
+# ---------------------------------------------------------------------------
+# Cost-control alternative: to avoid paid LLM calls on every push, delete the
+# `eval-gate` and `security-audit` jobs above and instead run them on a
+# schedule + manual trigger by adding this to the `on:` block:
+#
+#   schedule:
+#     - cron: "0 6 * * 1"   # weekly, Monday 06:00 UTC
+#
+# and changing those two jobs to `if: github.event_name != 'pull_request'`.
+# ---------------------------------------------------------------------------

@@ -1,11 +1,9 @@
 "use server";
 
 import { generateObject } from "ai";
-import { groq } from "@ai-sdk/groq";
 
 import { reportSchema } from "@/constants";
-
-const GROQ_MODEL = process.env.GROQ_MODEL ?? "llama-3.3-70b-versatile";
+import { withGroqModel } from "@/lib/groq";
 
 export async function generateReportFromTranscript(input: {
   template: Pick<Template, "role" | "level" | "jobDescription">;
@@ -27,10 +25,11 @@ export async function generateReportFromTranscript(input: {
     )
     .join("\n\n");
 
-  const { object } = await generateObject({
-    model: groq(GROQ_MODEL),
-    providerOptions: { groq: { structuredOutputs: false } },
-    schema: reportSchema,
+  const { object } = await withGroqModel((model) =>
+    generateObject({
+      model,
+      providerOptions: { groq: { structuredOutputs: false } },
+      schema: reportSchema,
     system:
       "You are a rigorous interview-evaluation engine. Output a single JSON object exactly matching the schema described in the user message.",
     prompt: `
@@ -73,7 +72,8 @@ Critical rules:
   the transcript covered it (true) or not (false).
 - Output JSON only — no preamble, no code fences.
     `,
-  });
+    }),
+  );
 
   return object as unknown as Omit<Report, "sessionId" | "generatedAt">;
 }

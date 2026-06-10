@@ -1,11 +1,9 @@
 "use server";
 
 import { generateObject } from "ai";
-import { groq } from "@ai-sdk/groq";
 
 import { groundingSchema, partitionedGroundingSchema } from "@/constants";
-
-const GROQ_MODEL = process.env.GROQ_MODEL ?? "llama-3.3-70b-versatile";
+import { withGroqModel } from "@/lib/groq";
 
 /**
  * Phase 2: re-ground Phase-1 questions + rubrics in the candidate's
@@ -15,7 +13,8 @@ const GROQ_MODEL = process.env.GROQ_MODEL ?? "llama-3.3-70b-versatile";
  * which CV detail the question targets.
  *
  * Called once per session at CV upload time. The agent reads the
- * grounded versions, never the base versions, at room dispatch.
+ * grounded versions, never the base versions, at room dispatch. The Groq
+ * call is wrapped in withGroqModel for multi-account failover.
  */
 export async function regroundQuestions(input: {
   questionsBase: string[];
@@ -26,18 +25,19 @@ export async function regroundQuestions(input: {
   questionsGrounded: string[];
   rubricsGrounded: RubricGrounded[];
 }> {
-  const { object } = await generateObject({
-    model: groq(GROQ_MODEL),
-    providerOptions: { groq: { structuredOutputs: false } },
-    schema: groundingSchema,
-    experimental_telemetry: {
-      isEnabled: true,
-      functionId: "groq.reground-questions",
-      metadata: { questionCount: input.questionsBase.length },
-    },
-    system:
-      "You personalise interview questions for a specific candidate. Output a single JSON object exactly matching the schema described in the user message.",
-    prompt: `
+  const { object } = await withGroqModel((model) =>
+    generateObject({
+      model,
+      providerOptions: { groq: { structuredOutputs: false } },
+      schema: groundingSchema,
+      experimental_telemetry: {
+        isEnabled: true,
+        functionId: "groq.reground-questions",
+        metadata: { questionCount: input.questionsBase.length },
+      },
+      system:
+        "You personalise interview questions for a specific candidate. Output a single JSON object exactly matching the schema described in the user message.",
+      prompt: `
 You are personalising an existing question bank for a specific candidate.
 
 Job description:
@@ -76,7 +76,8 @@ Rules:
 - "priority" must be the integer 1, 2, or 3.
 - Output JSON only — no preamble, no code fences.
     `,
-  });
+    }),
+  );
 
   return {
     questionsGrounded: object.questionsGrounded,
@@ -143,21 +144,22 @@ export async function regroundPartitionedQuestions(input: {
       input.rubricsByPersona.systemDesign,
     );
 
-  const { object } = await generateObject({
-    model: groq(GROQ_MODEL),
-    providerOptions: { groq: { structuredOutputs: false } },
-    schema: partitionedGroundingSchema,
-    experimental_telemetry: {
-      isEnabled: true,
-      functionId: "groq.reground-partitioned-questions",
-      metadata: {
-        cvLength: input.cvText.length,
-        jdLength: input.jobDescription.length,
+  const { object } = await withGroqModel((model) =>
+    generateObject({
+      model,
+      providerOptions: { groq: { structuredOutputs: false } },
+      schema: partitionedGroundingSchema,
+      experimental_telemetry: {
+        isEnabled: true,
+        functionId: "groq.reground-partitioned-questions",
+        metadata: {
+          cvLength: input.cvText.length,
+          jdLength: input.jobDescription.length,
+        },
       },
-    },
-    system:
-      "You re-ground base interview questions in the candidate's CV. Output a single JSON object matching the schema.",
-    prompt: `
+      system:
+        "You re-ground base interview questions in the candidate's CV. Output a single JSON object matching the schema.",
+      prompt: `
 Re-ground the base questions below in the candidate's CV. For each
 question, rewrite it to reference specific projects, companies, or
 technologies from the CV when relevant. For each rubric, add a
@@ -199,7 +201,8 @@ Critical rules:
 - "priority" must be the integer 1, 2, or 3.
 - Output JSON only.
     `,
-  });
+    }),
+  );
 
   return {
     behavioral: object.behavioral as {

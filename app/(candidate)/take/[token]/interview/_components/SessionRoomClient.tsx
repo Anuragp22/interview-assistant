@@ -44,7 +44,7 @@ export default function SessionRoomClient({
 
   const [connectionState, setConnectionState] = useState<ConnectionState>("idle");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [agentSpeaking, setAgentSpeaking] = useState(false);
+  const [agentSpeaking] = useState(false);
   const [micEnabled, setMicEnabled] = useState(true);
 
   useEffect(() => {

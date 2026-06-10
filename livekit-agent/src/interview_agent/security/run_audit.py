@@ -43,6 +43,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from interview_agent.security.injection_corpus import CASES, cases_by_category
+from interview_agent.groq_keys import groq_api_keys
 from interview_agent.security.runner import (
     DEFAULT_MODEL,
     CaseResult,
@@ -250,8 +251,14 @@ def main() -> int:
     _load_env()
     args = parse_args()
 
-    if not os.environ.get("GROQ_API_KEY"):
-        print(color("ERROR: GROQ_API_KEY not set in env.", RED), file=sys.stderr)
+    if not groq_api_keys():
+        print(
+            color(
+                "ERROR: no Groq API key set (GROQ_API_KEY1/2/3 or GROQ_API_KEY).",
+                RED,
+            ),
+            file=sys.stderr,
+        )
         return 2
 
     pairs = select_cases(args)

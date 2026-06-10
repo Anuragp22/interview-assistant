@@ -36,6 +36,11 @@ def _provider_env(monkeypatch):
     monkeypatch.setenv("DEEPGRAM_API_KEY", "test-deepgram-key")
     monkeypatch.setenv("GROQ_API_KEY", "test-groq-key")
     monkeypatch.setenv("ELEVEN_API_KEY", "test-eleven-key")
+    # Multi-account keys may be present from .env.local (loaded by
+    # agent._load_env at import). Clear them so these construction tests
+    # are deterministic on the single GROQ_API_KEY set above.
+    for _name in ("GROQ_API_KEY1", "GROQ_API_KEY2", "GROQ_API_KEY3"):
+        monkeypatch.delenv(_name, raising=False)
 
 
 def test_build_session_returns_agent_session():

@@ -1,20 +1,17 @@
 import { generateText } from "ai";
-import { groq } from "@ai-sdk/groq";
 
 import { db } from "@/firebase/admin";
 import { getRandomInterviewCover } from "@/lib/utils";
-
-// Same Groq model the agent uses (see livekit-agent/.../pipeline.py).
-// Override per-deploy via GROQ_MODEL env if needed.
-const QUESTION_MODEL = process.env.GROQ_MODEL ?? "llama-3.3-70b-versatile";
+import { withGroqModel } from "@/lib/groq";
 
 export async function POST(request: Request) {
   const { type, role, level, techstack, amount, userid } = await request.json();
 
   try {
-    const { text: questions } = await generateText({
-      model: groq(QUESTION_MODEL),
-      prompt: `Prepare questions for a job interview.
+    const { text: questions } = await withGroqModel((model) =>
+      generateText({
+        model,
+        prompt: `Prepare questions for a job interview.
         The job role is ${role}.
         The job experience level is ${level}.
         The tech stack used in the job is: ${techstack}.
@@ -27,7 +24,8 @@ export async function POST(request: Request) {
 
         Thank you! <3
     `,
-    });
+      }),
+    );
 
     const interview = {
       role,

@@ -23,6 +23,8 @@ import os
 from livekit.agents.voice import AgentSession
 from livekit.plugins import deepgram, openai, silero
 
+from interview_agent.groq_keys import groq_api_keys
+
 
 # Groq exposes an OpenAI-compatible Chat Completions endpoint, so the existing
 # `livekit-plugins-openai` plugin works with no extra dependency — we just
@@ -35,18 +37,24 @@ DEFAULT_GROQ_MODEL = "llama-3.3-70b-versatile"
 def _build_groq_llm() -> openai.LLM:
     """Construct a Groq-backed LLM via the OpenAI-compatible client.
 
-    Reads GROQ_API_KEY at construction time. Raising here (rather than at
-    first chat call) means a misconfigured worker fails fast on dispatch,
-    not in the middle of a live call.
+    Reads the Groq key(s) at construction time. Raising here (rather than
+    at first chat call) means a misconfigured worker fails fast on
+    dispatch, not in the middle of a live call.
+
+    The live voice pipeline builds one LLM per session and uses the first
+    available account (GROQ_API_KEY1/2/3, else legacy GROQ_API_KEY). A
+    single interview's token use is well under one account's daily budget,
+    so per-call rotation isn't needed here -- the multi-account failover
+    lives in the audit runner, which fires 150 rapid calls.
     """
-    api_key = os.environ.get("GROQ_API_KEY")
-    if not api_key:
+    keys = groq_api_keys()
+    if not keys:
         raise RuntimeError(
             "GROQ_API_KEY env var is not set. Get a key at https://console.groq.com/keys "
-            "and add it to livekit-agent/.env."
+            "and add it to livekit-agent/.env (GROQ_API_KEY1/2/3 or GROQ_API_KEY)."
         )
     return openai.LLM(
-        api_key=api_key,
+        api_key=keys[0],
         base_url=GROQ_BASE_URL,
         model=os.environ.get("GROQ_MODEL", DEFAULT_GROQ_MODEL),
     )
