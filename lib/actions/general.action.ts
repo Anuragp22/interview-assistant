@@ -1,14 +1,10 @@
 'use server';
 
 import { generateObject } from 'ai';
-import { groq } from '@ai-sdk/groq';
 
 import { db } from '@/firebase/admin';
 import { feedbackSchema } from '@/constants';
-
-// Same Groq model the agent uses (see livekit-agent/.../pipeline.py).
-// Override per-deploy via GROQ_MODEL env if needed.
-const FEEDBACK_MODEL = process.env.GROQ_MODEL ?? 'llama-3.3-70b-versatile';
+import { withGroqModel } from '@/lib/groq';
 
 export async function createFeedback(params: CreateFeedbackParams) {
   const { interviewId, userId, feedbackId } = params;
@@ -36,8 +32,9 @@ export async function createFeedback(params: CreateFeedbackParams) {
       })
       .join('');
 
-    const { object } = await generateObject({
-      model: groq(FEEDBACK_MODEL),
+    const { object } = await withGroqModel((model) =>
+      generateObject({
+        model,
       // Groq's llama-3.3-70b-versatile doesn't support OpenAI-style
       // `response_format: json_schema` (strict schema validation server-side).
       // structuredOutputs:false flips @ai-sdk/groq to `json_object` mode
@@ -86,7 +83,8 @@ Critical rules:
         `,
       system:
         'You are a professional interviewer analyzing a mock interview. Output a single JSON object exactly matching the schema described in the user message.',
-    });
+      }),
+    );
 
     const feedback = {
       interviewId,

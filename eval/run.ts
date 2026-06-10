@@ -23,11 +23,14 @@ import { writeFileSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 
 import { loadEnv } from "./env";
+import { hasGroqKey } from "@/lib/groq";
 
 loadEnv();
 
-if (!process.env.GROQ_API_KEY) {
-  console.error("ERROR: GROQ_API_KEY missing — set it in .env.local");
+if (!hasGroqKey()) {
+  console.error(
+    "ERROR: no Groq API key - set GROQ_API_KEY1/2/3 (or GROQ_API_KEY) in .env.local",
+  );
   process.exit(2);
 }
 

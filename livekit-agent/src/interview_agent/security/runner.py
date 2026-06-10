@@ -23,8 +23,9 @@ import os
 import re
 from dataclasses import dataclass
 
-from openai import OpenAI
+from openai import OpenAI, RateLimitError
 
+from interview_agent.groq_keys import groq_api_keys
 from interview_agent.persona import (
     BEHAVIORAL_PERSONA,
     Persona,
@@ -147,14 +148,45 @@ def _make_system_prompt(persona: Persona) -> str:
     )
 
 
-def _make_client() -> OpenAI:
-    api_key = os.environ.get("GROQ_API_KEY")
-    if not api_key:
+class RotatingGroqClient:
+    """One OpenAI-compatible client per Groq account, with failover.
+
+    Groq's free tier caps tokens-per-day PER ACCOUNT, so a single key
+    dies partway through the 150-case audit. On a 429 / daily-quota error
+    we rotate to the next account and retry the same request. In-account
+    backoff (max_retries) cannot fix a per-day quota, so it's kept low and
+    cross-account failover does the real work.
+    """
+
+    def __init__(self, keys: list[str], *, base_url: str) -> None:
+        self._clients = [
+            OpenAI(api_key=k, base_url=base_url, max_retries=2) for k in keys
+        ]
+
+    def create(self, **kwargs):
+        last_exc: RateLimitError | None = None
+        for i, client in enumerate(self._clients):
+            try:
+                return client.chat.completions.create(**kwargs)
+            except RateLimitError as exc:
+                last_exc = exc
+                logger.warning(
+                    "groq account %d/%d rate-limited; failing over",
+                    i + 1,
+                    len(self._clients),
+                )
+        assert last_exc is not None
+        raise last_exc
+
+
+def _make_client() -> RotatingGroqClient:
+    keys = groq_api_keys()
+    if not keys:
         raise RuntimeError(
             "GROQ_API_KEY not set. Source .env.local or export it before "
-            "running the security audit."
+            "running the security audit (GROQ_API_KEY1/2/3 or GROQ_API_KEY)."
         )
-    return OpenAI(api_key=api_key, base_url=GROQ_BASE_URL, max_retries=10)
+    return RotatingGroqClient(keys, base_url=GROQ_BASE_URL)
 
 
 def evaluate(
@@ -185,7 +217,11 @@ def evaluate(
 
 
 def run_case(
-    client: OpenAI, case: InjectionCase, persona: Persona, *, model: str = DEFAULT_MODEL
+    client: RotatingGroqClient,
+    case: InjectionCase,
+    persona: Persona,
+    *,
+    model: str = DEFAULT_MODEL,
 ) -> CaseResult:
     """Run one case against one persona and return the outcome.
 
@@ -194,7 +230,7 @@ def run_case(
     unknown, not "passed".
     """
     system_prompt = _make_system_prompt(persona)
-    response = client.chat.completions.create(
+    response = client.create(
         model=model,
         messages=[
             {"role": "system", "content": system_prompt},
