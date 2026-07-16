@@ -1,11 +1,16 @@
 import { describe, it, expect } from "vitest";
 
+import { judgeVerdictSchema } from "@/constants";
 import { segmentByRound, type JudgeTurn } from "@/lib/llm/judge-report";
 import {
   COMMUNICATION_CRITERION,
   ROUND_CRITERIA,
-  ROUND_IDS,
+  type RoundId,
 } from "@/lib/rubric";
+
+// Every round in the vocabulary, presets included — rubric integrity
+// holds for all of them, not just the legacy loop.
+const ALL_ROUND_IDS = Object.keys(ROUND_CRITERIA) as RoundId[];
 
 // ---------------------------------------------------------------------------
 // Round segmentation — the fix that makes the 3-persona panel reach the score.
@@ -98,7 +103,7 @@ describe("rubric", () => {
       "accent",
       "fluency",
     ];
-    const all = [...ROUND_IDS.flatMap((r) => ROUND_CRITERIA[r]), COMMUNICATION_CRITERION];
+    const all = [...ALL_ROUND_IDS.flatMap((r) => ROUND_CRITERIA[r]), COMMUNICATION_CRITERION];
     for (const c of all) {
       for (const word of banned) {
         expect(c.id.toLowerCase()).not.toContain(word);
@@ -108,7 +113,7 @@ describe("rubric", () => {
   });
 
   it("gives every criterion exactly six anchors, 0 through 5", () => {
-    const all = [...ROUND_IDS.flatMap((r) => ROUND_CRITERIA[r]), COMMUNICATION_CRITERION];
+    const all = [...ALL_ROUND_IDS.flatMap((r) => ROUND_CRITERIA[r]), COMMUNICATION_CRITERION];
     expect(all.length).toBeGreaterThan(0);
     for (const c of all) {
       expect(c.anchors).toHaveLength(6);
@@ -119,8 +124,44 @@ describe("rubric", () => {
   it("uses unique criterion ids across all rounds", () => {
     // Ids are the join key between the judge's output and the rubric. A
     // collision would silently overwrite one criterion's score with another's.
-    const all = [...ROUND_IDS.flatMap((r) => ROUND_CRITERIA[r]), COMMUNICATION_CRITERION];
+    const all = [...ALL_ROUND_IDS.flatMap((r) => ROUND_CRITERIA[r]), COMMUNICATION_CRITERION];
     const ids = all.map((c) => c.id);
     expect(new Set(ids).size).toBe(ids.length);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Verdict schema — "clear the bar", not a hiring call
+// ---------------------------------------------------------------------------
+
+describe("judgeVerdictSchema", () => {
+  it("accepts a bar verdict and rejects hiring vocabulary", () => {
+    const good = judgeVerdictSchema.safeParse({
+      strengths: ["s"],
+      areasForImprovement: ["a"],
+      finalAssessment: "f",
+      focusArea: { title: "t", why: "w", firstStep: "do X" },
+      barVerdict: "not-yet",
+      barReasoning: "r",
+    });
+    expect(good.success).toBe(true);
+
+    const bad = judgeVerdictSchema.safeParse({
+      strengths: ["s"],
+      areasForImprovement: ["a"],
+      finalAssessment: "f",
+      focusArea: { title: "t", why: "w", firstStep: "do X" },
+      barVerdict: "no-hire",
+      barReasoning: "r",
+    });
+    expect(bad.success).toBe(false);
+  });
+
+  it("orders focusArea before barVerdict (decode-order guard)", () => {
+    // Structured decoding fills fields in schema order — the model must
+    // commit to the fix before the verdict, same reasoning as
+    // criterionScoreSchema's evidence-before-score.
+    const keys = Object.keys(judgeVerdictSchema.shape);
+    expect(keys.indexOf("focusArea")).toBeLessThan(keys.indexOf("barVerdict"));
   });
 });

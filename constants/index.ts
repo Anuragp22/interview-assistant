@@ -207,7 +207,13 @@ export const criterionScoreSchema = z.object({
 });
 
 export const roundScoreSchema = z.object({
-  round: z.enum(["behavioral", "technical", "systemDesign"]),
+  round: z.enum([
+    "behavioral",
+    "technical",
+    "systemDesign",
+    "ownership",
+    "fundamentals",
+  ]),
   criteria: z.array(criterionScoreSchema).min(1).max(5),
 });
 
@@ -230,13 +236,20 @@ export const judgeVerdictSchema = z.object({
   strengths: z.array(z.string()).min(1).max(6),
   areasForImprovement: z.array(z.string()).min(1).max(6),
   finalAssessment: z.string(),
-  recommendation: z.enum([
-    "strong-hire",
-    "hire",
-    "lean-hire",
-    "lean-no-hire",
-    "no-hire",
-    "inconclusive",
-  ]),
-  recommendationReasoning: z.string(),
+  /**
+   * "Clear the bar", not a hiring call. `advance` = this panel would have
+   * moved the candidate forward at the stated level; `not-yet` = it would
+   * not, YET — the focusArea is the one thing to fix first.
+   *
+   * FIELD ORDER: focusArea comes BEFORE barVerdict so structured decoding
+   * makes the model commit to the fix before the verdict — the same
+   * reasoning as criterionScoreSchema's evidence-before-score.
+   */
+  focusArea: z.object({
+    title: z.string(),
+    why: z.string(),
+    firstStep: z.string(),
+  }),
+  barVerdict: z.enum(["advance", "not-yet"]),
+  barReasoning: z.string(),
 });
