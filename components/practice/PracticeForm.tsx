@@ -1,7 +1,7 @@
 "use client";
 
-import { useState } from "react";
-import { useRouter } from "next/navigation";
+import { useRef, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useForm, Controller } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
@@ -10,9 +10,26 @@ import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import {
+  INTENSITY_LABELS,
+  type Intensity,
+  PRESET_IDS,
+  PRESETS,
+  type PresetId,
+} from "@/lib/presets";
 import { cn } from "@/lib/utils";
 
 const LEVELS = ["Junior", "Mid", "Senior", "Staff"] as const;
+
+const INTENSITIES = Object.keys(INTENSITY_LABELS) as Intensity[];
+
+function isPresetId(v: string | null): v is PresetId {
+  return v !== null && v in PRESETS;
+}
+
+function isIntensity(v: string | null): v is Intensity {
+  return v !== null && v in INTENSITY_LABELS;
+}
 
 const formSchema = z.object({
   role: z.string().min(2, "Role is required"),
@@ -31,10 +48,33 @@ export default function PracticeForm({
   savedCv: { filename: string; uploadedAt: string } | null;
 }) {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [useNewCv, setUseNewCv] = useState(!savedCv);
   const [file, setFile] = useState<File | null>(null);
+
+  // Rematch links from the dashboard pre-fill ?preset=…&intensity=…
+  const presetParam = searchParams.get("preset");
+  const intensityParam = searchParams.get("intensity");
+  const [presetId, setPresetId] = useState<PresetId>(
+    isPresetId(presetParam) ? presetParam : "big-tech-swe",
+  );
+  const [intensity, setIntensity] = useState<Intensity>(
+    isIntensity(intensityParam)
+      ? intensityParam
+      : PRESETS[isPresetId(presetParam) ? presetParam : "big-tech-swe"]
+          .defaultIntensity,
+  );
+  // Once the user touches the dial, preset switches stop resetting it.
+  const dialTouched = useRef(isIntensity(intensityParam));
+
+  function selectPreset(id: PresetId) {
+    setPresetId(id);
+    if (!dialTouched.current) {
+      setIntensity(PRESETS[id].defaultIntensity);
+    }
+  }
 
   const { control, handleSubmit, formState } = useForm<Values>({
     resolver: zodResolver(formSchema),
@@ -58,6 +98,8 @@ export default function PracticeForm({
       fd.append("role", v.role);
       fd.append("level", v.level);
       fd.append("jobDescription", v.jobDescription);
+      fd.append("presetId", presetId);
+      fd.append("intensity", intensity);
       if (useNewCv && file) {
         fd.append("file", file);
       }
@@ -91,6 +133,74 @@ export default function PracticeForm({
             Generation typically takes 5–15 seconds.
           </p>
         </div>
+
+        <Field label="Panel">
+          <div className="grid gap-2 sm:grid-cols-3">
+            {PRESET_IDS.map((id) => {
+              const p = PRESETS[id];
+              const active = id === presetId;
+              return (
+                <button
+                  key={id}
+                  type="button"
+                  onClick={() => selectPreset(id)}
+                  aria-pressed={active}
+                  disabled={submitting}
+                  className={cn(
+                    "rounded-lg border p-3 text-left transition-colors",
+                    active
+                      ? "border-accent bg-surface-2"
+                      : "border-border-default bg-surface-1 hover:bg-surface-2/60",
+                  )}
+                >
+                  <span className="block text-sm font-medium text-fg-strong">
+                    {p.title}
+                  </span>
+                  <span className="mt-1 block text-xs text-fg-muted">
+                    {p.description}
+                  </span>
+                  <span className="mt-2 block text-xs text-fg-subtle">
+                    {p.personas.map((x) => x.name).join(" · ")}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </Field>
+
+        <Field label="Intensity">
+          <div className="grid gap-2 sm:grid-cols-3">
+            {INTENSITIES.map((level) => {
+              const cfg = INTENSITY_LABELS[level];
+              const active = level === intensity;
+              return (
+                <button
+                  key={level}
+                  type="button"
+                  onClick={() => {
+                    setIntensity(level);
+                    dialTouched.current = true;
+                  }}
+                  aria-pressed={active}
+                  disabled={submitting}
+                  className={cn(
+                    "rounded-lg border p-3 text-left transition-colors",
+                    active
+                      ? "border-accent bg-surface-2"
+                      : "border-border-default bg-surface-1 hover:bg-surface-2/60",
+                  )}
+                >
+                  <span className="block text-sm font-medium text-fg-strong">
+                    {cfg.label}
+                  </span>
+                  <span className="mt-1 block text-xs text-fg-muted">
+                    {cfg.blurb}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </Field>
 
         <Field label="Role">
           <Controller

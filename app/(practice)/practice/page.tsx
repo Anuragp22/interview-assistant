@@ -4,18 +4,16 @@ import { Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   getPracticeHistory,
-  getPracticeScoreHistory,
   type PracticeHistoryRow,
 } from "@/lib/actions/practice.action";
+import ClearanceCard from "@/components/practice/ClearanceCard";
 import PracticeRow from "@/components/practice/PracticeRow";
-import ScoreSparkline from "@/components/practice/ScoreSparkline";
 import { formatUsd } from "@/lib/cost-rates";
 
 export const dynamic = "force-dynamic";
 
 export default async function PracticeDashboard() {
   const history = await getPracticeHistory();
-  const scorePoints = await getPracticeScoreHistory({ limit: 12 });
 
   return (
     <div className="flex flex-col gap-6 max-w-3xl mx-auto w-full">
@@ -36,11 +34,10 @@ export default async function PracticeDashboard() {
         </Button>
       </header>
 
-      {scorePoints.length >= 2 && (
-        <div className="card-border p-4">
-          <ScoreSparkline points={scorePoints.map((p) => p.totalScore)} />
-        </div>
-      )}
+      {/* The loop: bar-clearance per preset×intensity, not a score sparkline —
+          the judge is ±2 points noisy on identical transcripts, so "did you
+          clear the bar at this heat" is the honest progression metric. */}
+      <ClearanceCard rows={history} />
 
       <CumulativeCost history={history} />
 

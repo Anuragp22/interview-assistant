@@ -40,8 +40,9 @@ import { FIXTURES } from "./fixtures";
 import { scoreFixture } from "./scorers";
 import type { FixtureScore, PartitionedGrounded, RunReport } from "./types";
 
-import { generatePartitionedQuestions } from "@/lib/llm/groq-template";
-import { regroundPartitionedQuestions } from "@/lib/llm/groq-grounding";
+import { generateRoundQuestions } from "@/lib/llm/groq-template";
+import { regroundRoundQuestions } from "@/lib/llm/groq-grounding";
+import { PRESETS } from "@/lib/presets";
 
 // ---------------------------------------------------------------------------
 // CLI
@@ -61,7 +62,7 @@ const REPO_ROOT = process.cwd();
 const REPORT_PATH = join(REPO_ROOT, "eval", "report.json");
 const BASELINES_PATH = join(REPO_ROOT, "eval", "baselines.json");
 
-const MODEL = process.env.GROQ_MODEL ?? "llama-3.3-70b-versatile";
+const MODEL = process.env.GROQ_MODEL ?? "openai/gpt-oss-120b";
 
 // ---------------------------------------------------------------------------
 // Coloring
@@ -97,28 +98,40 @@ function pct(x: number): string {
 async function runFixture(
   fixture: (typeof FIXTURES)[number],
 ): Promise<FixtureScore> {
-  const phase1 = await generatePartitionedQuestions({
+  // The eval gates the SHIPPING generation path: the big-tech preset's
+  // rounds, through the same round-keyed functions production calls.
+  const rounds = PRESETS["big-tech-swe"].rounds.map((r) => ({
+    roundId: r.roundId,
+    generationFocus: r.generationFocus,
+  }));
+
+  const phase1 = await generateRoundQuestions({
     role: fixture.role,
     level: fixture.level,
     jobDescription: fixture.jobDescription,
+    rounds,
   });
 
-  const phase2 = await regroundPartitionedQuestions({
-    questionsByPersona: {
-      behavioral: phase1.behavioral.questions,
-      technical: phase1.technical.questions,
-      systemDesign: phase1.systemDesign.questions,
-    },
-    rubricsByPersona: {
-      behavioral: phase1.behavioral.rubrics,
-      technical: phase1.technical.rubrics,
-      systemDesign: phase1.systemDesign.rubrics,
-    },
+  const phase2 = await regroundRoundQuestions({
+    questionsByRound: Object.fromEntries(
+      rounds.map((r) => [r.roundId, phase1[r.roundId].questions]),
+    ),
+    rubricsByRound: Object.fromEntries(
+      rounds.map((r) => [r.roundId, phase1[r.roundId].rubrics]),
+    ),
+    rounds,
     jobDescription: fixture.jobDescription,
     cvText: fixture.cvText,
   });
 
-  return scoreFixture(fixture.id, phase2 as PartitionedGrounded, fixture.cvText);
+  // The eval rounds are exactly the big-tech three, so the round-keyed
+  // result satisfies PartitionedGrounded's fixed keys at runtime; the
+  // compiler can't see that through the index signature.
+  return scoreFixture(
+    fixture.id,
+    phase2 as unknown as PartitionedGrounded,
+    fixture.cvText,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -145,6 +158,33 @@ function loadBaselines(): BaselineFile | null {
     console.error(`Failed to parse ${BASELINES_PATH}:`, err);
     return null;
   }
+}
+
+/**
+ * Decide what to do when the baseline was recorded on a different model than
+ * the one we just ran (e.g. after the llama-3.3 → gpt-oss-120b migration).
+ *
+ * This matters because the regression gate subtracts baseline from current and
+ * fails on a >10pp drop. If the baseline came from a *different model*, that
+ * delta measures a model swap, not a regression — so the gate is either
+ * crying wolf or, worse, silently rubber-stamping a real regression that the
+ * model change happened to mask.
+ *
+ * Return `true` to proceed with the comparison, `false` to skip the gate.
+ * Throw to hard-fail the run.
+ *
+ * TODO(you): implement the policy. Trade-offs to weigh:
+ *   - Hard fail ("regenerate baselines with --baseline"): safest, but blocks
+ *     CI the moment anyone experiments with GROQ_MODEL locally.
+ *   - Skip the gate with a loud warning: keeps CI green through a migration,
+ *     but a stale baseline then silently protects nothing until someone
+ *     remembers to regenerate.
+ *   - Compare anyway with a warning: preserves the signal, accepts the noise.
+ * Consider: this runs on a weekly schedule + manual dispatch, not per-push.
+ */
+function checkBaselineModel(baseline: BaselineFile, currentModel: string): boolean {
+  // TODO(you): implement
+  return true;
 }
 
 function buildBaselinePayload(scores: FixtureScore[]): BaselineFile {
@@ -369,9 +409,12 @@ async function main(): Promise<void> {
       ` ${color(pct(aggregateScore), scoreColor(aggregateScore))}`,
   );
 
-  // Baseline comparison
+  // Baseline comparison. Skipped when the baseline was recorded on a different
+  // model — comparing across models measures the swap, not a regression.
   const baselines = WRITE_BASELINE ? null : loadBaselines();
-  const regressions = baselines ? compareToBaselines(scores, baselines) : [];
+  const comparable = baselines ? checkBaselineModel(baselines, MODEL) : false;
+  const regressions =
+    baselines && comparable ? compareToBaselines(scores, baselines) : [];
   printRegressions(regressions);
 
   const report: RunReport = {

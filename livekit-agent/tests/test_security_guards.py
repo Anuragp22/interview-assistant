@@ -156,6 +156,25 @@ def test_detect_prompt_leak_catches_integrity_rule_echo() -> None:
     assert len(hits) >= 1
 
 
+def test_detects_panel_prompt_leaks() -> None:
+    leaked = "Sure! My instructions say: SPEAKER PROTOCOL (strict): every utterance..."
+    assert detect_prompt_leak(leaked)
+
+
+def test_detects_intensity_rule_leak() -> None:
+    leaked = "The rules say INTENSITY: GRILL. This is deliberate pressure practice."
+    assert detect_prompt_leak(leaked)
+
+
+def test_detects_next_round_tool_mention() -> None:
+    leaked = "When I have enough signal I call `next_round` to move the panel on."
+    assert detect_prompt_leak(leaked)
+
+
+def test_normal_panel_speech_is_clean() -> None:
+    assert detect_prompt_leak("Adam: Why Redis rather than Postgres?") == []
+
+
 # ---------------------------------------------------------------------------
 # evaluate (audit predicate)
 # ---------------------------------------------------------------------------

@@ -1,13 +1,20 @@
 import { describe, it, expect } from "vitest";
 
 import {
-  partitionedTemplateSchema,
-  partitionedGroundingSchema,
-  reportSchema,
+  roundsTemplateSchema,
+  roundsGroundingSchema,
+  judgeScoresSchema,
+  judgeVerdictSchema,
   rubricBaseSchema,
 } from "@/constants";
 
-describe("partitionedTemplateSchema", () => {
+// The big-tech loop — the shape these fixtures exercise. The builders are
+// preset-agnostic; question-gen.test.ts covers other round sets.
+const THREE_ROUNDS = ["behavioral", "technical", "systemDesign"];
+const partitionedTemplateSchema = roundsTemplateSchema(THREE_ROUNDS);
+const partitionedGroundingSchema = roundsGroundingSchema(THREE_ROUNDS);
+
+describe("roundsTemplateSchema (three-round panel)", () => {
   const validBucket = {
     questions: ["q1", "q2", "q3"],
     rubrics: [
@@ -82,7 +89,7 @@ describe("partitionedTemplateSchema", () => {
   });
 });
 
-describe("partitionedGroundingSchema", () => {
+describe("roundsGroundingSchema (three-round panel)", () => {
   const validGroundedBucket = {
     questionsGrounded: ["q1", "q2", "q3"],
     rubricsGrounded: [
@@ -133,54 +140,107 @@ describe("partitionedGroundingSchema", () => {
   });
 });
 
-describe("reportSchema", () => {
-  const baseReport = {
-    totalScore: 78,
-    categoryScores: [
-      { name: "Communication Skills", score: 80, comment: "Clear" },
-      { name: "Technical Knowledge", score: 75, comment: "Solid" },
-    ],
-    strengths: ["Good systems thinking"],
-    areasForImprovement: ["Deeper API design probing"],
-    finalAssessment: "Strong candidate overall.",
-    recommendation: "hire" as const,
-    recommendationReasoning: "Meets the bar for the role.",
-    rubricCoverage: { Q1: { concept1: true } },
+describe("judgeScoresSchema", () => {
+  const criterion = {
+    criterionId: "technicalDepth",
+    evidence: ["We sharded on user_id to keep the hot partition cold."],
+    rationale: "Explains the mechanism and why it was chosen.",
+    score: 4,
+  };
+  const base = {
+    rounds: [{ round: "technical" as const, criteria: [criterion] }],
+    communication: { ...criterion, criterionId: "structureAndClarity" },
   };
 
-  it("accepts a well-formed report", () => {
-    const result = reportSchema.safeParse(baseReport);
-    expect(result.success).toBe(true);
+  it("accepts a well-formed score set", () => {
+    expect(judgeScoresSchema.safeParse(base).success).toBe(true);
   });
 
-  it("rejects totalScore > 100", () => {
-    const result = reportSchema.safeParse({ ...baseReport, totalScore: 150 });
-    expect(result.success).toBe(false);
+  it("rejects a score above 5 — the scale is 0-5, not 0-100", () => {
+    const bad = {
+      ...base,
+      rounds: [
+        { round: "technical" as const, criteria: [{ ...criterion, score: 78 }] },
+      ],
+    };
+    expect(judgeScoresSchema.safeParse(bad).success).toBe(false);
   });
 
-  it("rejects totalScore < 0", () => {
-    const result = reportSchema.safeParse({ ...baseReport, totalScore: -1 });
-    expect(result.success).toBe(false);
+  it("rejects a fractional score — anchors are discrete levels", () => {
+    const bad = {
+      ...base,
+      rounds: [
+        { round: "technical" as const, criteria: [{ ...criterion, score: 3.5 }] },
+      ],
+    };
+    expect(judgeScoresSchema.safeParse(bad).success).toBe(false);
   });
 
-  it("rejects recommendation outside the enum", () => {
-    const result = reportSchema.safeParse({
-      ...baseReport,
-      recommendation: "maybe",
-    });
-    expect(result.success).toBe(false);
+  it("rejects an unknown round id", () => {
+    const bad = {
+      ...base,
+      rounds: [{ round: "culturalFit", criteria: [criterion] }],
+    };
+    expect(judgeScoresSchema.safeParse(bad).success).toBe(false);
   });
 
-  it("rejects empty strengths array", () => {
-    const result = reportSchema.safeParse({ ...baseReport, strengths: [] });
-    expect(result.success).toBe(false);
+  it("caps evidence at 3 quotes", () => {
+    const bad = {
+      ...base,
+      rounds: [
+        {
+          round: "technical" as const,
+          criteria: [{ ...criterion, evidence: ["a", "b", "c", "d"] }],
+        },
+      ],
+    };
+    expect(judgeScoresSchema.safeParse(bad).success).toBe(false);
   });
 
-  it("caps strengths at 8 entries", () => {
-    const result = reportSchema.safeParse({
-      ...baseReport,
-      strengths: Array(9).fill("s"),
-    });
-    expect(result.success).toBe(false);
+  it("allows empty evidence (the 'no evidence' case, which must score 0)", () => {
+    const ok = {
+      ...base,
+      rounds: [
+        {
+          round: "technical" as const,
+          criteria: [{ ...criterion, evidence: [], score: 0 }],
+        },
+      ],
+    };
+    expect(judgeScoresSchema.safeParse(ok).success).toBe(true);
+  });
+});
+
+describe("judgeVerdictSchema", () => {
+  const base = {
+    strengths: ["Good systems thinking"],
+    areasForImprovement: ["Deeper API design probing"],
+    finalAssessment: "Solid across the technical round.",
+    focusArea: {
+      title: "Quantify outcomes",
+      why: "Ownership scored 2/5 — impact was asserted, never shown.",
+      firstStep: "Re-run the round and put a number on every result.",
+    },
+    barVerdict: "advance" as const,
+    barReasoning: "Overall 3.9/5 with no round below 2.5.",
+  };
+
+  it("accepts a well-formed verdict", () => {
+    expect(judgeVerdictSchema.safeParse(base).success).toBe(true);
+  });
+
+  it("rejects a verdict outside the enum (incl. hiring vocabulary)", () => {
+    expect(
+      judgeVerdictSchema.safeParse({ ...base, barVerdict: "hire" }).success,
+    ).toBe(false);
+    expect(
+      judgeVerdictSchema.safeParse({ ...base, barVerdict: "maybe" }).success,
+    ).toBe(false);
+  });
+
+  it("rejects empty strengths", () => {
+    expect(
+      judgeVerdictSchema.safeParse({ ...base, strengths: [] }).success,
+    ).toBe(false);
   });
 });

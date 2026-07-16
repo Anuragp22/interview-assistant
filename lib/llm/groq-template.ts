@@ -2,10 +2,7 @@
 
 import { generateObject } from "ai";
 
-import {
-  partitionedTemplateSchema,
-  templateGenerationSchema,
-} from "@/constants";
+import { roundsTemplateSchema, templateGenerationSchema } from "@/constants";
 import { withGroqModel } from "@/lib/groq";
 
 /**
@@ -13,10 +10,11 @@ import { withGroqModel } from "@/lib/groq";
  * and matching per-question rubrics. CV-grounding happens later at Phase 2
  * (groq-grounding.ts) when the candidate uploads their resume.
  *
- * Uses Groq json_object mode (structuredOutputs:false) per the
- * @ai-sdk/groq guidance — Llama 3.3 doesn't support json_schema strict
- * mode. The literal word "JSON" is required in the prompt, and the
- * shape is described inline so the model has something to constrain to.
+ * Uses strict json_schema decoding (structuredOutputs:true). gpt-oss-120b is
+ * one of only two Groq models that support it; the schema is enforced during
+ * decoding, so the model cannot emit a shape that fails the Zod parse. The
+ * inline shape descriptions the old json_object mode needed are no longer
+ * load-bearing — the grammar is.
  *
  * The Groq call is wrapped in withGroqModel for multi-account failover
  * (GROQ_API_KEY1/2/3) on a daily-quota 429.
@@ -32,7 +30,7 @@ export async function generateQuestionsAndRubrics(input: {
   const { object } = await withGroqModel((model) =>
     generateObject({
       model,
-      providerOptions: { groq: { structuredOutputs: false } },
+      providerOptions: { groq: { structuredOutputs: true } },
       schema: templateGenerationSchema,
       experimental_telemetry: {
         isEnabled: true,
@@ -81,54 +79,57 @@ Rules:
 
 
 /**
- * Phase 1 — partitioned for the 3-agent panel. Returns three buckets
- * (behavioral, technical, systemDesign), each with its own questions
- * and rubrics. Same Groq call, structured 3-bucket output.
+ * Phase 1 — per-round generation for a preset panel. Returns one bucket per
+ * round id, each with its own questions and base rubrics. One Groq call;
+ * the schema is BUILT from the preset's round ids (see roundsTemplateSchema
+ * in constants), so strict decoding enforces exactly this panel's shape.
  */
-export async function generatePartitionedQuestions(input: {
+export async function generateRoundQuestions(input: {
   role: string;
   level: "Junior" | "Mid" | "Senior" | "Staff";
   jobDescription: string;
+  rounds: Array<{ roundId: string; generationFocus: string }>;
 }): Promise<{
-  behavioral: { questions: string[]; rubrics: RubricBase[] };
-  technical: { questions: string[]; rubrics: RubricBase[] };
-  systemDesign: { questions: string[]; rubrics: RubricBase[] };
+  [roundId: string]: { questions: string[]; rubrics: RubricBase[] };
 }> {
+  const roundIds = input.rounds.map((r) => r.roundId);
+  const roundLines = input.rounds
+    .map((r, i) => `${i + 1}. ${r.roundId} — ${r.generationFocus}`)
+    .join("\n");
+
   const { object } = await withGroqModel((model) =>
     generateObject({
       model,
-      providerOptions: { groq: { structuredOutputs: false } },
-      schema: partitionedTemplateSchema,
+      providerOptions: { groq: { structuredOutputs: true } },
+      schema: roundsTemplateSchema(roundIds),
       experimental_telemetry: {
         isEnabled: true,
-        functionId: "groq.generate-partitioned-questions",
-        metadata: { role: input.role, level: input.level },
+        functionId: "groq.generate-round-questions",
+        metadata: {
+          role: input.role,
+          level: input.level,
+          rounds: roundIds.join(","),
+        },
       },
       system:
-        "You are an expert technical interviewer designing a 3-round panel.",
+        "You are an expert interviewer designing a multi-round panel.",
       prompt: `
 Design an interview panel for a ${input.role} (${input.level}) role. The
-panel has THREE rounds, each conducted by a different interviewer:
+panel has ${input.rounds.length} rounds, each conducted by a different
+interviewer:
 
-1. Behavioral - STAR-method probes (situations, tasks, actions, results).
-2. Technical - concrete implementation depth (data structures, time
-   complexity, language-level decisions).
-3. System Design - distributed-systems design, constraints, trade-offs,
-   bottlenecks.
+${roundLines}
 
-Generate 3 questions per round (9 total), each with a base rubric.
+Generate 3 questions per round, each with a base rubric.
 
 Role: ${input.role} (${input.level})
 Job description:
 ${input.jobDescription}
 
-Respond with ONE JSON object matching this exact shape:
+Respond with ONE JSON object whose keys are exactly:
+${roundIds.join(", ")}
 
-{
-  "behavioral":   { "questions": [...3 strings...], "rubrics": [...3 rubric objects...] },
-  "technical":    { "questions": [...3 strings...], "rubrics": [...3 rubric objects...] },
-  "systemDesign": { "questions": [...3 strings...], "rubrics": [...3 rubric objects...] }
-}
+Each key maps to: { "questions": [...3 strings...], "rubrics": [...3 rubric objects...] }
 
 Each rubric object has shape:
 {
@@ -140,26 +141,15 @@ Each rubric object has shape:
 
 Critical rules:
 - Each bucket has EXACTLY 3 questions and 3 rubrics, in matching order.
-- Behavioral questions reference past experience, NOT theoretical scenarios.
-- Technical questions probe specific tech/patterns; avoid "tell me about X" generics.
-- System Design questions are open-ended (no single right answer).
+- Questions must match their round's stated focus above.
+- Questions about past experience reference real experience, NOT theoretical scenarios.
+- Avoid "tell me about X" generics; probe specific tech, decisions, and outcomes.
 - Output JSON only - no preamble, no code fences.
     `,
     }),
   );
 
-  return {
-    behavioral: object.behavioral as {
-      questions: string[];
-      rubrics: RubricBase[];
-    },
-    technical: object.technical as {
-      questions: string[];
-      rubrics: RubricBase[];
-    },
-    systemDesign: object.systemDesign as {
-      questions: string[];
-      rubrics: RubricBase[];
-    },
+  return object as {
+    [roundId: string]: { questions: string[]; rubrics: RubricBase[] };
   };
 }

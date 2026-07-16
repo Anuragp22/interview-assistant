@@ -1,6 +1,10 @@
 import { createGroq } from "@ai-sdk/groq";
 
-const DEFAULT_GROQ_MODEL = "llama-3.3-70b-versatile";
+// Groq decommissions llama-3.3-70b-versatile on 2026-08-16.
+// gpt-oss-120b is faster (~500 vs ~280 tok/s) and is one of only two Groq
+// models that support strict json_schema decoding, which is what lets the
+// schemas below be enforced server-side instead of begged for in the prompt.
+const DEFAULT_GROQ_MODEL = "openai/gpt-oss-120b";
 
 /**
  * Collect Groq API keys for multi-account failover.

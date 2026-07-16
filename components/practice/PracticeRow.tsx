@@ -3,6 +3,7 @@ import { ArrowRight, Calendar, Clock } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { formatUsd } from "@/lib/cost-rates";
+import { INTENSITY_LABELS, PRESETS } from "@/lib/presets";
 import type { PracticeHistoryRow } from "@/lib/actions/practice.action";
 
 const STATUS_CONFIG: Record<
@@ -12,10 +13,12 @@ const STATUS_CONFIG: Record<
   "awaiting-cv": { label: "Awaiting CV", tone: "text-fg-muted" },
   "awaiting-call": { label: "Ready to start", tone: "text-accent" },
   "in-call": { label: "In progress", tone: "text-accent" },
+  "awaiting-report": { label: "Scoring…", tone: "text-accent" },
   completed: { label: "Completed", tone: "text-success-100" },
   abandoned: { label: "Abandoned", tone: "text-destructive-100" },
 };
 
+/** LEGACY: reports generated before the bar verdict. */
 const REC_LABEL: Record<
   NonNullable<PracticeHistoryRow["recommendation"]>,
   string
@@ -26,6 +29,14 @@ const REC_LABEL: Record<
   "lean-no-hire": "Lean no-hire",
   "no-hire": "No hire",
   inconclusive: "Inconclusive",
+};
+
+const BAR_LABEL: Record<
+  NonNullable<PracticeHistoryRow["barVerdict"]>,
+  { label: string; tone: string }
+> = {
+  advance: { label: "Advanced", tone: "text-success-100" },
+  "not-yet": { label: "Not yet", tone: "text-fg-muted" },
 };
 
 export default function PracticeRow({ row }: { row: PracticeHistoryRow }) {
@@ -49,6 +60,10 @@ export default function PracticeRow({ row }: { row: PracticeHistoryRow }) {
               {row.role}
             </span>
             <span className="text-xs text-fg-muted">{row.level}</span>
+            <span className="text-xs text-fg-subtle rounded-full border border-border-default px-2 py-0.5 whitespace-nowrap">
+              {PRESETS[row.presetId]?.title ?? row.presetId} ·{" "}
+              {INTENSITY_LABELS[row.intensity].label}
+            </span>
           </div>
           <div className="flex items-center gap-3 text-xs text-fg-subtle">
             <span className="inline-flex items-center gap-1">
@@ -75,13 +90,17 @@ export default function PracticeRow({ row }: { row: PracticeHistoryRow }) {
           </div>
         </div>
 
-        {row.totalScore !== null ? (
+        {row.overallScore !== null ? (
           <div className="flex flex-col items-end gap-0.5">
             <span className="text-base font-semibold tabular-nums text-fg-strong">
-              {row.totalScore}
-              <span className="text-xs text-fg-muted">/100</span>
+              {row.overallScore.toFixed(1)}
+              <span className="text-xs text-fg-muted">/5</span>
             </span>
-            {row.recommendation ? (
+            {row.barVerdict ? (
+              <span className={cn("text-xs", BAR_LABEL[row.barVerdict].tone)}>
+                {BAR_LABEL[row.barVerdict].label}
+              </span>
+            ) : row.recommendation ? (
               <span className="text-xs text-fg-muted">
                 {REC_LABEL[row.recommendation]}
               </span>

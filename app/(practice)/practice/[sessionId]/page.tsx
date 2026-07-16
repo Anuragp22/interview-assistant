@@ -28,12 +28,14 @@ export default async function PracticeSessionRouter({
   // Owner check — only the practising user can see this.
   if (session.candidateUid !== decoded.uid) notFound();
 
-  // Stale-session check: practice sessions created before the multi-agent
-  // rollout don't have questionsByPersona. The Python agent fails fast at
-  // dispatch on those; bounce the user to a fresh practice rather than let
-  // them watch the call die mid-handshake.
+  // Stale-session check: the agent can dispatch a session that has either a
+  // panel spec (preset era) or questionsByPersona (relay era, synthesized
+  // into the big-tech panel at load). Anything with neither predates both
+  // rollouts — bounce the user to a fresh practice rather than let them
+  // watch the call die mid-handshake.
   if (
     session.inviteToken === "practice" &&
+    !session.panel &&
     !session.questionsByPersona
   ) {
     redirect("/practice?stale=1");
@@ -42,7 +44,9 @@ export default async function PracticeSessionRouter({
   if (session.status === "awaiting-call" || session.status === "in-call") {
     redirect(`/practice/${sessionId}/interview`);
   }
-  if (session.status === "completed") {
+  // awaiting-report → the report page, which renders its own pending state.
+  // Without this, clicking a "Scoring…" row on the dashboard 404s.
+  if (session.status === "completed" || session.status === "awaiting-report") {
     redirect(`/practice/${sessionId}/report`);
   }
   // awaiting-cv (shouldn't happen for practice — CV grounded pre-creation)

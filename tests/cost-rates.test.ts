@@ -11,11 +11,19 @@ import {
   ttsUsd,
 } from "@/lib/cost-rates";
 
+/** The model the cost table prices by default — derived, never hardcoded. */
+const GROQ_DEFAULT = "openai/gpt-oss-120b" as const;
+const GROQ_RATE = RATES.groq[GROQ_DEFAULT];
+
 describe("groqUsd", () => {
   it("computes input + output token cost at published rates", () => {
-    // 1M input + 1M output should equal $0.59 + $0.79 = $1.38
+    // 1M input + 1M output bills exactly one unit of each published rate.
+    // Derived from RATES so a price change can't silently invalidate the test.
     const usd = groqUsd({ inputTokens: 1_000_000, outputTokens: 1_000_000 });
-    expect(usd).toBeCloseTo(1.38, 4);
+    expect(usd).toBeCloseTo(
+      GROQ_RATE.inputUsdPerMillion + GROQ_RATE.outputUsdPerMillion,
+      4,
+    );
   });
 
   it("scales linearly with token count", () => {
@@ -67,8 +75,11 @@ describe("rollUpCost", () => {
       sessionDurationSeconds: 600, // 10 minutes
     });
 
-    // Groq: 2000 * 0.59/1M + 1000 * 0.79/1M = 0.00118 + 0.00079 = 0.00197
-    expect(breakdown.groqUsd).toBeCloseTo(0.00197, 5);
+    // Groq: derived from the rate table so a price change can't invalidate it.
+    const expectedGroq =
+      (2_000 * GROQ_RATE.inputUsdPerMillion) / 1_000_000 +
+      (1_000 * GROQ_RATE.outputUsdPerMillion) / 1_000_000;
+    expect(breakdown.groqUsd).toBeCloseTo(expectedGroq, 6);
     // TTS: 3000 * 0.18/1000 = 0.54
     expect(breakdown.ttsUsd).toBeCloseTo(0.54, 4);
     // STT: 3 min * 0.0058 = 0.0174
@@ -77,7 +88,7 @@ describe("rollUpCost", () => {
     expect(breakdown.livekitUsd).toBeCloseTo(0.10, 4);
     // Total
     expect(breakdown.totalUsd).toBeCloseTo(
-      0.00197 + 0.54 + 0.0174 + 0.10,
+      expectedGroq + 0.54 + 0.0174 + 0.10,
       4,
     );
     expect(breakdown.ratesSourcedAt).toBe(RATES_SOURCED_AT);
@@ -123,8 +134,8 @@ describe("RATES registry shape", () => {
   });
 
   it("includes the model defaults the agent actually uses", () => {
-    expect(RATES.groq).toHaveProperty("llama-3.3-70b-versatile");
-    expect(RATES.elevenlabs).toHaveProperty("eleven_turbo_v2_5");
+    expect(RATES.groq).toHaveProperty("openai/gpt-oss-120b");
+    expect(RATES.elevenlabs).toHaveProperty("eleven_flash_v2_5");
     expect(RATES.deepgram).toHaveProperty("nova-3");
   });
 });

@@ -57,7 +57,14 @@ _VALID_QBP = {
 }
 
 
-def test_load_session_data_happy_path():
+_TEMPLATE = {
+    "role": "Senior Frontend",
+    "level": "Senior",
+    "jobDescription": "JD body",
+}
+
+
+def test_load_legacy_session_synthesizes_big_tech_panel():
     db = _make_db(
         session_data={
             "templateId": "tpl1",
@@ -65,12 +72,9 @@ def test_load_session_data_happy_path():
             "status": "awaiting-call",
             "cvExtractedText": "CV text",
             "questionsByPersona": _VALID_QBP,
+            "currentPersonaId": "technical",
         },
-        template_data={
-            "role": "Senior Frontend",
-            "level": "Senior",
-            "jobDescription": "JD body",
-        },
+        template_data=_TEMPLATE,
         user_data={"displayName": "Anurag"},
     )
     sd = load_session_data(db, "sess1")
@@ -78,11 +82,99 @@ def test_load_session_data_happy_path():
     assert sd.candidate_uid == "u1"
     assert sd.candidate_name == "Anurag"
     assert sd.role == "Senior Frontend"
-    assert sd.level == "Senior"
     assert sd.cv_extracted_text == "CV text"
-    assert sd.questions_by_persona.behavioral == ["Q-b1", "Q-b2"]
-    assert sd.questions_by_persona.technical == ["Q-t1", "Q-t2"]
-    assert sd.questions_by_persona.system_design == ["Q-sd1"]
+    assert sd.panel.preset_id == "big-tech-swe"
+    assert sd.panel.intensity == "calm"  # legacy sessions were relay UX
+    assert [r.round_id for r in sd.panel.rounds] == [
+        "behavioral", "technical", "systemDesign",
+    ]
+    assert sd.panel.personas[0].name == "Sarah"
+    assert sd.questions_by_round == {
+        "behavioral": ["Q-b1", "Q-b2"],
+        "technical": ["Q-t1", "Q-t2"],
+        "systemDesign": ["Q-sd1"],
+    }
+    # currentPersonaId=technical maps to round index 1.
+    assert sd.current_round == 1
+
+
+def _panel_session_doc() -> dict:
+    return {
+        "templateId": "tpl1",
+        "candidateUid": "u1",
+        "status": "awaiting-call",
+        "cvExtractedText": "cv text",
+        "panel": {
+            "presetId": "startup-generalist",
+            "intensity": "grill",
+            "personas": [
+                {
+                    "id": "founder", "name": "Maya",
+                    "expertiseArea": "startup founder",
+                    "voiceId": "EXAVITQu4vr4xnSDxMaL",
+                    "voiceSettings": {
+                        "stability": 0.4, "similarityBoost": 0.8,
+                        "speed": 0.9, "style": 0.5, "useSpeakerBoost": True,
+                    },
+                },
+                {
+                    "id": "senior-eng", "name": "Dev",
+                    "expertiseArea": "senior engineer",
+                    "voiceId": "pNInz6obpgDQGcFmaJgB",
+                    "voiceSettings": {
+                        "stability": 0.5, "similarityBoost": 0.85,
+                        "speed": 1.0, "style": 0.3, "useSpeakerBoost": True,
+                    },
+                },
+            ],
+            "rounds": [
+                {"roundId": "ownership", "leadPersonaId": "founder"},
+                {"roundId": "technical", "leadPersonaId": "senior-eng"},
+            ],
+        },
+        "questionsByRound": {
+            "ownership": ["Q-own-1"],
+            "technical": ["Q-tech-1"],
+        },
+        "currentRound": 1,
+    }
+
+
+def test_load_panel_session():
+    db = _make_db(
+        session_data=_panel_session_doc(),
+        template_data=_TEMPLATE,
+        user_data={"displayName": "Anurag"},
+    )
+    sd = load_session_data(db, "sess1")
+    assert sd.panel.preset_id == "startup-generalist"
+    assert sd.panel.intensity == "grill"
+    assert [r.round_id for r in sd.panel.rounds] == ["ownership", "technical"]
+    assert sd.panel.personas[0].name == "Maya"
+    assert sd.panel.personas[0].voice_id == "EXAVITQu4vr4xnSDxMaL"
+    assert sd.panel.personas[1].use_speaker_boost is True
+    assert sd.questions_by_round["ownership"] == ["Q-own-1"]
+    assert sd.current_round == 1
+
+
+def test_panel_doc_missing_round_questions_raises():
+    doc = _panel_session_doc()
+    del doc["questionsByRound"]["technical"]
+    db = _make_db(
+        session_data=doc, template_data=_TEMPLATE, user_data={"displayName": "x"},
+    )
+    with pytest.raises(RuntimeError, match="questionsByRound"):
+        load_session_data(db, "sess1")
+
+
+def test_panel_doc_out_of_range_current_round_clamps_to_zero():
+    doc = _panel_session_doc()
+    doc["currentRound"] = 7
+    db = _make_db(
+        session_data=doc, template_data=_TEMPLATE, user_data={"displayName": "x"},
+    )
+    sd = load_session_data(db, "sess1")
+    assert sd.current_round == 0
 
 
 def test_load_session_data_raises_when_missing_cv_text():

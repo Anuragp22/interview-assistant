@@ -2,7 +2,7 @@
 
 import { generateObject } from "ai";
 
-import { groundingSchema, partitionedGroundingSchema } from "@/constants";
+import { groundingSchema, roundsGroundingSchema } from "@/constants";
 import { withGroqModel } from "@/lib/groq";
 
 /**
@@ -28,7 +28,7 @@ export async function regroundQuestions(input: {
   const { object } = await withGroqModel((model) =>
     generateObject({
       model,
-      providerOptions: { groq: { structuredOutputs: false } },
+      providerOptions: { groq: { structuredOutputs: true } },
       schema: groundingSchema,
       experimental_telemetry: {
         isEnabled: true,
@@ -87,74 +87,55 @@ Rules:
 
 
 /**
- * Phase 2 - partitioned reground for the 3-agent panel. Takes the three
- * buckets of base questions/rubrics, regrounds each against the CV in a
- * single Groq call, and returns the same shape with grounded versions
- * plus optional cvReference on each rubric.
+ * Phase 2 - per-round reground for a preset panel. Takes each round's base
+ * questions/rubrics, regrounds them against the CV in a single Groq call,
+ * and returns the same round-keyed shape with grounded versions plus an
+ * optional cvReference on each rubric.
  */
-export async function regroundPartitionedQuestions(input: {
-  questionsByPersona: {
-    behavioral: string[];
-    technical: string[];
-    systemDesign: string[];
-  };
-  rubricsByPersona: {
-    behavioral: RubricBase[];
-    technical: RubricBase[];
-    systemDesign: RubricBase[];
-  };
+export async function regroundRoundQuestions(input: {
+  questionsByRound: { [roundId: string]: string[] };
+  rubricsByRound: { [roundId: string]: RubricBase[] };
+  rounds: Array<{ roundId: string; generationFocus: string }>;
   jobDescription: string;
   cvText: string;
 }): Promise<{
-  behavioral: { questionsGrounded: string[]; rubricsGrounded: RubricGrounded[] };
-  technical: { questionsGrounded: string[]; rubricsGrounded: RubricGrounded[] };
-  systemDesign: { questionsGrounded: string[]; rubricsGrounded: RubricGrounded[] };
+  [roundId: string]: {
+    questionsGrounded: string[];
+    rubricsGrounded: RubricGrounded[];
+  };
 }> {
-  const renderBucket = (
-    name: string,
-    qs: string[],
-    rs: RubricBase[],
-  ) =>
-    `## ${name}\n` +
-    qs
-      .map(
-        (q, i) =>
-          `Q${i + 1}: ${q}\n` +
-          `  expectedConcepts: ${rs[i].expectedConcepts.join(", ")}\n` +
-          `  expectedSpecifics: ${rs[i].expectedSpecifics.join(", ")}`,
-      )
-      .join("\n");
+  const roundIds = input.rounds.map((r) => r.roundId);
 
-  const block =
-    renderBucket(
-      "Behavioral",
-      input.questionsByPersona.behavioral,
-      input.rubricsByPersona.behavioral,
-    ) +
-    "\n\n" +
-    renderBucket(
-      "Technical",
-      input.questionsByPersona.technical,
-      input.rubricsByPersona.technical,
-    ) +
-    "\n\n" +
-    renderBucket(
-      "SystemDesign",
-      input.questionsByPersona.systemDesign,
-      input.rubricsByPersona.systemDesign,
+  const renderBucket = (roundId: string) => {
+    const qs = input.questionsByRound[roundId];
+    const rs = input.rubricsByRound[roundId];
+    return (
+      `## ${roundId}\n` +
+      qs
+        .map(
+          (q, i) =>
+            `Q${i + 1}: ${q}\n` +
+            `  expectedConcepts: ${rs[i].expectedConcepts.join(", ")}\n` +
+            `  expectedSpecifics: ${rs[i].expectedSpecifics.join(", ")}`,
+        )
+        .join("\n")
     );
+  };
+
+  const block = roundIds.map(renderBucket).join("\n\n");
 
   const { object } = await withGroqModel((model) =>
     generateObject({
       model,
-      providerOptions: { groq: { structuredOutputs: false } },
-      schema: partitionedGroundingSchema,
+      providerOptions: { groq: { structuredOutputs: true } },
+      schema: roundsGroundingSchema(roundIds),
       experimental_telemetry: {
         isEnabled: true,
-        functionId: "groq.reground-partitioned-questions",
+        functionId: "groq.reground-round-questions",
         metadata: {
           cvLength: input.cvText.length,
           jdLength: input.jobDescription.length,
+          rounds: roundIds.join(","),
         },
       },
       system:
@@ -175,13 +156,11 @@ ${input.cvText}
 Base questions (3 per round):
 ${block}
 
-Respond with ONE JSON object:
+Respond with ONE JSON object whose keys are exactly:
+${roundIds.join(", ")}
 
-{
-  "behavioral":   { "questionsGrounded": [...3 strings...], "rubricsGrounded": [...3 rubric+cvReference objects...] },
-  "technical":    { "questionsGrounded": [...], "rubricsGrounded": [...] },
-  "systemDesign": { "questionsGrounded": [...], "rubricsGrounded": [...] }
-}
+Each key maps to:
+{ "questionsGrounded": [...3 strings...], "rubricsGrounded": [...3 rubric+cvReference objects...] }
 
 Each grounded rubric extends the base rubric with cvReference:
 {
@@ -204,18 +183,10 @@ Critical rules:
     }),
   );
 
-  return {
-    behavioral: object.behavioral as {
+  return object as {
+    [roundId: string]: {
       questionsGrounded: string[];
       rubricsGrounded: RubricGrounded[];
-    },
-    technical: object.technical as {
-      questionsGrounded: string[];
-      rubricsGrounded: RubricGrounded[];
-    },
-    systemDesign: object.systemDesign as {
-      questionsGrounded: string[];
-      rubricsGrounded: RubricGrounded[];
-    },
+    };
   };
 }

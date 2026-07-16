@@ -139,8 +139,9 @@ interface Session {
   cvExtractedText?: string;
   questionsGrounded?: string[];
   rubricsGrounded?: RubricGrounded[];
-  // Multi-agent panel: questions/rubrics split per persona.
-  // When present, the Python agent reads these instead of the flat versions.
+  // LEGACY (pre-preset sessions): questions/rubrics split per persona.
+  // The Python agent synthesizes the big-tech panel from these when the
+  // `panel` field below is absent. New sessions write panel + *ByRound.
   questionsByPersona?: {
     behavioral: string[];
     technical: string[];
@@ -151,14 +152,61 @@ interface Session {
     technical: RubricGrounded[];
     systemDesign: RubricGrounded[];
   };
+  /**
+   * The panel this session runs: preset + intensity + roster + rounds.
+   * Written verbatim from lib/presets.ts at session-create time — the
+   * Python agent reads only this doc, never the preset library, so the
+   * TS side stays the single source of truth.
+   */
+  panel?: {
+    presetId: "big-tech-swe" | "startup-generalist" | "new-grad-swe";
+    intensity: "calm" | "standard" | "grill";
+    personas: Array<{
+      id: string;
+      name: string;
+      expertiseArea: string;
+      voiceId: string;
+      voiceSettings: {
+        stability: number;
+        similarityBoost: number;
+        speed: number;
+        style: number;
+        useSpeakerBoost: boolean;
+      };
+    }>;
+    rounds: Array<{ roundId: string; leadPersonaId: string }>;
+  };
+  /** Grounded questions keyed by the panel's round ids. */
+  questionsByRound?: { [roundId: string]: string[] };
+  rubricsByRound?: { [roundId: string]: RubricGrounded[] };
+  /**
+   * How the questions were grounded: against the CV, or JD-only because
+   * the CV was too thin to reground against without fabricating specificity.
+   */
+  grounding?: "cv" | "jd-only";
+  /** Round index the panel is on; written by the agent for resume. */
+  currentRound?: number;
+  /**
+   * Session lifecycle.
+   *
+   * "awaiting-report" is the durable hand-off point. The AGENT writes it when
+   * the call ends, because the agent is the only party that actually knows the
+   * interview is over — the browser might have crashed, slept, or lost network.
+   * Once it's written, the report is guaranteed to be generated eventually:
+   * either by the fast path (the agent pings the score endpoint) or by the cron
+   * reconciler sweeping sessions stuck in this state.
+   */
   status:
     | "awaiting-cv"
     | "awaiting-call"
     | "in-call"
+    | "awaiting-report"
     | "completed"
     | "abandoned";
   livekitRoomName: string;
   startedAt?: string;
+  /** Set by the agent when the call ends, alongside status: awaiting-report. */
+  endedAt?: string;
   completedAt?: string;
   createdAt: string;
   // W3C `traceparent` value (e.g. "00-{trace_id}-{span_id}-01"). Written
@@ -198,21 +246,58 @@ type Recommendation =
   | "no-hire"
   | "inconclusive";
 
+/** One criterion, scored 0-5 against behavioural anchors (see lib/rubric.ts). */
+interface ScoredCriterion {
+  criterionId: string;
+  label: string;
+  /** Verbatim transcript quotes the score is based on. Empty ⇒ score is 0. */
+  evidence: string[];
+  rationale: string;
+  score: number;
+}
+
+/** One round of the panel, scored against that round's own rubric. */
+interface ScoredRound {
+  /** Round id from the preset's round vocabulary (lib/rubric.ts RoundId). */
+  round: string;
+  label: string;
+  criteria: ScoredCriterion[];
+  /** Mean of this round's criteria, 0-5. */
+  roundScore: number;
+}
+
 interface Report {
   sessionId: string;
   generatedAt: string;
-  totalScore: number;
-  categoryScores: Array<{
-    name: string;
-    score: number;
-    comment: string;
-  }>;
+  rounds: ScoredRound[];
+  communication: ScoredCriterion;
+  /** 0-5, weighted across the rounds + communication. */
+  overallScore: number;
   strengths: string[];
   areasForImprovement: string[];
   finalAssessment: string;
-  recommendation: Recommendation;
-  recommendationReasoning: string;
-  rubricCoverage: Record<string, Record<string, boolean>>;
+  /**
+   * "Clear the bar": would this panel have advanced the candidate at the
+   * stated level? Not a hiring call — `not-yet` pairs with focusArea, the
+   * single highest-leverage thing to fix before the next session.
+   */
+  barVerdict?: "advance" | "not-yet";
+  barReasoning?: string;
+  focusArea?: { title: string; why: string; firstStep: string };
+  /** LEGACY: reports generated before the bar verdict. Kept so old reports render. */
+  recommendation?: Recommendation;
+  recommendationReasoning?: string;
+  /** Provenance — what produced this score, and how much it disagreed with itself. */
+  judge: {
+    model: string;
+    permutations: number;
+    /**
+     * Largest spread between permutation runs on any single criterion, in
+     * points. High values mean the judge is unstable on this transcript and the
+     * score should be treated as low-confidence.
+     */
+    maxDisagreement: number;
+  };
 }
 
 // Server-action result discriminated unions used by templates / sessions APIs.

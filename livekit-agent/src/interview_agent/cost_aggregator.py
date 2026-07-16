@@ -63,8 +63,8 @@ class SessionCostAggregator:
         ``model_usage`` is a list of ``LLMModelUsage`` /
         ``TTSModelUsage`` / ``STTModelUsage`` entries. We don't care
         about provider/model attribution at this layer — the price
-        registry already pins on llama-3.3-70b-versatile / turbo_v2_5
-        / nova-3, so we just sum the count fields.
+        registry pins the models (see interview_agent.models), so we
+        just sum the count fields.
 
         If a provider gets swapped at runtime (Cartesia TTS, OpenAI
         STT) we'll still capture the *count* correctly; the cost rolls
