@@ -61,10 +61,16 @@ def test_emit_drops_none_metrics_report() -> None:
     assert exporter.get_finished_spans() == ()
 
 
-def test_emit_drops_partial_metrics_report() -> None:
-    """A MetricsReport missing one of the three legs is dropped silently.
-    This happens for the very first assistant utterance — there's no
-    preceding user turn so EOU/e2e aren't measurable yet."""
+def test_emit_records_partial_metrics_instead_of_dropping_them() -> None:
+    """Partial reports MUST still produce a span.
+
+    This asserts the inverse of the old behaviour, which dropped them. That
+    was a real bug: partial reports are not a random sample — they come from
+    interrupted and tool-call turns, i.e. disproportionately the slow ones. So
+    the p95 was computed over a population that excluded precisely the turns
+    that would have breached the budget, and the budget therefore always
+    looked met. If someone reintroduces the drop, this test is the tripwire.
+    """
     exporter = _attach_in_memory_exporter()
     exporter.clear()
     emit_turn_latency_span(
@@ -72,6 +78,59 @@ def test_emit_drops_partial_metrics_report() -> None:
         session_id="s1",
         persona_id="behavioral",
     )
+    spans = exporter.get_finished_spans()
+    assert len(spans) == 1
+    attrs = spans[0].attributes
+    assert attrs["latency.partial"] is True
+    # The legs we DID measure are recorded...
+    assert attrs["latency.llm_ttft_ms"] == 100.0
+    assert attrs["latency.tts_ttfb_ms"] == 200.0
+    # ...and the ones we didn't are absent rather than zero. A zero would read
+    # as "instantaneous" and drag every average it touches downward.
+    assert "latency.e2e_ms" not in attrs
+    assert "latency.eou_ms" not in attrs
+
+
+def test_emit_does_not_flag_budget_violations_for_unmeasured_legs() -> None:
+    """An unmeasured leg is unknown, not passing.
+
+    e2e_latency is absent here. It must not be treated as 0ms and quietly
+    counted as within budget.
+    """
+    exporter = _attach_in_memory_exporter()
+    exporter.clear()
+    emit_turn_latency_span(
+        {"llm_node_ttft": 0.1, "tts_node_ttfb": 0.2},
+        session_id="s1",
+        persona_id="behavioral",
+    )
+    attrs = exporter.get_finished_spans()[0].attributes
+    assert attrs["latency.budget_violated"] is False
+    assert "e2e_turn" not in attrs.get("latency.budget_violations", "")
+
+
+def test_emit_flags_a_slow_leg_even_when_the_report_is_partial() -> None:
+    """The point of the fix: a partial turn can still breach a budget, and
+    that breach must be visible."""
+    exporter = _attach_in_memory_exporter()
+    exporter.clear()
+    emit_turn_latency_span(
+        {"llm_node_ttft": 9.0, "tts_node_ttfb": 0.2},  # 9s TTFT, no e2e
+        session_id="s1",
+        persona_id="technical",
+    )
+    attrs = exporter.get_finished_spans()[0].attributes
+    assert attrs["latency.partial"] is True
+    assert attrs["latency.budget_violated"] is True
+    assert "llm_ttft" in attrs["latency.budget_violations"]
+
+
+def test_emit_drops_report_with_no_measurements_at_all() -> None:
+    """Nothing measured means there is genuinely nothing to observe — that is
+    the one case where emitting no span is honest."""
+    exporter = _attach_in_memory_exporter()
+    exporter.clear()
+    emit_turn_latency_span({}, session_id="s1", persona_id="behavioral")
     assert exporter.get_finished_spans() == ()
 
 

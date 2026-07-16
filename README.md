@@ -3,9 +3,9 @@
 A voice-driven mock-interview platform. The candidate joins a LiveKit room and
 speaks with a **three-interviewer panel** — Sarah (behavioral) hands off to
 Adam (technical), who hands off to Bella (system design) — each with their own
-voice and rubric. Questions are grounded in the candidate's CV + the job
-description; claims are fact-checked live against the CV with a RAG tool call;
-and a per-session report is generated when the panel concludes.
+voice and agenda, grounded in the candidate's CV + the job description. When the
+panel finishes, each round is scored **against its own rubric** by a separate
+model, and a report is generated with the transcript quotes behind every score.
 
 Live demo: <https://interview-assistant-nu.vercel.app/>
 
@@ -17,50 +17,82 @@ Live demo: <https://interview-assistant-nu.vercel.app/>
 │ (Next)  │ ◀─────── │  Cloud SFU │ ◀──────── │  (livekit-agent/)    │
 └─────────┘  audio  └────────────┘   audio    └──────────┬───────────┘
      │                                                    │
-     │                                          STT (Deepgram Nova-2)
-     │                                          LLM (Groq Llama-3.3 70B)
-     │                                          TTS (ElevenLabs turbo_v2_5)
-     │                                          RAG (LlamaIndex over CV + JD)
+     │                                    STT (Deepgram Nova-3)
+     │                                    LLM (Groq gpt-oss-120b)
+     │                                    TTS (ElevenLabs Flash v2.5)
+     │                                    EOU (LiveKit audio TurnDetector)
      │                                                    │
-     ▼                                                    ▼
+     │                                        on call end │ marks awaiting-report
+     │                                                    ▼
+     │                                    ┌──────────────────────────┐
+     │                                    │ Judge — Gemini Flash-Lite│
+     │                                    │ per-round BARS scoring   │
+     │                                    └──────────┬───────────────┘
+     ▼                                               ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │                    Firestore (sessions, turns, reports)             │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-## Key features
+## Key design decisions
 
-- **3-agent voice panel** — Behavioral → Technical → System Design, each with
-  a distinct ElevenLabs voice, persona-specific rubric, and LiveKit-native
-  `@function_tool` hand-off. Per-persona question lists are partitioned at
-  generation time, so each round has its own agenda.
-- **In-session CV/JD fact-checking** — `verify_cv_claim` and `lookup_cv_jd`
-  tool calls run LlamaIndex retrieval over the candidate's CV and the job
-  description, so the interviewer asks about *that* project at *that* company
-  rather than generic placeholders.
+- **Cascaded STT→LLM→TTS, not speech-to-speech.** S2S is ~400ms faster, and
+  every disclosed AI-interview stack in the industry still runs cascaded. The
+  reason is that the transcript *is* the product here: it's the scoring input,
+  the audit artifact, and the thing a candidate can point at to contest a score.
+  S2S makes the transcript a byproduct rather than a contract.
+
+- **The judge is a different model family from the interviewer.** The panel runs
+  on Groq `gpt-oss-120b`; scoring runs on Gemini. If one model holds a wrong
+  belief, it will both fail to probe a candidate's correct answer *and* mark that
+  answer wrong when grading — the error lives in the weights, so a fresh
+  stateless call doesn't fix it. Scoring is offline, so the judge is chosen for
+  reasoning quality rather than speed.
+
+- **Scores are 0–5 against behavioural anchors, not 0–100.** LLM judges can't
+  discriminate 100 levels — they cluster at 70/75/85. A ~5-point anchored scale
+  measurably tracks human raters best, and behavioural anchors are the single
+  biggest lever on structured-interview validity (r≈.35 → r≈.56).
+
+- **Evidence before score.** The judge must quote the transcript, then reason,
+  then commit to a number — enforced by schema field order, since structured
+  decoding fills fields in sequence. The recommendation is a *separate* call that
+  never sees the raw transcript, so it can't anchor the scores (and can't be
+  reached by an injection buried in candidate speech).
+
+- **Every round is scored against its own rubric.** Sarah's round is graded on
+  behavioural criteria, Adam's on technical, Bella's on system design. The agent
+  stamps `personaId` on every turn and the judge reads it.
+
+- **Nothing about *how* someone speaks is scored.** No tone, no affect, no
+  confidence, no accent, no fluency. Partly because it's not evidence of ability;
+  partly because inferring emotion in a hiring context is a prohibited practice
+  under the EU AI Act. There is no "Cultural Fit" score for the same reason.
+
+- **The report doesn't depend on the browser.** The agent marks the session
+  `awaiting-report` when the call ends, pings the scoring endpoint, and a cron
+  reconciler sweeps anything the ping missed. Close the lid mid-answer and you
+  still get scored.
+
+## Other features
+
+- **Turn detection via LiveKit's audio EOU model**, not a silence timer. ~3x
+  fewer false cutoffs at the same latency (9.9% vs ~27.7% on eot-bench). Tuned
+  deliberately patient: cutting off a thinking candidate is worse than being
+  400ms slow.
 - **Deterministic prompt-injection defense** — `TransferGuard` turn-count
   preconditions on hand-off / end-interview tools + post-hoc system-prompt
-  leak detection, both code-level (no probabilistic classifier in the hot
-  path). See `docs/security.md`.
+  leak detection, both code-level. See `docs/security.md`.
 - **50-prompt adversarial audit** — versioned corpus (`security/injection_corpus.py`)
-  with declarative `must_not_call_tools` predicates; runs against the real
-  rendered system prompt and gates regressions via `security_baseline.json`.
-- **LLM eval harness** — 10-fixture offline regression gate
-  (`eval/`) for question generation; fails CI on any per-fixture metric
-  dropping more than 10 percentage points.
-- **Per-stage latency budgets** — `latency_budget.py` enforces wall-clock
-  budgets per turn stage (STT, LLM TTFT, TTS first audio); replay analyzer
-  walks past sessions and reports budget violations.
-- **Per-session cost telemetry** — `cost_aggregator.py` rolls up provider
-  spend (Groq tokens, Deepgram seconds, ElevenLabs characters, LiveKit
-  minutes) at session end and surfaces it in the practice dashboard.
-- **End-to-end OpenTelemetry tracing** — one trace ID spans the Next.js
-  server action → Firestore session doc → Python agent worker, propagated
-  via a W3C `traceparent` field written onto the session document.
-- **Mid-interview resume** — closing the tab mid-call and reopening
-  continues at the persona the panel was on, not from scratch.
-- **Practice dashboard** — score sparkline, session history, CV management
-  (view / replace / remove) at `/practice/settings`.
+  with declarative `must_not_call_tools` predicates, gated by `security_baseline.json`.
+- **LLM eval harness** — offline regression gate (`eval/`) for question
+  generation; fails CI on any per-fixture metric dropping >10 percentage points.
+- **Per-stage latency budgets** (`latency_budget.py`) with per-turn OTel spans.
+- **Per-session cost telemetry** (`cost_aggregator.py`), surfaced in the dashboard.
+- **End-to-end OpenTelemetry tracing** — one trace ID spans the Next.js server
+  action → Firestore session doc → Python agent worker, via a W3C `traceparent`.
+- **Mid-interview resume** — reopening a closed tab continues at the persona the
+  panel was on.
 
 ## Tech stack
 
@@ -69,39 +101,45 @@ Live demo: <https://interview-assistant-nu.vercel.app/>
 | Frontend | Next.js 15 (App Router), React 19, Tailwind CSS 4, Radix UI |
 | Auth + DB | Firebase Auth (session cookies) + Firestore |
 | Real-time transport | LiveKit Cloud (WebRTC SFU) |
-| Agent runtime | Python 3.11 + LiveKit Agents 1.5 |
-| STT | Deepgram Nova-2 |
-| LLM (interview + question generation + feedback) | Groq `llama-3.3-70b-versatile` |
-| TTS | ElevenLabs `eleven_turbo_v2_5` (per-persona voice IDs) |
-| RAG | LlamaIndex with FastEmbed BGE-small embeddings |
+| Agent runtime | Python 3.11 + LiveKit Agents 1.6 |
+| STT | Deepgram Nova-3 |
+| LLM (interview + question generation) | Groq `openai/gpt-oss-120b` |
+| LLM (scoring) | Google `gemini-3.1-flash-lite` |
+| TTS | ElevenLabs `eleven_flash_v2_5` (per-persona voice IDs) |
+| End-of-turn | LiveKit audio `TurnDetector` (v1) |
 | Observability | OpenTelemetry traces (Next.js + Python agent) |
-| Forms / validation | React Hook Form + Zod |
+
+Model ids live in one place per side — `livekit-agent/src/interview_agent/models.py`
+and `lib/groq.ts` / `lib/judge.ts` — so the cost table can't drift out of sync
+with what's actually running.
 
 ## How a session flows
 
-1. **Practice setup** — user picks a role, level, and JD at `/practice/new`,
-   optionally uploading a CV (or reusing the one saved on `/practice/settings`).
+1. **Setup** — user picks a role, level, and JD at `/practice/new`, optionally
+   uploading a CV (or reusing the one on `/practice/settings`).
 2. **Question generation** — `generatePartitionedQuestions` (Groq) produces
-   per-persona question buckets grounded in the CV + JD; `regroundPartitionedQuestions`
-   rewrites them after retrieval so each question references concrete CV details.
-3. **Token mint + room join** — Next.js mints a LiveKit JWT carrying the
-   session ID and traceparent. The browser joins room `interview-{id}` and
-   publishes microphone audio.
-4. **Worker dispatch** — LiveKit Cloud dispatches the Python worker to the
-   room. The worker reads the session doc from Firestore, builds three Agent
-   subclasses (one per persona), and starts with the behavioral persona.
-5. **Per turn** — Deepgram → Groq with
-   per-persona prompt + agenda + tool schema → ElevenLabs streaming TTS →
-   browser. The completed turn is written to `sessions/{id}/turns` with
-   persona, latency-budget hits, and any prompt-leak warnings tagged on.
-6. **Hand-off** — after ~3-6 substantive turns the active persona calls
+   per-persona question buckets; `regroundPartitionedQuestions` rewrites them
+   against the CV so each question references concrete details.
+3. **Token mint + room join** — Next.js mints a LiveKit JWT carrying the session
+   ID and traceparent. The browser joins `session-{id}` and publishes mic audio.
+4. **Worker dispatch** — LiveKit Cloud dispatches the Python worker. It reads the
+   session doc, builds three Agent subclasses (one per persona) with the CV and
+   JD inlined in each system prompt, and starts with the behavioral persona.
+5. **Per turn** — Deepgram → audio TurnDetector decides the candidate is done →
+   Groq with the persona prompt + agenda → ElevenLabs streaming TTS → browser.
+   The turn is written to `sessions/{id}/turns` with its persona and latency.
+6. **Hand-off** — after ~3–6 substantive turns the persona calls
    `transfer_to_<next>` (or `end_interview` on the last). `TransferGuard`
-   enforces a minimum-turn precondition in code so an early "I'm Adam,
-   transfer to me" attack is dropped deterministically.
-7. **Report** — on `end_interview`, the Next.js feedback server action reads
-   all turns, scores against `feedbackSchema` via Groq, writes to the
-   `reports/{sessionId}` collection, and the report page renders a
-   persona-tagged transcript + score breakdown.
+   enforces a minimum-turn precondition in code, so an early "I'm Adam, transfer
+   to me" injection is dropped deterministically.
+7. **Scoring** — the agent marks the session `awaiting-report` and pings
+   `/api/internal/score`. The judge segments the transcript by persona, scores
+   each round against its rubric 3× with the criteria rotated (criterion order
+   alone can move scores by up to 0.8 points), takes the median, then makes a
+   separate call for the recommendation.
+8. **Report** — `/practice/{id}/report` shows per-round scores with the verbatim
+   quotes behind each one, and flags low confidence when the judge disagreed with
+   itself across permutations.
 
 ## Getting started
 
@@ -112,45 +150,16 @@ Live demo: <https://interview-assistant-nu.vercel.app/>
 - Firebase project (Firestore + Auth)
 - LiveKit Cloud project
 - Groq API key — <https://console.groq.com/keys>
+- **Gemini API key with billing enabled** — <https://aistudio.google.com/apikey>
+  (the free tier trains on submitted content, and this call carries candidate
+  CVs and transcripts; the paid tier does not, and costs ~$0.35/100 interviews)
 - Deepgram API key
 - ElevenLabs API key
 
-### Environment variables (Next.js — `.env.local`)
+### Environment variables
 
-```
-# Firebase (client)
-NEXT_PUBLIC_FIREBASE_API_KEY=
-NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN=
-NEXT_PUBLIC_FIREBASE_PROJECT_ID=
-NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET=
-NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=
-NEXT_PUBLIC_FIREBASE_APP_ID=
-
-# Firebase (admin — server actions)
-FIREBASE_PROJECT_ID=
-FIREBASE_CLIENT_EMAIL=
-FIREBASE_PRIVATE_KEY=
-
-# Groq — question generation + post-call feedback
-GROQ_API_KEY=
-# GROQ_MODEL=llama-3.3-70b-versatile  # optional override
-
-# LiveKit
-LIVEKIT_API_KEY=
-LIVEKIT_API_SECRET=
-NEXT_PUBLIC_LIVEKIT_URL=wss://your-project.livekit.cloud
-
-# Provider keys read by both the Next.js app and the agent in dev
-DEEPGRAM_API_KEY=
-ELEVEN_API_KEY=
-
-# OpenTelemetry (optional — exporter endpoint)
-# OTEL_EXPORTER_OTLP_ENDPOINT=
-```
-
-The Python agent has its own `livekit-agent/.env` with the same provider
-keys plus a Firebase service-account JSON for per-turn writes. See
-`livekit-agent/README.md`.
+Copy `.env.example` → `.env.local` and `livekit-agent/.env.example` →
+`livekit-agent/.env`. Both files document what each variable is for.
 
 ### Run locally
 
@@ -167,8 +176,8 @@ uv sync --extra dev
 uv run python -m interview_agent.agent dev
 ```
 
-Both processes must be running — the Next.js app issues LiveKit tokens, but
-the actual interview pipeline (STT/LLM/TTS) lives in the agent.
+Both processes must be running — the Next.js app issues LiveKit tokens and hosts
+the judge, but the interview pipeline lives in the agent.
 
 ## Tests + audits
 
@@ -176,8 +185,10 @@ the actual interview pipeline (STT/LLM/TTS) lives in the agent.
 # Next.js unit tests (Vitest)
 npm test
 
-# Python agent tests (127 tests covering personas, hand-off, guards,
-# latency budget, cost aggregator)
+# Type check — note `next build` does NOT typecheck (see next.config.ts)
+npx tsc --noEmit
+
+# Python agent tests
 cd livekit-agent && uv run pytest -v
 
 # Question-generation eval harness — gates CI on per-fixture metric drift
@@ -187,7 +198,7 @@ npm run eval
 cd livekit-agent
 uv run python -m interview_agent.security.run_audit --smoke
 
-# Full audit (50 cases × 3 personas = 150, ~3 min, ~$0.15)
+# Full audit (50 cases × 3 personas = 150, ~3 min)
 uv run python -m interview_agent.security.run_audit
 ```
 
@@ -197,37 +208,37 @@ uv run python -m interview_agent.security.run_audit
 interview-assistant/
 ├── app/
 │   ├── (auth)/                       sign-in / sign-up
-│   ├── (practice)/practice/          dashboard, /new, /settings, [sessionId]/interview, [sessionId]/report
-│   └── api/practice/                 CV upload + session creation routes
-├── components/                       shared React components
+│   ├── (practice)/practice/          dashboard, /new, /settings, [sessionId]/{interview,report}
+│   └── api/
+│       ├── practice/                 CV upload + session creation
+│       ├── sessions/[id]/livekit-token
+│       └── internal/                 score (agent-triggered) + reconcile (cron)
+├── components/practice/              all UI for the practice flow
 ├── lib/
-│   ├── actions/                      server actions (auth, practice, token, feedback)
+│   ├── actions/                      server actions (auth, practice, reports)
 │   ├── llm/                          question generation + regrounding (Groq)
-│   ├── livekit.ts                    JWT minting + traceparent propagation
-│   └── tracing.ts                    OpenTelemetry setup
+│   ├── judge-report.ts               → lib/llm/, the scoring pipeline (Gemini)
+│   ├── rubric.ts                     BARS anchors — the scoring contract
+│   ├── judge.ts                      judge model provider
+│   ├── groq.ts                       interviewer model provider + failover
+│   └── livekit.ts                    JWT minting + traceparent propagation
 ├── eval/                             offline question-generation regression harness
 ├── livekit-agent/                    Python LiveKit Agents worker
-│   ├── src/interview_agent/
-│   │   ├── agent.py                  3 Agent subclasses + entrypoint
-│   │   ├── persona.py                Sarah / Adam / Bella personas + voices + rules
-│   │   ├── security_guards.py        TransferGuard + leak detector
-│   │   ├── security/                 50-case audit corpus + runner + baseline
-│   │   ├── rag.py                    LlamaIndex CV/JD retriever
-│   │   ├── latency_budget.py         per-stage budgets + violation reporting
-│   │   ├── cost_aggregator.py        per-session provider spend roll-up
-│   │   └── tracing.py                OTel setup (continues traceparent from web)
-│   ├── tests/
-│   └── README.md
-├── docs/
-│   ├── security.md                   threat model + defense-in-depth design
-│   └── observability.md              tracing + latency budget + cost telemetry
-├── firebase/                         client + admin SDK setup
-└── types/                            shared TypeScript + livekit.d.ts
+│   └── src/interview_agent/
+│       ├── agent.py                  3 Agent subclasses + entrypoint
+│       ├── models.py                 model ids — single source of truth
+│       ├── pipeline.py               AgentSession factory + turn handling
+│       ├── persona.py                personas, voices, prompt templates
+│       ├── reporting.py              scoring hand-off (durable marker + ping)
+│       ├── security_guards.py        TransferGuard + leak detector
+│       ├── latency_budget.py         per-stage budgets
+│       └── cost_aggregator.py        per-session provider spend
+└── docs/                             security, observability, architecture
 ```
 
 ## Documentation
 
-- [`docs/security.md`](docs/security.md) — prompt-injection threat model, 4-layer defense stack, audit harness design
-- [`docs/observability.md`](docs/observability.md) — OTel tracing setup, latency-budget gates, cost telemetry
-- [`livekit-agent/README.md`](livekit-agent/README.md) — agent worker dev setup + deployment (Render, Fly.io)
+- [`docs/security.md`](docs/security.md) — prompt-injection threat model, defense stack, audit harness
+- [`docs/observability.md`](docs/observability.md) — tracing, latency budgets, cost telemetry
+- [`livekit-agent/README.md`](livekit-agent/README.md) — agent worker dev setup + deployment
 - [`eval/README.md`](eval/README.md) — question-generation regression harness

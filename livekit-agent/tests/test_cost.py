@@ -9,8 +9,12 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from interview_agent.cost_aggregator import SessionCostAggregator
 from interview_agent.cost_rates import (
+    _GROQ_INPUT_USD_PER_MILLION,
+    _GROQ_OUTPUT_USD_PER_MILLION,
     RATES_SOURCED_AT,
     groq_usd,
     livekit_usd,
@@ -20,14 +24,27 @@ from interview_agent.cost_rates import (
 )
 
 
+def _expected_groq_usd(input_tokens: int, output_tokens: int) -> float:
+    """Expected Groq spend, derived from the rate constants.
+
+    Derived rather than hardcoded: a price change or model migration should
+    move this in lockstep, not silently fail an unrelated assertion.
+    """
+    return (
+        input_tokens * _GROQ_INPUT_USD_PER_MILLION / 1_000_000
+        + output_tokens * _GROQ_OUTPUT_USD_PER_MILLION / 1_000_000
+    )
+
+
 # ---------------------------------------------------------------------------
 # Rate math — keep in lockstep with tests/cost-rates.test.ts.
 # ---------------------------------------------------------------------------
 
 
 def test_groq_usd_matches_published_rates() -> None:
-    # 1M input + 1M output = $0.59 + $0.79 = $1.38
-    assert abs(groq_usd(1_000_000, 1_000_000) - 1.38) < 1e-4
+    # 1M input + 1M output bills exactly one unit of each published rate.
+    expected = _GROQ_INPUT_USD_PER_MILLION + _GROQ_OUTPUT_USD_PER_MILLION
+    assert abs(groq_usd(1_000_000, 1_000_000) - expected) < 1e-4
 
 
 def test_tts_usd_matches_published_rates() -> None:
@@ -54,7 +71,7 @@ def test_roll_up_cost_sums_all_legs() -> None:
         stt_audio_seconds=180.0,
         session_duration_seconds=600.0,
     )
-    assert abs(breakdown.groq_usd - 0.00197) < 1e-5
+    assert abs(breakdown.groq_usd - _expected_groq_usd(2_000, 1_000)) < 1e-6
     assert abs(breakdown.tts_usd - 0.54) < 1e-4
     assert abs(breakdown.stt_usd - 0.0174) < 1e-4
     assert abs(breakdown.livekit_usd - 0.10) < 1e-4
@@ -143,8 +160,7 @@ def test_aggregator_handles_cumulative_event() -> None:
     )
 
     bd = agg.finalize()
-    # llm: 1000 * 0.59/1M + 500 * 0.79/1M = 0.00059 + 0.000395 ≈ 0.000985
-    assert abs(bd.groq_usd - 0.000985) < 1e-5
+    assert abs(bd.groq_usd - _expected_groq_usd(1_000, 500)) < 1e-6
     # tts: 2000 * 0.18 / 1000 = 0.36
     assert abs(bd.tts_usd - 0.36) < 1e-4
     # stt: 120 s = 2 min, 2 * 0.0058 = 0.0116
@@ -170,3 +186,45 @@ def test_aggregator_finalize_is_idempotent() -> None:
     first = agg.finalize()
     second = agg.finalize()
     assert first.total_usd == second.total_usd
+
+
+# ---------------------------------------------------------------------------
+# Drift guard
+# ---------------------------------------------------------------------------
+
+
+def test_cost_table_prices_the_models_the_pipeline_actually_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The regression that motivated interview_agent.models.
+
+    The pipeline ran Deepgram nova-2 while this table billed nova-3, so every
+    cost figure the dashboard showed was for a model that was never running.
+    The test that was *supposed* to catch it compared a hardcoded string to
+    another hardcoded string, so it passed the whole time.
+
+    This one reads the ids out of the live session object, so it fails if the
+    pipeline is ever changed to a model the price table doesn't describe.
+    """
+    # Provider constructors require keys; we build the session but make no calls.
+    monkeypatch.setenv("DEEPGRAM_API_KEY", "test")
+    monkeypatch.setenv("GROQ_API_KEY", "test")
+    monkeypatch.setenv("ELEVEN_API_KEY", "test")
+
+    from interview_agent.models import STT_MODEL, TTS_MODEL, llm_model_id
+    from interview_agent.pipeline import build_session
+
+    session = build_session()
+
+    # The STT the session is really wired with must be the one we price.
+    assert session.stt._opts.model == STT_MODEL
+    assert session.llm.model == llm_model_id()
+
+    # And the docstring in cost_rates must name the same models, so a reader
+    # pricing a change is looking at the right vendor page.
+    import interview_agent.cost_rates as cr
+
+    doc = cr.__doc__ or ""
+    assert STT_MODEL in doc
+    assert TTS_MODEL in doc
+    assert llm_model_id() in doc

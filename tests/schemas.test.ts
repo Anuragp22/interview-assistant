@@ -3,7 +3,8 @@ import { describe, it, expect } from "vitest";
 import {
   partitionedTemplateSchema,
   partitionedGroundingSchema,
-  reportSchema,
+  judgeScoresSchema,
+  judgeVerdictSchema,
   rubricBaseSchema,
 } from "@/constants";
 
@@ -133,54 +134,99 @@ describe("partitionedGroundingSchema", () => {
   });
 });
 
-describe("reportSchema", () => {
-  const baseReport = {
-    totalScore: 78,
-    categoryScores: [
-      { name: "Communication Skills", score: 80, comment: "Clear" },
-      { name: "Technical Knowledge", score: 75, comment: "Solid" },
-    ],
-    strengths: ["Good systems thinking"],
-    areasForImprovement: ["Deeper API design probing"],
-    finalAssessment: "Strong candidate overall.",
-    recommendation: "hire" as const,
-    recommendationReasoning: "Meets the bar for the role.",
-    rubricCoverage: { Q1: { concept1: true } },
+describe("judgeScoresSchema", () => {
+  const criterion = {
+    criterionId: "technicalDepth",
+    evidence: ["We sharded on user_id to keep the hot partition cold."],
+    rationale: "Explains the mechanism and why it was chosen.",
+    score: 4,
+  };
+  const base = {
+    rounds: [{ round: "technical" as const, criteria: [criterion] }],
+    communication: { ...criterion, criterionId: "structureAndClarity" },
   };
 
-  it("accepts a well-formed report", () => {
-    const result = reportSchema.safeParse(baseReport);
-    expect(result.success).toBe(true);
+  it("accepts a well-formed score set", () => {
+    expect(judgeScoresSchema.safeParse(base).success).toBe(true);
   });
 
-  it("rejects totalScore > 100", () => {
-    const result = reportSchema.safeParse({ ...baseReport, totalScore: 150 });
-    expect(result.success).toBe(false);
+  it("rejects a score above 5 — the scale is 0-5, not 0-100", () => {
+    const bad = {
+      ...base,
+      rounds: [
+        { round: "technical" as const, criteria: [{ ...criterion, score: 78 }] },
+      ],
+    };
+    expect(judgeScoresSchema.safeParse(bad).success).toBe(false);
   });
 
-  it("rejects totalScore < 0", () => {
-    const result = reportSchema.safeParse({ ...baseReport, totalScore: -1 });
-    expect(result.success).toBe(false);
+  it("rejects a fractional score — anchors are discrete levels", () => {
+    const bad = {
+      ...base,
+      rounds: [
+        { round: "technical" as const, criteria: [{ ...criterion, score: 3.5 }] },
+      ],
+    };
+    expect(judgeScoresSchema.safeParse(bad).success).toBe(false);
   });
 
-  it("rejects recommendation outside the enum", () => {
-    const result = reportSchema.safeParse({
-      ...baseReport,
-      recommendation: "maybe",
-    });
-    expect(result.success).toBe(false);
+  it("rejects an unknown round id", () => {
+    const bad = {
+      ...base,
+      rounds: [{ round: "culturalFit", criteria: [criterion] }],
+    };
+    expect(judgeScoresSchema.safeParse(bad).success).toBe(false);
   });
 
-  it("rejects empty strengths array", () => {
-    const result = reportSchema.safeParse({ ...baseReport, strengths: [] });
-    expect(result.success).toBe(false);
+  it("caps evidence at 3 quotes", () => {
+    const bad = {
+      ...base,
+      rounds: [
+        {
+          round: "technical" as const,
+          criteria: [{ ...criterion, evidence: ["a", "b", "c", "d"] }],
+        },
+      ],
+    };
+    expect(judgeScoresSchema.safeParse(bad).success).toBe(false);
   });
 
-  it("caps strengths at 8 entries", () => {
-    const result = reportSchema.safeParse({
-      ...baseReport,
-      strengths: Array(9).fill("s"),
-    });
-    expect(result.success).toBe(false);
+  it("allows empty evidence (the 'no evidence' case, which must score 0)", () => {
+    const ok = {
+      ...base,
+      rounds: [
+        {
+          round: "technical" as const,
+          criteria: [{ ...criterion, evidence: [], score: 0 }],
+        },
+      ],
+    };
+    expect(judgeScoresSchema.safeParse(ok).success).toBe(true);
+  });
+});
+
+describe("judgeVerdictSchema", () => {
+  const base = {
+    strengths: ["Good systems thinking"],
+    areasForImprovement: ["Deeper API design probing"],
+    finalAssessment: "Solid across the technical round.",
+    recommendation: "hire" as const,
+    recommendationReasoning: "Overall 3.9/5, above the hire bar.",
+  };
+
+  it("accepts a well-formed verdict", () => {
+    expect(judgeVerdictSchema.safeParse(base).success).toBe(true);
+  });
+
+  it("rejects a recommendation outside the enum", () => {
+    expect(
+      judgeVerdictSchema.safeParse({ ...base, recommendation: "maybe" }).success,
+    ).toBe(false);
+  });
+
+  it("rejects empty strengths", () => {
+    expect(
+      judgeVerdictSchema.safeParse({ ...base, strengths: [] }).success,
+    ).toBe(false);
   });
 });

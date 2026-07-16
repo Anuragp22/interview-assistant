@@ -28,7 +28,7 @@ export async function regroundQuestions(input: {
   const { object } = await withGroqModel((model) =>
     generateObject({
       model,
-      providerOptions: { groq: { structuredOutputs: false } },
+      providerOptions: { groq: { structuredOutputs: true } },
       schema: groundingSchema,
       experimental_telemetry: {
         isEnabled: true,
@@ -147,7 +147,7 @@ export async function regroundPartitionedQuestions(input: {
   const { object } = await withGroqModel((model) =>
     generateObject({
       model,
-      providerOptions: { groq: { structuredOutputs: false } },
+      providerOptions: { groq: { structuredOutputs: true } },
       schema: partitionedGroundingSchema,
       experimental_telemetry: {
         isEnabled: true,

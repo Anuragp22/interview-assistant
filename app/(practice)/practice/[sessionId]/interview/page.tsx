@@ -2,7 +2,7 @@ import { notFound, redirect } from "next/navigation";
 import { cookies } from "next/headers";
 
 import { auth, db } from "@/firebase/admin";
-import SessionRoomClient from "@/app/(candidate)/take/[token]/interview/_components/SessionRoomClient";
+import SessionRoomClient from "@/components/practice/SessionRoomClient";
 
 export const dynamic = "force-dynamic";
 

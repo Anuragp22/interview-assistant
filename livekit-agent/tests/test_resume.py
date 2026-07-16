@@ -144,7 +144,6 @@ def _make_agent_with_session(cls, persona, *, resume_mode: bool):
     """Construct an Agent and wire a fake session whose generate_reply
     is an AsyncMock so we can assert call-or-no-call."""
     agent = cls(
-        index=MagicMock(),
         session_id="s1",
         persona=persona,
         resume_mode=resume_mode,

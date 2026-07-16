@@ -51,3 +51,11 @@ next-env.d.ts
 # Security audit per-run JSON dumps (input to baseline-recorded comparison).
 # Baseline file (security_baseline.json at repo root) IS committed.
 /livekit-agent/security_audit_*.json
+
+# Personal resume + LaTeX build artifacts at repo root — never commit
+/cv.aux
+/cv.log
+/cv.out
+/cv.pdf
+/cv.tex
+/cv.txt

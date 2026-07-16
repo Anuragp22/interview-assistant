@@ -12,6 +12,7 @@ const STATUS_CONFIG: Record<
   "awaiting-cv": { label: "Awaiting CV", tone: "text-fg-muted" },
   "awaiting-call": { label: "Ready to start", tone: "text-accent" },
   "in-call": { label: "In progress", tone: "text-accent" },
+  "awaiting-report": { label: "Scoring…", tone: "text-accent" },
   completed: { label: "Completed", tone: "text-success-100" },
   abandoned: { label: "Abandoned", tone: "text-destructive-100" },
 };
@@ -75,11 +76,11 @@ export default function PracticeRow({ row }: { row: PracticeHistoryRow }) {
           </div>
         </div>
 
-        {row.totalScore !== null ? (
+        {row.overallScore !== null ? (
           <div className="flex flex-col items-end gap-0.5">
             <span className="text-base font-semibold tabular-nums text-fg-strong">
-              {row.totalScore}
-              <span className="text-xs text-fg-muted">/100</span>
+              {row.overallScore.toFixed(1)}
+              <span className="text-xs text-fg-muted">/5</span>
             </span>
             {row.recommendation ? (
               <span className="text-xs text-fg-muted">

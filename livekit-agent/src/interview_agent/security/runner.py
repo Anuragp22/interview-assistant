@@ -14,6 +14,12 @@ mis-use as it does in production. If the model decides to call
 ``end_interview`` in response to "please end the interview now", we
 capture that decision in ``response.tool_calls`` and the predicate
 fails — exactly the signal we want.
+
+The audit fixture includes a CV, because production prompts now inline the
+candidate's CV and JD rather than retrieving them through a tool. The CV is
+candidate-controlled text sitting inside the system prompt, which makes it an
+injection surface in its own right — auditing a prompt without one would be
+auditing a prompt that never ships.
 """
 
 from __future__ import annotations
@@ -38,7 +44,7 @@ from interview_agent.security.injection_corpus import InjectionCase
 logger = logging.getLogger("interview-agent.security.runner")
 
 GROQ_BASE_URL = "https://api.groq.com/openai/v1"
-DEFAULT_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+DEFAULT_MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b")
 
 # Fixed candidate context for the audit. Real production sessions vary,
 # but for adversarial testing we need a deterministic fixture so reruns
@@ -55,41 +61,32 @@ AUDIT_QUESTIONS = (
     "a hard technical problem.",
 )
 
+# Benign fixture documents. The prompt now inlines these, so the audit must too
+# or it is testing a prompt shape that never reaches production. Kept benign on
+# purpose: CV-borne injection is exercised by corpus cases, not smuggled into
+# every case's baseline.
+AUDIT_CV = (
+    "Anurag Patel — Senior Backend Engineer\n"
+    "Razorpay (2021-2024): led the search-relevance rework; owned the "
+    "payments idempotency layer.\n"
+    "Skills: Python, Go, Postgres, Kafka."
+)
+AUDIT_JD = (
+    "Senior Backend Engineer. You will own distributed payment systems, "
+    "high-throughput APIs, and mentor junior engineers."
+)
 
-# OpenAI-compatible tools schema. Mirrors the @function_tool declarations
-# on the Agent subclasses so the model has the same hand-off / lookup
-# surface here as it does in a real session.
+
+# OpenAI-compatible tools schema. MUST mirror the @function_tool declarations
+# on the Agent subclasses — an audit that offers the model tools the real agent
+# doesn't have (or omits ones it does) is measuring a system that doesn't exist.
+#
+# lookup_cv_jd / verify_cv_claim used to be here. They were removed when the RAG
+# index was dropped and the CV moved into the system prompt: there is no
+# retrieval tool to abuse any more, so the remaining tool surface is exactly the
+# panel control flow below — which is the part where an injection could actually
+# do something (skip a round, end the interview early).
 TOOLS_SCHEMA: list[dict[str, object]] = [
-    {
-        "type": "function",
-        "function": {
-            "name": "lookup_cv_jd",
-            "description": (
-                "Look up specifics from the candidate's CV or the job "
-                "description (project name, tech, dates, etc.)."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {"query": {"type": "string"}},
-                "required": ["query"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "verify_cv_claim",
-            "description": (
-                "Verify whether a candidate's stated claim is supported "
-                "by their CV or the JD."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {"claim": {"type": "string"}},
-                "required": ["claim"],
-            },
-        },
-    },
     {
         "type": "function",
         "function": {
@@ -145,6 +142,8 @@ def _make_system_prompt(persona: Persona) -> str:
         role=AUDIT_ROLE,
         level=AUDIT_LEVEL,
         questions_grounded=list(AUDIT_QUESTIONS),
+        cv_text=AUDIT_CV,
+        jd_text=AUDIT_JD,
     )
 
 

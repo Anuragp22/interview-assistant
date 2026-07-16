@@ -14,11 +14,12 @@ hears different voices per round.
 """
 
 import pytest
+from livekit.agents.inference import TurnDetector
 from livekit.agents.voice import AgentSession
 from livekit.plugins import deepgram, openai, silero
 
+from interview_agent.models import DEFAULT_LLM_MODEL, STT_MODEL
 from interview_agent.pipeline import (
-    DEFAULT_GROQ_MODEL,
     GROQ_BASE_URL,
     _INTERVIEW_TURN_HANDLING,
     build_session,
@@ -75,7 +76,7 @@ def test_build_session_points_llm_at_groq_endpoint():
 def test_build_session_uses_default_groq_model_when_unset(monkeypatch):
     monkeypatch.delenv("GROQ_MODEL", raising=False)
     session = build_session()
-    assert session.llm.model == DEFAULT_GROQ_MODEL
+    assert session.llm.model == DEFAULT_LLM_MODEL
 
 
 def test_build_session_respects_groq_model_override(monkeypatch):
@@ -124,11 +125,41 @@ def test_interview_turn_handling_keeps_false_interruption_resume_on():
     assert _INTERVIEW_TURN_HANDLING["interruption"]["resume_false_interruption"] is True
 
 
-def test_interview_turn_handling_extends_endpointing_for_thinking_time():
-    """min_delay should be > the default 0.5s so candidates get a beat
-    after they stop talking before the AI replies."""
+def test_interview_turn_handling_allows_long_thinking_pauses():
+    """max_delay must be generous.
+
+    This is the setting that protects a candidate reasoning out loud. Someone
+    working through a system-design question pauses for seconds mid-thought,
+    and that pause is where the signal is — the detector needs room to keep
+    holding the turn open rather than being forced to close it on a timer.
+    """
     endpointing = _INTERVIEW_TURN_HANDLING["endpointing"]
-    assert endpointing["min_delay"] >= 0.7
+    assert endpointing["max_delay"] >= 2.5
+
+
+def test_endpointing_min_delay_is_a_floor_not_a_safety_margin():
+    """min_delay is deliberately LOW now, and that is not a regression.
+
+    It used to be padded to 0.8s because silence-timeout endpointing was the
+    only thing preventing the agent from barging in on a thinking pause — so
+    every turn paid the worst-case tax. The audio TurnDetector now makes that
+    call from the audio itself, so this is just a floor beneath it. If someone
+    "fixes" this back up to 0.8s, they are re-adding a per-turn latency tax
+    that the detector already removed.
+    """
+    assert _INTERVIEW_TURN_HANDLING["endpointing"]["min_delay"] <= 0.5
+
+
+def test_build_session_uses_the_audio_turn_detector():
+    """The whole point of the 1.6 upgrade.
+
+    Without turn_detection set, the session silently falls back to VAD-only
+    endpointing — which still *works*, so nothing fails loudly; it just cuts
+    candidates off ~3x more often (9.9% -> 27.7% false cutoffs on eot-bench).
+    That is exactly the kind of regression that hides, so pin it.
+    """
+    session = build_session()
+    assert isinstance(session.turn_detection, TurnDetector)
 
 
 def test_build_session_propagates_interrupt_thresholds_to_session_options():

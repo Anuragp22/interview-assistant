@@ -4,24 +4,17 @@ version = "0.1.0"
 description = "LiveKit Agents worker for the Interview Assistant voice interviewer."
 requires-python = ">=3.11"
 dependencies = [
-  "livekit-agents>=1.5,<2",
-  "livekit-plugins-deepgram>=1.5,<2",
-  "livekit-plugins-openai>=1.5,<2",
-  "livekit-plugins-elevenlabs>=1.5,<2",
-  "livekit-plugins-silero>=1.5,<2",
+  # >=1.6.1 for livekit.agents.inference.TurnDetector — the audio end-of-turn
+  # model. It ships inside livekit-agents itself; the separate
+  # livekit-plugins-turn-detector package is deprecated and slated for removal,
+  # so do NOT add it back.
+  "livekit-agents>=1.6.1,<2",
+  "livekit-plugins-deepgram>=1.6.1,<2",
+  "livekit-plugins-openai>=1.6.1,<2",
+  "livekit-plugins-elevenlabs>=1.6.1,<2",
+  "livekit-plugins-silero>=1.6.1,<2",
   "firebase-admin>=6.5",
   "python-dotenv>=1.0",
-  # llama-index-core 0.13 fixes GHSA-cr7q-2w66-hjcm (insecure temp-file
-  # handling). 0.13 removed the deprecated agent/QueryPipeline classes;
-  # rag.py only uses Document / VectorStoreIndex / Settings / embed_model,
-  # which are unchanged.
-  "llama-index-core>=0.13,<0.14",
-  "llama-index-embeddings-fastembed>=0.6,<0.7",
-  # fastembed is imported by llama-index-embeddings-fastembed at runtime
-  # but was DROPPED from its declared dependencies in 0.6.0. Pinning it
-  # here so `uv sync` actually installs the ONNX backend the embedder
-  # wrapper expects.
-  "fastembed>=0.4,<1",
   # OpenTelemetry — share the trace started by the Next.js server action.
   # opentelemetry-exporter-otlp-proto-http rides over plain HTTPS, no
   # collector or gRPC dependency.

@@ -151,14 +151,27 @@ interface Session {
     technical: RubricGrounded[];
     systemDesign: RubricGrounded[];
   };
+  /**
+   * Session lifecycle.
+   *
+   * "awaiting-report" is the durable hand-off point. The AGENT writes it when
+   * the call ends, because the agent is the only party that actually knows the
+   * interview is over — the browser might have crashed, slept, or lost network.
+   * Once it's written, the report is guaranteed to be generated eventually:
+   * either by the fast path (the agent pings the score endpoint) or by the cron
+   * reconciler sweeping sessions stuck in this state.
+   */
   status:
     | "awaiting-cv"
     | "awaiting-call"
     | "in-call"
+    | "awaiting-report"
     | "completed"
     | "abandoned";
   livekitRoomName: string;
   startedAt?: string;
+  /** Set by the agent when the call ends, alongside status: awaiting-report. */
+  endedAt?: string;
   completedAt?: string;
   createdAt: string;
   // W3C `traceparent` value (e.g. "00-{trace_id}-{span_id}-01"). Written
@@ -198,21 +211,48 @@ type Recommendation =
   | "no-hire"
   | "inconclusive";
 
+/** One criterion, scored 0-5 against behavioural anchors (see lib/rubric.ts). */
+interface ScoredCriterion {
+  criterionId: string;
+  label: string;
+  /** Verbatim transcript quotes the score is based on. Empty ⇒ score is 0. */
+  evidence: string[];
+  rationale: string;
+  score: number;
+}
+
+/** One round of the panel, scored against that persona's own rubric. */
+interface ScoredRound {
+  round: "behavioral" | "technical" | "systemDesign";
+  label: string;
+  criteria: ScoredCriterion[];
+  /** Mean of this round's criteria, 0-5. */
+  roundScore: number;
+}
+
 interface Report {
   sessionId: string;
   generatedAt: string;
-  totalScore: number;
-  categoryScores: Array<{
-    name: string;
-    score: number;
-    comment: string;
-  }>;
+  rounds: ScoredRound[];
+  communication: ScoredCriterion;
+  /** 0-5, weighted across the rounds + communication. */
+  overallScore: number;
   strengths: string[];
   areasForImprovement: string[];
   finalAssessment: string;
   recommendation: Recommendation;
   recommendationReasoning: string;
-  rubricCoverage: Record<string, Record<string, boolean>>;
+  /** Provenance — what produced this score, and how much it disagreed with itself. */
+  judge: {
+    model: string;
+    permutations: number;
+    /**
+     * Largest spread between permutation runs on any single criterion, in
+     * points. High values mean the judge is unstable on this transcript and the
+     * score should be treated as low-confidence.
+     */
+    maxDisagreement: number;
+  };
 }
 
 // Server-action result discriminated unions used by templates / sessions APIs.

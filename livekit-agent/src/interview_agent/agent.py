@@ -53,8 +53,9 @@ from interview_agent.persona import (
 )
 from interview_agent.persistence.firestore import TurnsRepository, init_firebase
 from interview_agent.persistence.models import Turn
+from interview_agent.models import TTS_MODEL, llm_model_id
 from interview_agent.pipeline import build_session
-from interview_agent.rag import build_index, query_index, verify_claim
+from interview_agent.reporting import mark_awaiting_report, ping_score_endpoint
 from interview_agent.session_data import (
     SESSION_ROOM_PREFIX,
     load_session_data,
@@ -183,10 +184,17 @@ def _build_tts_for(persona: Persona) -> elevenlabs.TTS:
     streaming_latency=3 enables ElevenLabs' "max latency optimization"
     profile (still keeping text normalization on; 4 disables it and
     risks mispronouncing numbers / abbreviations in the interview
-    domain). Combined with the eleven_turbo_v2_5 model, this targets
-    ~200ms first-audio-byte on warm WebSocket connections.
+    domain).
+
+    Model is eleven_flash_v2_5, not turbo. ElevenLabs deprecated the Turbo
+    line and their guidance is explicit — use Flash over Turbo in all cases.
+    Same voices, same quality tier, materially lower first-byte latency. Note
+    the vendor's headline "~75ms" is model inference time only and excludes
+    network and endpoint overhead; the real-world win over Turbo is closer to
+    ~100-200ms, which is still the cheapest latency on the board.
     """
     return elevenlabs.TTS(
+        model=TTS_MODEL,
         voice_id=persona.voice_id,
         voice_settings=elevenlabs.VoiceSettings(
             stability=persona.voice_stability,
@@ -207,6 +215,8 @@ def _render_for(persona: Persona) -> str:
         candidate_name=_PANEL_CONTEXT["candidate_name"],
         role=_PANEL_CONTEXT["role"],
         level=_PANEL_CONTEXT["level"],
+        cv_text=_PANEL_CONTEXT.get("cv_text", ""),
+        jd_text=_PANEL_CONTEXT.get("jd_text", ""),
         questions_grounded=_NEXT_QUESTIONS_BY_PERSONA.get(persona.id, []),
     )
 
@@ -234,7 +244,6 @@ class InterviewerBase(Agent):
     def __init__(
         self,
         *,
-        index: Any,
         session_id: str,
         persona: Persona,
         chat_ctx: Any = None,
@@ -245,51 +254,9 @@ class InterviewerBase(Agent):
             tts=_build_tts_for(persona),
             chat_ctx=chat_ctx,
         )
-        self._index = index
         self._session_id = session_id
         self._persona = persona
         self._resume_mode = resume_mode
-
-    @function_tool()
-    async def lookup_cv_jd(self, context: RunContext, query: str) -> str:
-        """Look up specifics from the candidate's CV or the job description.
-        Use when you need a concrete fact (project name, tech, dates,
-        specific JD requirement) before asking a question or follow-up.
-        Returns the most relevant chunks from the indexed CV+JD."""
-        tracer = get_tracer()
-        with tracer.start_as_current_span(
-            "agent.tool.lookup_cv_jd",
-            attributes={
-                "persona.id": self._persona.id,
-                "rag.query": query[:200],
-            },
-        ):
-            return await query_index(self._index, query, top_k=3)
-
-    @function_tool()
-    async def verify_cv_claim(self, context: RunContext, claim: str) -> str:
-        """Verify whether a candidate's stated claim is supported by their
-        CV or the job description. Call this whenever the candidate
-        mentions a specific project, employer, technology, tenure, or
-        numeric outcome that isn't already in the agenda question.
-
-        Pass the claim VERBATIM (or close to it). Returns one of three
-        verdicts (supported / ambiguous / unsupported) with similarity
-        score and supporting evidence."""
-        tracer = get_tracer()
-        with tracer.start_as_current_span(
-            "agent.tool.verify_cv_claim",
-            attributes={
-                "persona.id": self._persona.id,
-                "claim": claim[:200],
-            },
-        ) as span:
-            result = await verify_claim(self._index, claim)
-            # Surface the verdict + similarity on the span so we can
-            # filter "unsupported" claims in the tracing UI later.
-            span.set_attribute("verdict", result.verdict)
-            span.set_attribute("similarity", result.max_similarity)
-            return result.for_llm()
 
 
 class BehavioralInterviewer(InterviewerBase):
@@ -348,7 +315,6 @@ class BehavioralInterviewer(InterviewerBase):
             if _GUARD is not None:
                 _GUARD.reset_persona(TECHNICAL_PERSONA.id)
             next_agent = TechnicalInterviewer(
-                index=self._index,
                 session_id=self._session_id,
                 persona=TECHNICAL_PERSONA,
                 chat_ctx=self.chat_ctx,
@@ -401,7 +367,6 @@ class TechnicalInterviewer(InterviewerBase):
             if _GUARD is not None:
                 _GUARD.reset_persona(SYSTEM_DESIGN_PERSONA.id)
             next_agent = SystemDesignInterviewer(
-                index=self._index,
                 session_id=self._session_id,
                 persona=SYSTEM_DESIGN_PERSONA,
                 chat_ctx=self.chat_ctx,
@@ -543,11 +508,6 @@ async def entrypoint(ctx: JobContext) -> None:
     )
     panel_span_cm.__enter__()
 
-    index = build_index(
-        cv_text=session_data.cv_extracted_text,
-        jd_text=session_data.job_description,
-    )
-
     # Reset module-level state so each session starts clean.
     _NEXT_QUESTIONS_BY_PERSONA.clear()
     _NEXT_QUESTIONS_BY_PERSONA["behavioral"] = list(
@@ -564,6 +524,8 @@ async def entrypoint(ctx: JobContext) -> None:
     _PANEL_CONTEXT["candidate_name"] = session_data.candidate_name
     _PANEL_CONTEXT["role"] = session_data.role
     _PANEL_CONTEXT["level"] = session_data.level
+    _PANEL_CONTEXT["cv_text"] = session_data.cv_extracted_text
+    _PANEL_CONTEXT["jd_text"] = session_data.job_description
     _END_INTERVIEW_FLAG.clear()
 
     turns_repo = TurnsRepository(db, session_id=session_id)
@@ -598,7 +560,6 @@ async def entrypoint(ctx: JobContext) -> None:
     # Construct the first Agent. Subsequent agents are constructed by
     # `transfer_to_*` tools when the active agent decides to hand off.
     agent = starting_persona_cls_for(starting_persona)(
-        index=index,
         session_id=session_id,
         persona=starting_persona,
         chat_ctx=initial_chat_ctx,
@@ -670,7 +631,7 @@ async def entrypoint(ctx: JobContext) -> None:
         now = datetime.now(timezone.utc)
         metadata: dict[str, Any] = {
             "personaId": _ACTIVE_PERSONA_ID[0],
-            "modelId": "llama-3.3-70b-versatile",
+            "modelId": llm_model_id(),
         }
         if leak_hits:
             metadata["security"] = {"leakHits": leak_hits}
@@ -734,9 +695,24 @@ async def entrypoint(ctx: JobContext) -> None:
                     "failed to write session.estimatedCost for %s", session_id
                 )
 
+            # Hand off to scoring. This ordering matters: the durable marker
+            # goes down FIRST, so that if the ping (or this whole process)
+            # dies immediately after, the reconciler still knows a report is
+            # owed. The browser is no longer part of this path at all — the
+            # candidate can close the tab mid-answer and still get scored.
+            mark_awaiting_report(db, session_id)
+            try:
+                await asyncio.to_thread(ping_score_endpoint, session_id)
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "score ping raised for %s; reconciler will retry",
+                    session_id,
+                    exc_info=True,
+                )
+
             # Close the panel-session span last so that the close-down
-            # latency (drain + aclose + cost write) is included in its
-            # duration.
+            # latency (drain + aclose + cost write + scoring hand-off) is
+            # included in its duration.
             panel_span_cm.__exit__(None, None, None)
 
 
@@ -753,19 +729,18 @@ async def _request_fnc(req: JobRequest) -> None:
 
 
 def prewarm(proc: JobProcess) -> None:
-    """Pre-load Silero VAD + fastembed model once per worker process,
-    and install the OTel TracerProvider so every session in this worker
-    can emit spans without re-bootstrapping.
+    """Pre-load Silero VAD once per worker process, and install the OTel
+    TracerProvider so every session in this worker can emit spans without
+    re-bootstrapping.
 
-    Eager loads here mean the first user turn of the worker's first
-    session doesn't pay model-load latency (Silero ~200ms, fastembed
-    ~3s) — all paid up-front per worker."""
+    Loading Silero here (~200ms) means the first user turn of the worker's
+    first session doesn't pay for it. The fastembed prewarm that used to sit
+    alongside it (~3s) is gone with the RAG index — the CV now lives in the
+    system prompt, so there is no embedding model to warm."""
     from livekit.plugins import silero
-    from interview_agent.rag import prewarm_fastembed
 
     install_tracer_provider()
     proc.userdata["vad"] = silero.VAD.load()
-    prewarm_fastembed()
 
 
 # Re-export PERSONA_BY_ID for test access without forcing test_agent to

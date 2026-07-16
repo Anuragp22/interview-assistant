@@ -4,7 +4,8 @@ import Link from "next/link";
 import { ArrowLeft } from "lucide-react";
 
 import { auth, db } from "@/firebase/admin";
-import ReportView from "@/components/hr/ReportView";
+import ReportPending from "@/components/practice/ReportPending";
+import ReportView from "@/components/practice/ReportView";
 
 export const dynamic = "force-dynamic";
 
@@ -29,8 +30,25 @@ export default async function PracticeReportPage({
   const session = sessionDoc.data() as Session;
   if (session.candidateUid !== decoded.uid) notFound();
 
+  // The report may legitimately not exist yet: the candidate lands here the
+  // moment they hang up, and the agent's scoring hand-off is still running.
+  // That is a wait, not a 404 — 404ing someone on their own interview because
+  // a background job hasn't finished would be a lie about what happened.
   const reportDoc = await db.collection("reports").doc(sessionId).get();
-  if (!reportDoc.exists) notFound();
+  if (!reportDoc.exists) {
+    return (
+      <div className="flex flex-col gap-6 max-w-3xl mx-auto w-full">
+        <Link
+          href="/practice"
+          className="inline-flex items-center gap-1.5 text-sm text-fg-muted hover:text-fg-strong w-fit"
+        >
+          <ArrowLeft className="size-3.5" />
+          Back to dashboard
+        </Link>
+        <ReportPending status={session.status} />
+      </div>
+    );
+  }
   const report = reportDoc.data() as Report;
 
   const turnsSnap = await db

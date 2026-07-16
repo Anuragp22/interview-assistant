@@ -4,9 +4,14 @@ Keep the two in sync. ``RATES_SOURCED_AT`` is the date stamp that
 forces a refresh review when prices drift; bump it in *both* files
 whenever a number here changes.
 
+Model ids are imported from interview_agent.models, NOT retyped here. That is
+deliberate: this table previously billed Deepgram nova-3 while the pipeline ran
+nova-2, so every cost figure on the dashboard was wrong for a model that was
+never running.
+
 Sourcing notes (links live in the TS mirror):
-  - Groq llama-3.3-70b-versatile:  $0.59 / 1M in, $0.79 / 1M out
-  - ElevenLabs eleven_turbo_v2_5:  $0.18 / 1k characters (Creator tier)
+  - Groq openai/gpt-oss-120b:      $0.15 / 1M in, $0.75 / 1M out
+  - ElevenLabs eleven_flash_v2_5:  $0.18 / 1k characters (Creator tier)
   - Deepgram nova-3:               $0.0058 / audio minute
   - LiveKit Build plan:            $0.005 / participant-minute,
                                    2 participants/session
@@ -16,16 +21,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-RATES_SOURCED_AT = "2026-05-16"
+RATES_SOURCED_AT = "2026-07-14"
 
-# Groq llama-3.3-70b-versatile.
-_GROQ_INPUT_USD_PER_MILLION = 0.59
-_GROQ_OUTPUT_USD_PER_MILLION = 0.79
+# Groq DEFAULT_LLM_MODEL.
+_GROQ_INPUT_USD_PER_MILLION = 0.15
+_GROQ_OUTPUT_USD_PER_MILLION = 0.75
 
-# ElevenLabs eleven_turbo_v2_5.
+# ElevenLabs TTS_MODEL.
 _TTS_USD_PER_THOUSAND_CHARS = 0.18
 
-# Deepgram nova-3.
+# Deepgram STT_MODEL.
 _STT_USD_PER_AUDIO_MINUTE = 0.0058
 
 # LiveKit Build plan.

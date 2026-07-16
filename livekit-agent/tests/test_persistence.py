@@ -168,7 +168,7 @@ def test_append_turn_serializes_fields_via_session_path():
         started_at=started,
         ended_at=ended,
         index=0,
-        metadata={"personaId": "general", "modelId": "llama-3.3-70b-versatile"},
+        metadata={"personaId": "general", "modelId": "openai/gpt-oss-120b"},
     )
 
     repo.append_turn(turn)
@@ -180,7 +180,7 @@ def test_append_turn_serializes_fields_via_session_path():
         "startedAt": started,
         "endedAt": ended,
         "index": 0,
-        "metadata": {"personaId": "general", "modelId": "llama-3.3-70b-versatile"},
+        "metadata": {"personaId": "general", "modelId": "openai/gpt-oss-120b"},
     }
 
 

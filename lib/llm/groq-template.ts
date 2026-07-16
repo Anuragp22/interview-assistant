@@ -13,10 +13,11 @@ import { withGroqModel } from "@/lib/groq";
  * and matching per-question rubrics. CV-grounding happens later at Phase 2
  * (groq-grounding.ts) when the candidate uploads their resume.
  *
- * Uses Groq json_object mode (structuredOutputs:false) per the
- * @ai-sdk/groq guidance — Llama 3.3 doesn't support json_schema strict
- * mode. The literal word "JSON" is required in the prompt, and the
- * shape is described inline so the model has something to constrain to.
+ * Uses strict json_schema decoding (structuredOutputs:true). gpt-oss-120b is
+ * one of only two Groq models that support it; the schema is enforced during
+ * decoding, so the model cannot emit a shape that fails the Zod parse. The
+ * inline shape descriptions the old json_object mode needed are no longer
+ * load-bearing — the grammar is.
  *
  * The Groq call is wrapped in withGroqModel for multi-account failover
  * (GROQ_API_KEY1/2/3) on a daily-quota 429.
@@ -32,7 +33,7 @@ export async function generateQuestionsAndRubrics(input: {
   const { object } = await withGroqModel((model) =>
     generateObject({
       model,
-      providerOptions: { groq: { structuredOutputs: false } },
+      providerOptions: { groq: { structuredOutputs: true } },
       schema: templateGenerationSchema,
       experimental_telemetry: {
         isEnabled: true,
@@ -97,7 +98,7 @@ export async function generatePartitionedQuestions(input: {
   const { object } = await withGroqModel((model) =>
     generateObject({
       model,
-      providerOptions: { groq: { structuredOutputs: false } },
+      providerOptions: { groq: { structuredOutputs: true } },
       schema: partitionedTemplateSchema,
       experimental_telemetry: {
         isEnabled: true,

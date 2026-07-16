@@ -53,7 +53,7 @@ def _panel_context():
 # ---------------------------------------------------------------------------
 
 def _make(cls, persona):
-    return cls(index=MagicMock(), session_id="sess_abc", persona=persona)
+    return cls(session_id="sess_abc", persona=persona)
 
 
 def test_behavioral_interviewer_construction_stores_state():
@@ -76,45 +76,6 @@ def test_system_design_interviewer_construction_stores_state():
     agent = _make(SystemDesignInterviewer, SYSTEM_DESIGN_PERSONA)
     assert agent._persona is SYSTEM_DESIGN_PERSONA
     assert "Bella" in agent.instructions
-
-
-# ---------------------------------------------------------------------------
-# Inherited tools (lookup_cv_jd, verify_cv_claim) work on every subclass
-# ---------------------------------------------------------------------------
-
-@pytest.mark.parametrize(
-    "cls,persona",
-    [
-        (BehavioralInterviewer, BEHAVIORAL_PERSONA),
-        (TechnicalInterviewer, TECHNICAL_PERSONA),
-        (SystemDesignInterviewer, SYSTEM_DESIGN_PERSONA),
-    ],
-)
-def test_every_subclass_exposes_lookup_cv_jd_and_verify_cv_claim(cls, persona):
-    agent = _make(cls, persona)
-    assert callable(getattr(agent, "lookup_cv_jd", None))
-    assert callable(getattr(agent, "verify_cv_claim", None))
-
-
-@pytest.mark.asyncio
-async def test_lookup_cv_jd_delegates_to_query_index_on_behavioral():
-    """The @function_tool decorator wraps the method; the raw method is
-    callable via .__wrapped__ or via the FunctionTool's underlying coro.
-    Testing the public behaviour by patching query_index is enough."""
-    index = MagicMock()
-    agent = BehavioralInterviewer(
-        index=index, session_id="sess_abc", persona=BEHAVIORAL_PERSONA
-    )
-    ctx = MagicMock()  # RunContext stand-in
-    with patch(
-        "interview_agent.agent.query_index",
-        new=AsyncMock(return_value="chunk"),
-    ) as mock_qi:
-        # Call the underlying coro; function_tool exposes the wrapped fn
-        # so the method is still callable in tests.
-        result = await agent.lookup_cv_jd(ctx, "What tech stack?")
-    mock_qi.assert_called_once_with(index, "What tech stack?", top_k=3)
-    assert result == "chunk"
 
 
 # ---------------------------------------------------------------------------

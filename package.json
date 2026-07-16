@@ -14,6 +14,7 @@
     "latency-report": "tsx eval/latency-report.ts"
   },
   "dependencies": {
+    "@ai-sdk/google": "^3.0.91",
     "@ai-sdk/groq": "^3.0.39",
     "@hookform/resolvers": "^4.1.3",
     "@opentelemetry/api": "^1.9.1",

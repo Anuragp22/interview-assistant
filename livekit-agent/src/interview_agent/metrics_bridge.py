@@ -45,10 +45,19 @@ def emit_turn_latency_span(
     """Open + immediately close an ``agent.turn-latency`` span carrying
     the per-leg measurements from ``metrics``.
 
-    Safe to call with ``None`` or an empty MetricsReport — those happen
-    for tool-call results or interrupted turns where the SDK couldn't
-    measure the full round trip. We silently drop those rather than
-    pollute the trace with zero-valued spans.
+    Emits a span for EVERY turn that reports any timing at all, including
+    partial ones, tagged ``latency.partial=true``.
+
+    This used to drop partial reports entirely, and that quietly corrupted the
+    whole latency dashboard. Partial reports are not random: they come from
+    interrupted turns and tool-call turns — i.e. disproportionately the SLOW
+    and abnormal ones. Dropping them meant the p95 was computed over a sample
+    that excluded exactly the turns most likely to breach the budget, so the
+    budget always looked satisfied. Survivorship bias in the observability
+    layer is worse than no observability, because it manufactures confidence.
+
+    A partial span has fewer attributes, which is fine — a missing attribute is
+    honest. A missing span is a lie by omission.
     """
     if not metrics:
         return
@@ -57,42 +66,63 @@ def emit_turn_latency_span(
     tts_ttfb_s = metrics.get("tts_node_ttfb")
     e2e_s = metrics.get("e2e_latency")
 
-    if llm_ttft_s is None or tts_ttfb_s is None or e2e_s is None:
-        # Partial metrics — skip rather than emit a half-empty span.
-        # Common for the very first assistant utterance (on_enter
-        # greetings have no preceding user turn to anchor EOU).
+    if llm_ttft_s is None and tts_ttfb_s is None and e2e_s is None:
+        # Nothing measured at all — there is genuinely no observation to record.
         return
 
-    llm_ttft_ms = llm_ttft_s * 1000.0
-    tts_ttfb_ms = tts_ttfb_s * 1000.0
-    e2e_ms = e2e_s * 1000.0
-    # eou_delay isn't on the assistant report; derive it residually
-    # from the e2e measurement and the two known legs. Never negative.
-    eou_delay_ms = max(0.0, e2e_ms - llm_ttft_ms - tts_ttfb_ms)
+    llm_ttft_ms = llm_ttft_s * 1000.0 if llm_ttft_s is not None else None
+    tts_ttfb_ms = tts_ttfb_s * 1000.0 if tts_ttfb_s is not None else None
+    e2e_ms = e2e_s * 1000.0 if e2e_s is not None else None
 
+    # eou_delay isn't on the assistant report; derive it residually from the
+    # e2e measurement and the two known legs. Only computable when all three
+    # are present — an on_enter greeting has no preceding user turn to anchor
+    # EOU against, so there is no such thing as its EOU delay.
+    eou_delay_ms: float | None = None
+    if e2e_ms is not None and llm_ttft_ms is not None and tts_ttfb_ms is not None:
+        eou_delay_ms = max(0.0, e2e_ms - llm_ttft_ms - tts_ttfb_ms)
+
+    is_partial = (
+        llm_ttft_ms is None or tts_ttfb_ms is None or e2e_ms is None
+    )
+
+    # Check each budget only against a leg we actually measured. A leg we
+    # didn't measure is unknown, not passing.
     violations: list[str] = []
-    if violated("eou_delay", eou_delay_ms):
+    if eou_delay_ms is not None and violated("eou_delay", eou_delay_ms):
         violations.append("eou_delay")
-    if violated("llm_ttft", llm_ttft_ms):
+    if llm_ttft_ms is not None and violated("llm_ttft", llm_ttft_ms):
         violations.append("llm_ttft")
-    if violated("tts_ttfb", tts_ttfb_ms):
+    if tts_ttfb_ms is not None and violated("tts_ttfb", tts_ttfb_ms):
         violations.append("tts_ttfb")
-    if violated("e2e_turn", e2e_ms):
+    if e2e_ms is not None and violated("e2e_turn", e2e_ms):
         violations.append("e2e_turn")
 
     attributes: dict[str, Any] = {
         "session.id": session_id,
         "persona.id": persona_id,
-        "latency.eou_ms": eou_delay_ms,
-        "latency.llm_ttft_ms": llm_ttft_ms,
-        "latency.tts_ttfb_ms": tts_ttfb_ms,
-        "latency.e2e_ms": e2e_ms,
         "latency.budget_violated": bool(violations),
+        # Tag every span so a query can separate complete turns from partial
+        # ones — rather than the old behaviour, where partial turns simply
+        # weren't in the data and nobody could tell they were missing.
+        "latency.partial": is_partial,
         "budget.eou_p95_ms": BUDGETS["eou_delay"].p95_ms,
         "budget.llm_ttft_p95_ms": BUDGETS["llm_ttft"].p95_ms,
         "budget.tts_ttfb_p95_ms": BUDGETS["tts_ttfb"].p95_ms,
         "budget.e2e_p95_ms": BUDGETS["e2e_turn"].p95_ms,
     }
+    # Only set legs we measured. OTel rejects None attribute values, and an
+    # absent attribute reads as "not measured" — which is the truth — whereas
+    # a zero would read as "instantaneous".
+    for key, value in (
+        ("latency.eou_ms", eou_delay_ms),
+        ("latency.llm_ttft_ms", llm_ttft_ms),
+        ("latency.tts_ttfb_ms", tts_ttfb_ms),
+        ("latency.e2e_ms", e2e_ms),
+    ):
+        if value is not None:
+            attributes[key] = value
+
     if violations:
         attributes["latency.budget_violations"] = ",".join(violations)
 
@@ -107,13 +137,16 @@ def emit_turn_latency_span(
     ):
         pass
 
+    def _fmt(v: float | None) -> str:
+        return f"{v:.0f}ms" if v is not None else "n/a"
+
     logger.info(
-        "turn latency persona=%s eou=%.0fms llm.ttft=%.0fms tts.ttfb=%.0fms "
-        "e2e=%.0fms %s",
+        "turn latency persona=%s eou=%s llm.ttft=%s tts.ttfb=%s e2e=%s%s %s",
         persona_id,
-        eou_delay_ms,
-        llm_ttft_ms,
-        tts_ttfb_ms,
-        e2e_ms,
+        _fmt(eou_delay_ms),
+        _fmt(llm_ttft_ms),
+        _fmt(tts_ttfb_ms),
+        _fmt(e2e_ms),
+        " (partial)" if is_partial else "",
         f"VIOLATED({','.join(violations)})" if violations else "OK",
     )

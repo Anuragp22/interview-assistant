@@ -10,10 +10,13 @@
  *
  * Sourcing notes:
  *  - Groq: https://groq.com/pricing/
- *      llama-3.3-70b-versatile: $0.59 / 1M input tokens, $0.79 / 1M output
+ *      openai/gpt-oss-120b: $0.15 / 1M input tokens, $0.75 / 1M output
+ *      (llama-3.3-70b-versatile is decommissioned 2026-08-16; gpt-oss-120b
+ *       is both cheaper and the only Groq tier with strict json_schema)
  *  - ElevenLabs (Creator tier): https://elevenlabs.io/pricing
- *      Turbo v2.5: ~$0.18 / 1k characters synthesized (Creator $22 plan
- *      for 100k chars; cost-per-char on lower plans is higher)
+ *      Flash v2.5: ~$0.18 / 1k characters synthesized (Creator $22 plan
+ *      for 100k chars; cost-per-char on lower plans is higher). Turbo is
+ *      deprecated — ElevenLabs recommends Flash over Turbo in all cases.
  *  - Deepgram Nova-3: https://deepgram.com/pricing
  *      ~$0.0058 / minute streaming transcription
  *  - LiveKit Cloud Build (current plan): $0.005 / participant-minute,
@@ -26,20 +29,20 @@
  * — if you change one, change both, and bump RATES_SOURCED_AT in both.
  */
 
-export const RATES_SOURCED_AT = "2026-05-16" as const;
+export const RATES_SOURCED_AT = "2026-07-14" as const;
 
 export const RATES = {
   groq: {
-    "llama-3.3-70b-versatile": {
-      inputUsdPerMillion: 0.59,
-      outputUsdPerMillion: 0.79,
+    "openai/gpt-oss-120b": {
+      inputUsdPerMillion: 0.15,
+      outputUsdPerMillion: 0.75,
     },
   },
   elevenlabs: {
-    "eleven_turbo_v2_5": {
+    "eleven_flash_v2_5": {
       // Creator tier blended rate. Subscription plans bill in pre-paid
-      // character buckets, so per-char cost varies by plan; this is the
-      // commonly-cited streaming rate for the Turbo model on Creator.
+      // character buckets, so per-char cost varies by plan. Flash and Turbo
+      // are the same price; Flash is simply faster, and Turbo is deprecated.
       usdPerThousandChars: 0.18,
     },
   },
@@ -81,7 +84,7 @@ export function groqUsd(input: {
   outputTokens: number;
   model?: keyof typeof RATES.groq;
 }): number {
-  const r = RATES.groq[input.model ?? "llama-3.3-70b-versatile"];
+  const r = RATES.groq[input.model ?? "openai/gpt-oss-120b"];
   if (!r) return 0;
   return (
     (input.inputTokens * r.inputUsdPerMillion) / 1_000_000 +
@@ -93,7 +96,7 @@ export function ttsUsd(input: {
   charactersCount: number;
   model?: keyof typeof RATES.elevenlabs;
 }): number {
-  const r = RATES.elevenlabs[input.model ?? "eleven_turbo_v2_5"];
+  const r = RATES.elevenlabs[input.model ?? "eleven_flash_v2_5"];
   if (!r) return 0;
   return (input.charactersCount * r.usdPerThousandChars) / 1_000;
 }

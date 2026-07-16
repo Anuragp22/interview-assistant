@@ -38,7 +38,7 @@ export default async function PracticeDashboard() {
 
       {scorePoints.length >= 2 && (
         <div className="card-border p-4">
-          <ScoreSparkline points={scorePoints.map((p) => p.totalScore)} />
+          <ScoreSparkline points={scorePoints.map((p) => p.overallScore)} />
         </div>
       )}
 

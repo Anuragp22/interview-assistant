@@ -96,40 +96,6 @@ export const mappings = {
   'aws amplify': 'amplify',
 };
 
-export const feedbackSchema = z.object({
-  totalScore: z.number(),
-  categoryScores: z.tuple([
-    z.object({
-      name: z.literal('Communication Skills'),
-      score: z.number(),
-      comment: z.string(),
-    }),
-    z.object({
-      name: z.literal('Technical Knowledge'),
-      score: z.number(),
-      comment: z.string(),
-    }),
-    z.object({
-      name: z.literal('Problem Solving'),
-      score: z.number(),
-      comment: z.string(),
-    }),
-    z.object({
-      name: z.literal('Cultural Fit'),
-      score: z.number(),
-      comment: z.string(),
-    }),
-    z.object({
-      name: z.literal('Confidence and Clarity'),
-      score: z.number(),
-      comment: z.string(),
-    }),
-  ]),
-  strengths: z.array(z.string()),
-  areasForImprovement: z.array(z.string()),
-  finalAssessment: z.string(),
-});
-
 export const interviewCovers = [
   '/adobe.png',
   '/amazon.png',
@@ -215,17 +181,54 @@ export const partitionedGroundingSchema = z.object({
   systemDesign: partitionedGroundedBucketSchema,
 });
 
-export const reportSchema = z.object({
-  totalScore: z.number().min(0).max(100),
-  categoryScores: z.array(
-    z.object({
-      name: z.string(),
-      score: z.number().min(0).max(100),
-      comment: z.string(),
-    }),
-  ),
-  strengths: z.array(z.string()).min(1).max(8),
-  areasForImprovement: z.array(z.string()).min(1).max(8),
+// ---------------------------------------------------------------------------
+// Scoring — evidence-first, per-round, 0-5 BARS. See lib/rubric.ts for the
+// anchors and the reasoning behind the scale.
+// ---------------------------------------------------------------------------
+
+/**
+ * One criterion's score.
+ *
+ * FIELD ORDER IS LOAD-BEARING. `evidence` and `rationale` come BEFORE `score`
+ * because structured decoding fills fields in schema order — so the model must
+ * quote the transcript and reason about it before it is allowed to commit to a
+ * number. Put `score` first and you get a number followed by a post-hoc
+ * justification for it, which is a different (and much worse) thing.
+ *
+ * Deliberately no z.record / z.union anywhere in this file: Gemini's structured
+ * output maps through an OpenAPI 3.0 subset that supports neither.
+ */
+export const criterionScoreSchema = z.object({
+  criterionId: z.string(),
+  /** Verbatim quotes from the transcript. Empty ⇒ the score must be 0. */
+  evidence: z.array(z.string()).max(3),
+  rationale: z.string(),
+  score: z.number().int().min(0).max(5),
+});
+
+export const roundScoreSchema = z.object({
+  round: z.enum(["behavioral", "technical", "systemDesign"]),
+  criteria: z.array(criterionScoreSchema).min(1).max(5),
+});
+
+/** Output of the scoring pass. Note: NO recommendation — see below. */
+export const judgeScoresSchema = z.object({
+  rounds: z.array(roundScoreSchema).min(1).max(3),
+  communication: criterionScoreSchema,
+});
+
+/**
+ * Output of the recommendation pass — a SEPARATE call.
+ *
+ * Split from scoring on purpose. Asked for both at once, the model picks a
+ * recommendation early and then bends the per-criterion scores to justify it
+ * (the score becomes a rationalisation of the verdict rather than its basis).
+ * Scoring first, then handing the finished scores to a fresh call, forces the
+ * recommendation to be downstream of the evidence.
+ */
+export const judgeVerdictSchema = z.object({
+  strengths: z.array(z.string()).min(1).max(6),
+  areasForImprovement: z.array(z.string()).min(1).max(6),
   finalAssessment: z.string(),
   recommendation: z.enum([
     "strong-hire",
@@ -236,5 +239,4 @@ export const reportSchema = z.object({
     "inconclusive",
   ]),
   recommendationReasoning: z.string(),
-  rubricCoverage: z.record(z.string(), z.record(z.string(), z.boolean())),
 });

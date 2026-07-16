@@ -17,14 +17,21 @@ the perceived feel of a voice interview far more than mean — a single
 average being 700ms doesn't.
 
 The thresholds below were chosen from production-grade voice-agent
-references (LiveKit's own published numbers, ElevenLabs' turbo latency
-SLOs, Groq's TTFT publications for Llama-3.3-70b) and tightened to what
-we can realistically hit given:
+references (LiveKit's own published numbers, ElevenLabs' latency SLOs,
+Groq's TTFT publications) and tightened to what we can realistically hit
+given the stack in interview_agent.models:
 
   STT:  Deepgram Nova-3 (best-class on-prem WS).
-  LLM:  Groq llama-3.3-70b-versatile (~150-300ms TTFT typical).
-  TTS:  ElevenLabs turbo_v2_5 over multi-stream WebSocket, streaming_latency=3
-        (max optimization without disabling text normalization).
+  LLM:  Groq gpt-oss-120b (~500 tok/s; faster than the llama-3.3-70b this
+        budget was originally calibrated against).
+  TTS:  ElevenLabs Flash v2.5 over multi-stream WebSocket, streaming_latency=3
+        (max optimization without disabling text normalization). Flash
+        replaced the deprecated Turbo line and is materially faster.
+  EOU:  the audio TurnDetector, not a silence timer. Note this changes what
+        eou_delay MEANS: it is no longer "how long we waited on a stopwatch"
+        but "how long the model took to judge the turn finished", and holding
+        the turn open through a candidate's thinking pause is CORRECT
+        behaviour here, not a budget miss.
   Audio in/out: LiveKit WebRTC, ≤50ms each way over reasonable network.
 
 A violation budget of 5% on each leg (i.e., expect 1 in 20 turns to
@@ -63,7 +70,7 @@ LLM_TTFT = LatencyBudget(
     name="llm_ttft",
     p95_ms=500.0,
     reasoning=(
-        "Groq llama-3.3-70b first-token latency. Groq publishes 80-150ms "
+        "Groq gpt-oss-120b first-token latency. Groq publishes 80-150ms "
         "TTFT for warm requests; we budget 500ms p95 to cover cold connects "
         "and rate-limit retries."
     ),
@@ -73,7 +80,7 @@ TTS_TTFB = LatencyBudget(
     name="tts_ttfb",
     p95_ms=500.0,
     reasoning=(
-        "ElevenLabs turbo_v2_5 over multi-stream WebSocket with "
+        "ElevenLabs Flash v2.5 over multi-stream WebSocket with "
         "streaming_latency=3. ElevenLabs SLO for this model is ~200ms; "
         "we budget 500ms p95 to cover WebSocket establishment on cold "
         "context and the occasional reconnect."

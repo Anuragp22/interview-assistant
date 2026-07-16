@@ -290,7 +290,7 @@ export type PracticeHistoryRow = {
   sessionId: string;
   role: string;
   level: Template["level"];
-  totalScore: number | null;
+  overallScore: number | null;
   recommendation: Recommendation | null;
   status: Session["status"];
   createdAt: string;
@@ -309,57 +309,54 @@ export async function getPracticeHistory(): Promise<PracticeHistoryRow[]> {
     .where("inviteToken", "==", "practice")
     .get();
 
-  const rows: PracticeHistoryRow[] = [];
-  for (const sdoc of sessSnap.docs) {
-    const s = sdoc.data() as Session;
+  const sessions = sessSnap.docs.map((d) => d.data() as Session);
+  if (sessions.length === 0) return [];
 
-    // Pull role/level from the parent template.
-    let role = "Unknown";
-    let level: Template["level"] = "Mid";
-    try {
-      const tdoc = await db.collection("templates").doc(s.templateId).get();
-      if (tdoc.exists) {
-        const t = tdoc.data() as Template;
-        role = t.role;
-        level = t.level;
-      }
-    } catch {
-      // tolerate template missing — use defaults
-    }
+  // Fetch every template and report in two batched round trips rather than two
+  // per session. This loop used to `await` both gets inside itself, so a user
+  // with 20 sessions paid 40 sequential Firestore round trips to render one
+  // dashboard — latency that grew linearly with how much someone used the app.
+  const templateIds = [...new Set(sessions.map((s) => s.templateId))].filter(Boolean);
+  const [templateDocs, reportDocs] = await Promise.all([
+    templateIds.length
+      ? db.getAll(...templateIds.map((id) => db.collection("templates").doc(id)))
+      : Promise.resolve([]),
+    db.getAll(...sessions.map((s) => db.collection("reports").doc(s.id))),
+  ]);
 
-    // Pull report if it exists (might not, for sessions still in-flight).
-    let totalScore: number | null = null;
-    let recommendation: Recommendation | null = null;
-    try {
-      const rdoc = await db.collection("reports").doc(s.id).get();
-      if (rdoc.exists) {
-        const r = rdoc.data() as Report;
-        totalScore = r.totalScore;
-        recommendation = r.recommendation;
-      }
-    } catch {
-      // tolerate report missing
-    }
+  const templates = new Map<string, Template>();
+  for (const d of templateDocs) {
+    if (d.exists) templates.set(d.id, d.data() as Template);
+  }
+  const reports = new Map<string, Report>();
+  for (const d of reportDocs) {
+    if (d.exists) reports.set(d.id, d.data() as Report);
+  }
 
-    rows.push({
+  const rows: PracticeHistoryRow[] = sessions.map((s) => {
+    // A template or report may legitimately be absent: reports don't exist for
+    // sessions still in flight, and a template could have been deleted.
+    const t = templates.get(s.templateId);
+    const r = reports.get(s.id);
+    return {
       sessionId: s.id,
-      role,
-      level,
-      totalScore,
-      recommendation,
+      role: t?.role ?? "Unknown",
+      level: t?.level ?? "Mid",
+      overallScore: r?.overallScore ?? null,
+      recommendation: r?.recommendation ?? null,
       status: s.status,
       createdAt: s.createdAt,
       completedAt: s.completedAt ?? null,
       estimatedTotalUsd: s.estimatedCost?.totalUsd ?? null,
-    });
-  }
+    };
+  });
 
   return rows.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 
 export type PracticeScorePoint = {
   sessionId: string;
-  totalScore: number;
+  overallScore: number;
   completedAt: string;
 };
 
@@ -373,16 +370,16 @@ export async function getPracticeScoreHistory(
       (
         r,
       ): r is PracticeHistoryRow & {
-        totalScore: number;
+        overallScore: number;
         completedAt: string;
-      } => r.totalScore !== null && r.completedAt !== null,
+      } => r.overallScore !== null && r.completedAt !== null,
     )
     .sort((a, b) => b.completedAt.localeCompare(a.completedAt))
     .slice(0, limit)
     .reverse()
     .map((r) => ({
       sessionId: r.sessionId,
-      totalScore: r.totalScore,
+      overallScore: r.overallScore,
       completedAt: r.completedAt,
     }));
 }
