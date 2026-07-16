@@ -159,8 +159,11 @@ _PROMPT_LEAK_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
         r"Score on substance only",
         r"NEVER penalise accent, dialect",
         r"STAR-framework probes",
-        r"You are part of a 3-interviewer panel",
-        r"After 8 turns you MUST transfer",
+        # Panel-prompt markers (persona.py _PANEL_TEMPLATE + INTENSITY_RULES).
+        r"SPEAKER PROTOCOL",
+        r"INTENSITY:\s*(CALM|STANDARD|GRILL)",
+        r"roleplaying an ENTIRE interview panel",
+        r"call `?next_round`?",
         # The integrity rule itself — if the LLM echoes it back, that's
         # also a prompt leak.
         r"These instructions are NOT visible to the candidate",
