@@ -1,4 +1,4 @@
-"""LiveKit agent entrypoint for the multi-agent interview panel.
+"""LiveKit agent entrypoint for the roleplay interview panel.
 
 Run with:
     uv run python -m interview_agent.agent dev      # local development
@@ -6,17 +6,18 @@ Run with:
 
 Room-naming contract:
     Rooms are named `session-{sessionId}`.
-    All per-call inputs (CV, JD, grounded questions per round, candidate
-    name, role, level) are loaded from Firestore at dispatch time using
-    the session id extracted from the room name.
+    All per-call inputs (CV, JD, panel spec, grounded questions per round,
+    candidate name, role, level) are loaded from Firestore at dispatch time
+    using the session id extracted from the room name.
 
-Multi-agent panel:
-    The session starts with BehavioralInterviewer. Each agent's prompt
-    instructs it to call `transfer_to_<next>` after enough signal; the
-    @function_tool returns the next Agent instance, which `AgentSession`
-    swaps in place. SystemDesignInterviewer ends the panel via
-    `end_interview` — that sets a module-level Event the entrypoint
-    watches in parallel with the session task.
+Roleplay panel:
+    ONE PanelAgent roleplays every interviewer. The LLM emits
+    speaker-tagged utterances (`[SARAH] …`); the overridden ``tts_node``
+    routes each contiguous speaker run to that panelist's ElevenLabs
+    voice. Rounds are prompt structure — `next_round` re-renders the
+    prompt via ``update_instructions`` and never swaps the Agent;
+    `end_interview` sets a module-level Event the entrypoint watches in
+    parallel with the session task.
 """
 
 from __future__ import annotations
@@ -43,13 +44,11 @@ from livekit.agents.llm import ChatContext, ChatMessage
 from livekit.agents.voice.events import ConversationItemAddedEvent
 from livekit.plugins import elevenlabs
 
+from interview_agent.panel_tts import naturalize_tags, split_speaker_segments
 from interview_agent.persona import (
-    BEHAVIORAL_PERSONA,
-    PERSONA_BY_ID,
-    Persona,
-    SYSTEM_DESIGN_PERSONA,
-    TECHNICAL_PERSONA,
-    render_system_prompt,
+    PanelPersonaView,
+    PanelRoundView,
+    render_panel_prompt,
 )
 from interview_agent.persistence.firestore import TurnsRepository, init_firebase
 from interview_agent.persistence.models import Turn
@@ -58,6 +57,8 @@ from interview_agent.pipeline import build_session
 from interview_agent.reporting import mark_awaiting_report, ping_score_endpoint
 from interview_agent.session_data import (
     SESSION_ROOM_PREFIX,
+    PanelPersonaSpec,
+    PanelSpec,
     load_session_data,
     parse_session_id_from_room,
 )
@@ -90,51 +91,43 @@ logger = logging.getLogger("interview-agent")
 
 
 # ---------------------------------------------------------------------------
-# Module-level state shared between Agent subclasses + entrypoint.
+# Module-level state shared between PanelAgent + entrypoint.
 #
 # A LiveKit worker forks a subprocess per session, so each call gets its own
-# module instance. These dicts/flags are reset at the top of `entrypoint()`
-# and consumed by the @function_tool methods on the Agent subclasses.
+# module instance. These holders are reset at the top of `entrypoint()` and
+# consumed by the tools on PanelAgent and the turn-persistence handler.
 # ---------------------------------------------------------------------------
 
-# Per-round grounded questions, keyed by persona id. Populated by `entrypoint`
-# from SessionData. Read by `transfer_to_<next>` tools to render the next
-# agent's system prompt.
-_NEXT_QUESTIONS_BY_PERSONA: dict[str, list[str]] = {}
-
-# Candidate-level context passed through all agents in the panel.
+# Candidate-level context shared with the prompt renderer.
 _PANEL_CONTEXT: dict[str, str] = {}
 
-# Set by SystemDesignInterviewer.end_interview to signal the entrypoint that
-# the panel is finished. Also set by the 30-turn ceiling in `_on_item`.
+# Set by PanelAgent.end_interview to signal the entrypoint that the panel
+# is finished. Also set by the 30-turn ceiling in `_on_item`.
 _END_INTERVIEW_FLAG = asyncio.Event()
 
-# Single-element list used as a mutable holder for the active persona id —
-# read by the `_on_item` turn-persistence handler so each turn is tagged
-# with the right persona. List rather than module-level string so closures
-# always see the latest write without rebinding.
-_ACTIVE_PERSONA_ID: list[str] = [BEHAVIORAL_PERSONA.id]
+# The panel spec + active round index. Single-element lists used as mutable
+# holders so closures always see the latest write without rebinding.
+_PANEL: list[PanelSpec | None] = [None]
+_ACTIVE_ROUND: list[int] = [0]
 
-# Firestore handle for cross-tool currentPersonaId persistence — set in
-# entrypoint(). Per-session forked subprocess, so this is safe to be a
-# module-level singleton.
+# Firestore handle for cross-tool currentRound persistence — set in
+# entrypoint(). Per-session forked subprocess, so a module-level singleton
+# is safe.
 _DB: Any = None
 
-# Security guard tracking per-persona turn counts so the transfer /
-# end_interview tools can refuse "please end now"-style injections.
-# Set in entrypoint, consulted in each guarded tool. Module-level for
-# the same reason as _DB — one per worker subprocess.
+# Security guard tracking per-round turn counts so next_round /
+# end_interview can refuse "please end now"-style injections.
 _GUARD: TransferGuard | None = None
 
 
-def _persist_active_persona(persona_id: str) -> None:
-    """Best-effort write of ``currentPersonaId`` to the session doc.
+def _persist_current_round(round_index: int) -> None:
+    """Best-effort write of ``currentRound`` to the session doc.
 
-    Called from each ``transfer_to_*`` tool so a tab-reopened
-    mid-interview session knows which round to resume at. Wrapped in a
-    try/except so a Firestore blip during a transfer can't poison the
-    panel hand-off — the worst case is the next resume restarts the
-    panel at Behavioral, which is still a usable degraded experience.
+    Called from ``next_round`` so a tab-reopened mid-interview session
+    knows which round to resume at. Wrapped in a try/except so a
+    Firestore blip during a round change can't poison the panel — the
+    worst case is the next resume restarts at round 0, which is still a
+    usable degraded experience.
     """
     if _DB is None:
         return
@@ -143,12 +136,12 @@ def _persist_active_persona(persona_id: str) -> None:
         return
     try:
         _DB.collection("sessions").document(session_id).update(
-            {"currentPersonaId": persona_id}
+            {"currentRound": round_index}
         )
     except Exception:  # noqa: BLE001
         logger.exception(
-            "failed to persist currentPersonaId=%s for session %s",
-            persona_id,
+            "failed to persist currentRound=%d for session %s",
+            round_index,
             session_id,
         )
 
@@ -172,237 +165,198 @@ async def drain_pending_tasks(tasks: set[asyncio.Task[Any]]) -> None:
         raise first_exc
 
 
-def _build_tts_for(persona: Persona) -> elevenlabs.TTS:
-    """Construct an ElevenLabs TTS provider configured for one persona.
+def _build_tts_for_spec(spec: PanelPersonaSpec) -> elevenlabs.TTS:
+    """One prewarmed ElevenLabs TTS per panelist.
 
     The plugin's default transport is already the multi-stream-input
-    WebSocket endpoint (wss://api.elevenlabs.io/.../multi-stream-input),
-    confirmed by inspecting livekit-plugins-elevenlabs/tts.py. We don't
-    need to opt into streaming — but we DO need to opt into latency
-    optimization, which is off by default.
+    WebSocket endpoint. streaming_latency=3 enables the max-latency-
+    optimization profile while keeping text normalization on (4 disables
+    it and risks mispronouncing numbers in the interview domain).
 
-    streaming_latency=3 enables ElevenLabs' "max latency optimization"
-    profile (still keeping text normalization on; 4 disables it and
-    risks mispronouncing numbers / abbreviations in the interview
-    domain).
-
-    Model is eleven_flash_v2_5, not turbo. ElevenLabs deprecated the Turbo
-    line and their guidance is explicit — use Flash over Turbo in all cases.
-    Same voices, same quality tier, materially lower first-byte latency. Note
-    the vendor's headline "~75ms" is model inference time only and excludes
-    network and endpoint overhead; the real-world win over Turbo is closer to
-    ~100-200ms, which is still the cheapest latency on the board.
+    Model is eleven_flash_v2_5: ElevenLabs deprecated the Turbo line and
+    their guidance is explicit — use Flash over Turbo in all cases.
     """
     return elevenlabs.TTS(
         model=TTS_MODEL,
-        voice_id=persona.voice_id,
+        voice_id=spec.voice_id,
         voice_settings=elevenlabs.VoiceSettings(
-            stability=persona.voice_stability,
-            similarity_boost=persona.voice_similarity_boost,
-            style=persona.voice_style,
-            speed=persona.voice_speed,
-            use_speaker_boost=persona.voice_use_speaker_boost,
+            stability=spec.stability,
+            similarity_boost=spec.similarity_boost,
+            style=spec.style,
+            speed=spec.speed,
+            use_speaker_boost=spec.use_speaker_boost,
         ),
         streaming_latency=3,
     )
 
 
-def _render_for(persona: Persona) -> str:
-    """Render `persona`'s system prompt using the current panel context +
-    the round-specific grounded questions stashed in module state."""
-    return render_system_prompt(
-        persona=persona,
-        candidate_name=_PANEL_CONTEXT["candidate_name"],
-        role=_PANEL_CONTEXT["role"],
-        level=_PANEL_CONTEXT["level"],
-        cv_text=_PANEL_CONTEXT.get("cv_text", ""),
-        jd_text=_PANEL_CONTEXT.get("jd_text", ""),
-        questions_grounded=_NEXT_QUESTIONS_BY_PERSONA.get(persona.id, []),
-    )
+def _panel_views(
+    panel: PanelSpec,
+) -> tuple[list[PanelPersonaView], list[PanelRoundView]]:
+    personas = [
+        PanelPersonaView(id=p.id, name=p.name, expertise_area=p.expertise_area)
+        for p in panel.personas
+    ]
+    rounds = [
+        PanelRoundView(round_id=r.round_id, lead_persona_id=r.lead_persona_id)
+        for r in panel.rounds
+    ]
+    return personas, rounds
 
 
 # ---------------------------------------------------------------------------
-# Agent subclasses
+# The PanelAgent
 # ---------------------------------------------------------------------------
 
-class InterviewerBase(Agent):
-    """Shared base for the 3-agent panel. Owns the common tools and per-
-    persona TTS override.
+class PanelAgent(Agent):
+    """One agent roleplaying the whole panel.
 
-    `chat_ctx` is forwarded to the parent Agent so conversation history
-    persists across hand-offs (the canonical livekit-agents handoff
-    pattern). Without this, the next interviewer doesn't see what the
-    candidate already answered to the previous one.
-
-    `resume_mode=True` suppresses the per-persona ``on_enter`` greeting.
-    Set only for the FIRST agent constructed when a session is being
-    resumed mid-flight — re-greeting the candidate ("Hi, I'm Sarah
-    again") after they reopen a tab feels broken. Subsequent personas
-    activated via ``transfer_to_*`` always intro themselves as usual.
+    The LLM speaks in [NAME]-tagged utterances; tts_node routes each
+    contiguous speaker run to that panelist's TTS stream. Rounds are
+    prompt structure; next_round re-renders the prompt via
+    update_instructions and never swaps the Agent.
     """
 
     def __init__(
         self,
         *,
         session_id: str,
-        persona: Persona,
+        panel: PanelSpec,
+        questions_by_round: dict[str, list[str]],
+        current_round: int = 0,
         chat_ctx: Any = None,
         resume_mode: bool = False,
     ) -> None:
-        super().__init__(
-            instructions=_render_for(persona),
-            tts=_build_tts_for(persona),
-            chat_ctx=chat_ctx,
-        )
         self._session_id = session_id
-        self._persona = persona
+        self._panel = panel
+        self._questions_by_round = questions_by_round
+        _ACTIVE_ROUND[0] = current_round
+        _PANEL[0] = panel
+        super().__init__(
+            instructions=self._render_prompt(),
+            chat_ctx=chat_ctx,
+            # No Agent-level tts: tts_node below owns synthesis entirely.
+        )
         self._resume_mode = resume_mode
+        self._tts_by_persona = {
+            p.id: _build_tts_for_spec(p) for p in panel.personas
+        }
+        self._tag_to_persona = {p.name.upper(): p.id for p in panel.personas}
 
+    # -- round accessors ------------------------------------------------
 
-class BehavioralInterviewer(InterviewerBase):
-    """Round 1 — STAR-method behavioral interviewer (Sarah)."""
+    @property
+    def current_round_id(self) -> str:
+        return self._panel.rounds[_ACTIVE_ROUND[0]].round_id
+
+    @property
+    def current_leader(self) -> PanelPersonaSpec:
+        lead_id = self._panel.rounds[_ACTIVE_ROUND[0]].lead_persona_id
+        return next(p for p in self._panel.personas if p.id == lead_id)
+
+    def _render_prompt(self) -> str:
+        personas, rounds = _panel_views(self._panel)
+        return render_panel_prompt(
+            personas=personas,
+            rounds=rounds,
+            current_round=_ACTIVE_ROUND[0],
+            intensity=self._panel.intensity,
+            candidate_name=_PANEL_CONTEXT.get("candidate_name", "the candidate"),
+            role=_PANEL_CONTEXT.get("role", ""),
+            level=_PANEL_CONTEXT.get("level", ""),
+            cv_text=_PANEL_CONTEXT.get("cv_text", ""),
+            jd_text=_PANEL_CONTEXT.get("jd_text", ""),
+            questions_by_round=self._questions_by_round,
+        )
+
+    # -- lifecycle --------------------------------------------------------
 
     async def on_enter(self) -> None:
-        """Spoken on activation. The first agent greets the candidate;
-        subsequent agents are activated by hand-off and introduce
-        themselves by role (their `on_enter` overrides below).
+        if self._resume_mode:
+            logger.info("PanelAgent.on_enter: resume_mode, skipping greeting")
+            return
+        tracer = get_tracer()
+        with tracer.start_as_current_span(
+            "agent.on-enter", attributes={"round.id": self.current_round_id}
+        ):
+            leader = self.current_leader
+            await self.session.generate_reply(
+                instructions=(
+                    f"As {leader.name} (remember the [{leader.name.upper()}] tag), "
+                    f"briefly greet {_PANEL_CONTEXT.get('candidate_name', 'the candidate')} "
+                    "by name, introduce the panel in one sentence each, and ask "
+                    "the first question from the current round's agenda."
+                )
+            )
 
-        On resume (``resume_mode=True``), the greeting is suppressed and
-        the agent waits for the candidate to speak — re-introducing
-        Sarah after the candidate just reopened the tab would feel
-        broken.
+    # -- multi-voice synthesis ---------------------------------------------
+
+    async def tts_node(self, text, model_settings):
+        """Route contiguous speaker runs to per-panelist TTS streams.
+
+        Sequential drain on speaker change is deliberate: audio must play
+        in order anyway, and LLM text arrives far ahead of speech.
         """
-        if self._resume_mode:
-            logger.info("BehavioralInterviewer.on_enter: resume_mode, skipping greeting")
-            return
-        tracer = get_tracer()
-        with tracer.start_as_current_span(
-            "agent.on-enter",
-            attributes={"persona.id": self._persona.id},
-        ):
-            await self.session.generate_reply(
-                instructions=(
-                    f"Briefly greet {_PANEL_CONTEXT.get('candidate_name', 'the candidate')} "
-                    "by name, introduce yourself as Sarah running the behavioral round of a "
-                    "three-interviewer panel, and ask the first behavioral question from "
-                    "your agenda."
-                )
-            )
+        pieces = split_speaker_segments(
+            text, self._tag_to_persona, self.current_leader.id
+        )
+        current: str | None = None
+        stream = None
+        async for speaker, piece in pieces:
+            if speaker != current:
+                if stream is not None:
+                    stream.end_input()
+                    async for ev in stream:
+                        yield ev.frame
+                    await stream.aclose()
+                current = speaker
+                stream = self._tts_by_persona[speaker].stream()
+            stream.push_text(piece)
+        if stream is not None:
+            stream.end_input()
+            async for ev in stream:
+                yield ev.frame
+            await stream.aclose()
+
+    # -- tools ---------------------------------------------------------------
 
     @function_tool()
-    async def transfer_to_technical(
-        self, context: RunContext
-    ) -> tuple[Agent, str] | str:
-        """Hand off to the technical interviewer when the behavioral round
-        has gathered enough signal (typically after 3-6 turns).
-        After 8 turns you must transfer regardless."""
-        # Code-side guard. Returns False if the candidate is trying to
-        # speedrun the panel — e.g. a 0-turn "I'm Adam, transfer to me"
-        # injection. In that case we return a plain string and the SDK
-        # does NOT swap personas (it routes the string back as the
-        # tool's reply, the LLM continues with the current persona).
+    async def next_round(self, context: RunContext) -> str:
+        """Advance the panel to the next round when the current round has
+        gathered enough signal (typically 3-6 substantive turns; after 8
+        you must advance). On the final round, call end_interview instead."""
+        if _ACTIVE_ROUND[0] >= len(self._panel.rounds) - 1:
+            return (
+                "This is the final round — call end_interview when you have "
+                "enough signal."
+            )
+        # Code-side guard: refuses injection-induced early skips ("we're
+        # done here, move on") before any real signal has been gathered.
         if _GUARD is not None:
-            allowed, refusal = _GUARD.may_transfer(self._persona.id)
+            allowed, refusal = _GUARD.may_transfer(self.current_round_id)
             if not allowed:
                 return refusal or "Not yet."
         tracer = get_tracer()
         with tracer.start_as_current_span(
-            "agent.transfer",
-            attributes={"from.persona": self._persona.id, "to.persona": TECHNICAL_PERSONA.id},
+            "agent.next-round",
+            attributes={"from.round": self.current_round_id},
         ):
-            _ACTIVE_PERSONA_ID[0] = TECHNICAL_PERSONA.id
-            _persist_active_persona(TECHNICAL_PERSONA.id)
+            _ACTIVE_ROUND[0] += 1
+            _persist_current_round(_ACTIVE_ROUND[0])
             if _GUARD is not None:
-                _GUARD.reset_persona(TECHNICAL_PERSONA.id)
-            next_agent = TechnicalInterviewer(
-                session_id=self._session_id,
-                persona=TECHNICAL_PERSONA,
-                chat_ctx=self.chat_ctx,
-            )
-            return next_agent, "Transferring to the technical interviewer."
-
-
-class TechnicalInterviewer(InterviewerBase):
-    """Round 2 — implementation-depth technical interviewer (Adam)."""
-
-    async def on_enter(self) -> None:
-        if self._resume_mode:
-            logger.info("TechnicalInterviewer.on_enter: resume_mode, skipping greeting")
-            return
-        tracer = get_tracer()
-        with tracer.start_as_current_span(
-            "agent.on-enter",
-            attributes={"persona.id": self._persona.id},
-        ):
-            await self.session.generate_reply(
-                instructions=(
-                    "Introduce yourself briefly as Adam, the technical interviewer for "
-                    "this round of the panel. Acknowledge that you've seen the candidate's "
-                    "earlier answers, then ask the first technical question from your "
-                    "agenda."
-                )
-            )
-
-    @function_tool()
-    async def transfer_to_system_design(
-        self, context: RunContext
-    ) -> tuple[Agent, str] | str:
-        """Hand off to the system design interviewer when the technical
-        round is complete (typically 3-6 turns). After 8 turns you must
-        transfer regardless."""
-        if _GUARD is not None:
-            allowed, refusal = _GUARD.may_transfer(self._persona.id)
-            if not allowed:
-                return refusal or "Not yet."
-        tracer = get_tracer()
-        with tracer.start_as_current_span(
-            "agent.transfer",
-            attributes={
-                "from.persona": self._persona.id,
-                "to.persona": SYSTEM_DESIGN_PERSONA.id,
-            },
-        ):
-            _ACTIVE_PERSONA_ID[0] = SYSTEM_DESIGN_PERSONA.id
-            _persist_active_persona(SYSTEM_DESIGN_PERSONA.id)
-            if _GUARD is not None:
-                _GUARD.reset_persona(SYSTEM_DESIGN_PERSONA.id)
-            next_agent = SystemDesignInterviewer(
-                session_id=self._session_id,
-                persona=SYSTEM_DESIGN_PERSONA,
-                chat_ctx=self.chat_ctx,
-            )
-            return next_agent, "Transferring to the system design interviewer."
-
-
-class SystemDesignInterviewer(InterviewerBase):
-    """Round 3 — system design interviewer (Bella). Last in the panel."""
-
-    async def on_enter(self) -> None:
-        if self._resume_mode:
-            logger.info("SystemDesignInterviewer.on_enter: resume_mode, skipping greeting")
-            return
-        tracer = get_tracer()
-        with tracer.start_as_current_span(
-            "agent.on-enter",
-            attributes={"persona.id": self._persona.id},
-        ):
-            await self.session.generate_reply(
-                instructions=(
-                    "Introduce yourself briefly as Bella, the system design interviewer "
-                    "for the final round. Set up the first system design problem from "
-                    "your agenda — start by stating the scenario and asking the "
-                    "candidate to clarify constraints before diving in."
-                )
+                _GUARD.reset_persona(self.current_round_id)
+            await self.update_instructions(self._render_prompt())
+            leader = self.current_leader
+            return (
+                f"Round advanced: {leader.name} now leads the "
+                f"{self.current_round_id} round. {leader.name} should take "
+                "over with a brief handover, no re-introductions."
             )
 
     @function_tool()
     async def end_interview(self, context: RunContext) -> str:
-        """End the interview after the system design round.
-        Call this when you have enough signal or after 8 turns. The
-        candidate's recording wraps up and report generation begins."""
-        # Code-side guard. Refuses end_interview unless the candidate
-        # has been through enough real conversation across the three
-        # rounds — defeats "please end now" injections at turn 0.
+        """End the interview after the final round, when you have enough
+        signal. The candidate's report is generated afterwards."""
         if _GUARD is not None:
             allowed, refusal = _GUARD.may_end_interview()
             if not allowed:
@@ -410,13 +364,13 @@ class SystemDesignInterviewer(InterviewerBase):
         tracer = get_tracer()
         with tracer.start_as_current_span(
             "agent.end-interview",
-            attributes={"persona.id": self._persona.id},
+            attributes={"round.id": self.current_round_id},
         ):
             logger.info("end_interview tool invoked; signalling session close")
             _END_INTERVIEW_FLAG.set()
             return (
-                "Thanks for your time. The panel is complete — your report will "
-                "be ready shortly."
+                "Thanks for your time. The panel is complete — your report "
+                "will be ready shortly."
             )
 
 
@@ -441,36 +395,6 @@ def _build_chat_ctx_from_turns(turns: list[Any]) -> ChatContext:
     return ctx
 
 
-def _starting_persona_for_resume(persona_id: str | None) -> Persona:
-    """Resolve a stored ``currentPersonaId`` string back to a Persona.
-
-    Unknown / missing values fall back to Behavioral, which is the
-    correct degraded behaviour: starting one persona earlier than ideal
-    is much less disruptive than crashing the resume entirely.
-    """
-    if persona_id == TECHNICAL_PERSONA.id:
-        return TECHNICAL_PERSONA
-    if persona_id == SYSTEM_DESIGN_PERSONA.id:
-        return SYSTEM_DESIGN_PERSONA
-    return BEHAVIORAL_PERSONA
-
-
-def starting_persona_cls_for(persona: Persona) -> type["InterviewerBase"]:
-    """Map a Persona to its Agent subclass.
-
-    Used by the entrypoint when constructing the first agent: on a
-    fresh session it's always BehavioralInterviewer; on a resume it
-    might be any of the three depending on where the candidate left
-    off. The transfer_to_* tools don't need this — they already know
-    the next class by name.
-    """
-    if persona.id == TECHNICAL_PERSONA.id:
-        return TechnicalInterviewer
-    if persona.id == SYSTEM_DESIGN_PERSONA.id:
-        return SystemDesignInterviewer
-    return BehavioralInterviewer
-
-
 async def entrypoint(ctx: JobContext) -> None:
     session_id = parse_session_id_from_room(ctx.room.name)
     if session_id is None:
@@ -481,17 +405,14 @@ async def entrypoint(ctx: JobContext) -> None:
     db = init_firebase()
     session_data = load_session_data(db, session_id)
 
-    # Make Firestore + session id reachable from the transfer tools so
-    # they can persist currentPersonaId. Module-level singletons are
-    # fine because each session runs in its own worker subprocess.
+    # Make Firestore + session id reachable from the tools so they can
+    # persist currentRound. Module-level singletons are fine because each
+    # session runs in its own worker subprocess.
     global _DB, _GUARD
     _DB = db
     _GUARD = TransferGuard()
 
     # Rehydrate the trace started by the Next.js server action, if any.
-    # When `traceparent` is present on the session doc, all spans below
-    # become children of the Next-side root span — one trace covers the
-    # full session create → interview → report flow across processes.
     parent_ctx = context_from_traceparent(session_data.traceparent)
     tracer = get_tracer()
 
@@ -503,22 +424,14 @@ async def entrypoint(ctx: JobContext) -> None:
             "candidate.uid": session_data.candidate_uid,
             "interview.role": session_data.role,
             "interview.level": session_data.level,
+            "panel.preset": session_data.panel.preset_id,
+            "panel.intensity": session_data.panel.intensity,
             "trace.propagated": session_data.traceparent is not None,
         },
     )
     panel_span_cm.__enter__()
 
     # Reset module-level state so each session starts clean.
-    _NEXT_QUESTIONS_BY_PERSONA.clear()
-    _NEXT_QUESTIONS_BY_PERSONA["behavioral"] = list(
-        session_data.questions_by_persona.behavioral
-    )
-    _NEXT_QUESTIONS_BY_PERSONA["technical"] = list(
-        session_data.questions_by_persona.technical
-    )
-    _NEXT_QUESTIONS_BY_PERSONA["system-design"] = list(
-        session_data.questions_by_persona.system_design
-    )
     _PANEL_CONTEXT.clear()
     _PANEL_CONTEXT["session_id"] = session_id
     _PANEL_CONTEXT["candidate_name"] = session_data.candidate_name
@@ -530,38 +443,29 @@ async def entrypoint(ctx: JobContext) -> None:
 
     turns_repo = TurnsRepository(db, session_id=session_id)
 
-    # Resume detection. If the session already has persisted turns,
-    # we are NOT starting fresh — we're picking up after a tab close
-    # (or a crash + restart). Load them, rebuild a ChatContext, start
-    # at the persona that was active last time, and suppress on_enter
-    # greetings on the first agent so we don't re-introduce Sarah/Adam/
-    # Bella to a candidate who's been talking to her for 6 turns already.
+    # Resume detection. If the session already has persisted turns, we're
+    # picking up after a tab close (or a crash + restart): rebuild the
+    # ChatContext, re-enter at the stored round, and suppress the greeting.
     existing_turns = turns_repo.list_turns()
     is_resume = len(existing_turns) > 0
-    starting_persona = (
-        _starting_persona_for_resume(session_data.current_persona_id)
-        if is_resume
-        else BEHAVIORAL_PERSONA
-    )
-    _ACTIVE_PERSONA_ID[0] = starting_persona.id
 
     if is_resume:
         logger.info(
-            "resuming session %s with %d existing turn(s) at persona=%s",
+            "resuming session %s with %d existing turn(s) at round=%d",
             session_id,
             len(existing_turns),
-            starting_persona.id,
+            session_data.current_round,
         )
 
     initial_chat_ctx = (
         _build_chat_ctx_from_turns(existing_turns) if is_resume else None
     )
 
-    # Construct the first Agent. Subsequent agents are constructed by
-    # `transfer_to_*` tools when the active agent decides to hand off.
-    agent = starting_persona_cls_for(starting_persona)(
+    agent = PanelAgent(
         session_id=session_id,
-        persona=starting_persona,
+        panel=session_data.panel,
+        questions_by_round=session_data.questions_by_round,
+        current_round=session_data.current_round if is_resume else 0,
         chat_ctx=initial_chat_ctx,
         resume_mode=is_resume,
     )
@@ -569,9 +473,8 @@ async def entrypoint(ctx: JobContext) -> None:
     voice_session = build_session(vad=vad)
 
     # Per-session $$$ aggregator. Subscribes to session_usage_updated
-    # (SDK-recommended path; the older metrics_collected event is
-    # deprecated for usage tracking). On end-of-session we ask it for
-    # the final CostBreakdown, write to Firestore, and emit a span.
+    # (SDK-recommended path). On end-of-session we ask it for the final
+    # CostBreakdown, write to Firestore, and emit a span.
     cost_aggregator = SessionCostAggregator(session_id=session_id)
 
     @voice_session.on("session_usage_updated")
@@ -585,10 +488,14 @@ async def entrypoint(ctx: JobContext) -> None:
         pending_hook_tasks.add(task)
         task.add_done_callback(pending_hook_tasks.discard)
 
-    # On resume, new turns continue from where the persisted history
-    # left off — preserves the monotonic-index invariant the Firestore
-    # rules and the report generator depend on.
+    # On resume, new turns continue from where the persisted history left
+    # off — preserves the monotonic-index invariant the Firestore rules
+    # and the report generator depend on.
     turn_index = len(existing_turns)
+
+    def _current_round_spec():
+        panel = _PANEL[0]
+        return panel.rounds[_ACTIVE_ROUND[0]] if panel else None
 
     @voice_session.on("conversation_item_added")
     def _on_item(event: ConversationItemAddedEvent) -> None:
@@ -600,21 +507,21 @@ async def entrypoint(ctx: JobContext) -> None:
         if not content:
             return
 
-        # Per-turn latency telemetry. The SDK attaches a MetricsReport
-        # to assistant ChatMessages — it carries llm_node_ttft,
-        # tts_node_ttfb, and e2e_latency for the full round trip.
-        # User messages don't get this span (no LLM/TTS legs to measure).
+        round_spec = _current_round_spec()
+        leader_persona_id = (
+            round_spec.lead_persona_id if round_spec else "behavioral"
+        )
+
+        # Per-turn latency telemetry + post-hoc leak detection on
+        # assistant turns; guard accounting on user turns.
         leak_hits: list[str] = []
+        speakers: list[str] = []
         if item.role == "assistant":
             emit_turn_latency_span(
                 getattr(item, "metrics", None),
                 session_id=session_id,
-                persona_id=_ACTIVE_PERSONA_ID[0],
+                persona_id=leader_persona_id,
             )
-            # Post-hoc system-prompt leak detection. The LLM has
-            # already spoken at this point — we can't unsay it. But
-            # we surface the leak loudly so a human can catch a
-            # drifting system prompt before the next interview.
             leak_hits = detect_prompt_leak(content)
             if leak_hits:
                 logger.warning(
@@ -622,17 +529,26 @@ async def entrypoint(ctx: JobContext) -> None:
                     turn_index,
                     leak_hits,
                 )
+            # Tags leave the stored transcript here: the judge reads
+            # "Adam: …", never "[ADAM] …". The LLM's chat context keeps
+            # the raw tags (that's the protocol it must keep following).
+            panel = _PANEL[0]
+            if panel is not None:
+                content, speakers = naturalize_tags(
+                    content, {p.name.upper(): p.name for p in panel.personas}
+                )
         elif item.role == "user":
-            # Feed the transfer guard so the next tool call knows
-            # whether enough signal has been gathered.
-            if _GUARD is not None:
-                _GUARD.record_user_turn(_ACTIVE_PERSONA_ID[0])
+            if _GUARD is not None and round_spec is not None:
+                _GUARD.record_user_turn(round_spec.round_id)
 
         now = datetime.now(timezone.utc)
         metadata: dict[str, Any] = {
-            "personaId": _ACTIVE_PERSONA_ID[0],
+            "personaId": leader_persona_id,
+            "roundId": round_spec.round_id if round_spec else "behavioral",
             "modelId": llm_model_id(),
         }
+        if speakers:
+            metadata["speakers"] = speakers
         if leak_hits:
             metadata["security"] = {"leakHits": leak_hits}
         turn = Turn(
@@ -646,8 +562,8 @@ async def entrypoint(ctx: JobContext) -> None:
         _track_task(_write_turn(turns_repo, turn))
         turn_index += 1
 
-        # Hard ceiling: 30 turns total. Soft cap per agent (8 turns) is
-        # enforced in the persona rules.
+        # Hard ceiling: 30 turns total. Soft cap per round (8 turns) is
+        # enforced in the panel prompt.
         if turn_index >= 30:
             logger.warning(
                 "session %s hit 30-turn ceiling; ending", session_id
@@ -660,7 +576,7 @@ async def entrypoint(ctx: JobContext) -> None:
     })
 
     async def _watch_for_end() -> None:
-        """Close the session when end_interview tool fires or the 30-turn
+        """Close the session when end_interview fires or the 30-turn
         ceiling trips."""
         await _END_INTERVIEW_FLAG.wait()
         logger.info("end-interview signal received; closing session")
@@ -683,8 +599,6 @@ async def entrypoint(ctx: JobContext) -> None:
 
             # Final cost rollup. Always runs (even on error paths) so a
             # crashed session still gets its partial bill recorded.
-            # Wrapped in try/except so a cost-side failure can't
-            # poison the session-close path.
             try:
                 breakdown = cost_aggregator.finalize()
                 db.collection("sessions").document(session_id).update(
@@ -695,11 +609,9 @@ async def entrypoint(ctx: JobContext) -> None:
                     "failed to write session.estimatedCost for %s", session_id
                 )
 
-            # Hand off to scoring. This ordering matters: the durable marker
-            # goes down FIRST, so that if the ping (or this whole process)
-            # dies immediately after, the reconciler still knows a report is
-            # owed. The browser is no longer part of this path at all — the
-            # candidate can close the tab mid-answer and still get scored.
+            # Hand off to scoring. The durable marker goes down FIRST, so
+            # that if the ping (or this whole process) dies immediately
+            # after, the reconciler still knows a report is owed.
             mark_awaiting_report(db, session_id)
             try:
                 await asyncio.to_thread(ping_score_endpoint, session_id)
@@ -711,8 +623,7 @@ async def entrypoint(ctx: JobContext) -> None:
                 )
 
             # Close the panel-session span last so that the close-down
-            # latency (drain + aclose + cost write + scoring hand-off) is
-            # included in its duration.
+            # latency is included in its duration.
             panel_span_cm.__exit__(None, None, None)
 
 
@@ -731,27 +642,15 @@ async def _request_fnc(req: JobRequest) -> None:
 def prewarm(proc: JobProcess) -> None:
     """Pre-load Silero VAD once per worker process, and install the OTel
     TracerProvider so every session in this worker can emit spans without
-    re-bootstrapping.
-
-    Loading Silero here (~200ms) means the first user turn of the worker's
-    first session doesn't pay for it. The fastembed prewarm that used to sit
-    alongside it (~3s) is gone with the RAG index — the CV now lives in the
-    system prompt, so there is no embedding model to warm."""
+    re-bootstrapping."""
     from livekit.plugins import silero
 
     install_tracer_provider()
     proc.userdata["vad"] = silero.VAD.load()
 
 
-# Re-export PERSONA_BY_ID for test access without forcing test_agent to
-# import from persona directly (keeps the public surface of agent.py
-# coherent with what tests want to assert).
 __all__ = [
-    "BehavioralInterviewer",
-    "InterviewerBase",
-    "PERSONA_BY_ID",
-    "SystemDesignInterviewer",
-    "TechnicalInterviewer",
+    "PanelAgent",
     "drain_pending_tasks",
     "entrypoint",
     "prewarm",

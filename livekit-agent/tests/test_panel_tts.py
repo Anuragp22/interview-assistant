@@ -6,7 +6,7 @@ voice, which breaks the entire illusion the product sells.
 """
 from __future__ import annotations
 
-import asyncio
+import pytest
 
 from interview_agent.panel_tts import naturalize_tags, split_speaker_segments
 
@@ -38,14 +38,16 @@ def _joined(pairs: list[tuple[str, str]]) -> list[tuple[str, str]]:
     return merged
 
 
-def test_single_speaker_tag_is_stripped_and_routed():
-    pairs = asyncio.run(_collect(["[ADAM] Why Redis and not Postgres?"]))
+@pytest.mark.asyncio
+async def test_single_speaker_tag_is_stripped_and_routed():
+    pairs = await _collect(["[ADAM] Why Redis and not Postgres?"])
     assert _joined(pairs) == [("technical", " Why Redis and not Postgres?")]
 
 
-def test_speaker_switch_mid_stream():
-    pairs = asyncio.run(
-        _collect(["[SARAH] Thanks. ", "[ADAM] Before you move on — why Redis?"])
+@pytest.mark.asyncio
+async def test_speaker_switch_mid_stream():
+    pairs = await _collect(
+        ["[SARAH] Thanks. ", "[ADAM] Before you move on — why Redis?"]
     )
     assert _joined(pairs) == [
         ("behavioral", " Thanks. "),
@@ -53,25 +55,29 @@ def test_speaker_switch_mid_stream():
     ]
 
 
-def test_tag_split_across_chunks():
-    pairs = asyncio.run(_collect(["[AD", "AM] split tag"]))
+@pytest.mark.asyncio
+async def test_tag_split_across_chunks():
+    pairs = await _collect(["[AD", "AM] split tag"])
     assert _joined(pairs) == [("technical", " split tag")]
 
 
-def test_untagged_text_uses_default_speaker():
-    pairs = asyncio.run(_collect(["No tag at all."]))
+@pytest.mark.asyncio
+async def test_untagged_text_uses_default_speaker():
+    pairs = await _collect(["No tag at all."])
     assert _joined(pairs) == [("behavioral", "No tag at all.")]
 
 
-def test_unknown_tag_passes_through_verbatim():
+@pytest.mark.asyncio
+async def test_unknown_tag_passes_through_verbatim():
     # "[REDIS]" is not a speaker — it must be SPOKEN, not swallowed.
-    pairs = asyncio.run(_collect(["[SARAH] Tell me about [REDIS] caching."]))
+    pairs = await _collect(["[SARAH] Tell me about [REDIS] caching."])
     merged = _joined(pairs)
     assert merged == [("behavioral", " Tell me about [REDIS] caching.")]
 
 
-def test_bracket_never_closed_is_flushed_as_text():
-    pairs = asyncio.run(_collect(["[unclosed bracket but the turn just ends"]))
+@pytest.mark.asyncio
+async def test_bracket_never_closed_is_flushed_as_text():
+    pairs = await _collect(["[unclosed bracket but the turn just ends"])
     merged = _joined(pairs)
     assert merged[0][0] == "behavioral"
     assert "[unclosed bracket" in merged[0][1]
