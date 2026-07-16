@@ -3,13 +3,10 @@
 Usage:
   uv run python -m interview_agent.security.run_audit
   uv run python -m interview_agent.security.run_audit --smoke
-  uv run python -m interview_agent.security.run_audit --persona=technical
   uv run python -m interview_agent.security.run_audit --baseline   # record fresh
 
-  --smoke           Run one case per category against the default
-                    persona only. ~$0.01 of Groq spend, ~10 seconds.
-  --persona=NAME    Limit to a single persona (behavioral / technical /
-                    system-design). Default: all three.
+  --smoke           Run one case per category. ~$0.01 of Groq spend,
+                    ~10 seconds.
   --max-cases=N     Run the first N cases per category. Useful in CI
                     when budget matters.
   --baseline        Record the current pass set to baseline.json
@@ -20,8 +17,9 @@ Usage:
   --json=PATH       Write full per-case results to a JSON file for
                     downstream analysis.
 
-Cost: full run is 50 cases × 3 personas = 150 Groq calls. At ~$0.001
-per call, that's ~$0.15 per audit. Smoke is roughly $0.01.
+Cost: full run is 54 cases, one Groq call each (the PanelAgent is one
+prompt at grill intensity — there is no per-persona prompt any more).
+At ~$0.001 per call, that's ~$0.05 per audit. Smoke is roughly $0.01.
 
 Exit codes:
   0  All cases pass (or --baseline mode).
@@ -48,7 +46,6 @@ from interview_agent.security.runner import (
     DEFAULT_MODEL,
     CaseResult,
     _make_client,
-    all_personas,
     run_case,
 )
 
@@ -145,7 +142,7 @@ def print_failures(results: list[CaseResult]) -> None:
         print()
         print(
             color(
-                f"  ✗ [{r.persona_id}] {r.case_id}  ({r.category})",
+                f"  ✗ [{r.intensity}] {r.case_id}  ({r.category})",
                 RED,
             )
         )
@@ -166,8 +163,8 @@ def print_failures(results: list[CaseResult]) -> None:
 
 
 def _result_key(r: CaseResult) -> str:
-    """Stable key combining case + persona — what we baseline against."""
-    return f"{r.persona_id}::{r.case_id}"
+    """Stable key combining case + audit intensity — the baseline unit."""
+    return f"{r.intensity}::{r.case_id}"
 
 
 def load_baseline() -> set[str] | None:
@@ -205,46 +202,27 @@ def detect_regressions(
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Prompt-injection audit")
-    p.add_argument("--smoke", action="store_true", help="One case per category, default persona only")
-    p.add_argument(
-        "--persona",
-        choices=["behavioral", "technical", "system-design"],
-        default=None,
-        help="Limit to one persona (default: all)",
-    )
+    p.add_argument("--smoke", action="store_true", help="One case per category")
     p.add_argument("--max-cases", type=int, default=None, help="First N cases per category")
     p.add_argument("--baseline", action="store_true", help="Record baseline instead of compare")
     p.add_argument("--json", type=str, default=None, help="Write full per-case results to PATH")
     return p.parse_args()
 
 
-def select_cases(args: argparse.Namespace) -> list[tuple]:
-    """Build the (case, persona) cartesian product to run, respecting flags."""
+def select_cases(args: argparse.Namespace) -> list:
+    """Pick the cases to run, respecting flags. One run per case — the
+    PanelAgent is a single prompt, so there is no per-persona axis."""
     by_cat = cases_by_category()
 
     if args.smoke:
         # One case per category.
-        cases = [v[0] for v in by_cat.values()]
-    elif args.max_cases is not None:
+        return [v[0] for v in by_cat.values()]
+    if args.max_cases is not None:
         cases = []
         for v in by_cat.values():
             cases.extend(v[: args.max_cases])
-    else:
-        cases = list(CASES)
-
-    if args.smoke or args.persona == "behavioral":
-        from interview_agent.persona import BEHAVIORAL_PERSONA
-        personas = (BEHAVIORAL_PERSONA,)
-    elif args.persona == "technical":
-        from interview_agent.persona import TECHNICAL_PERSONA
-        personas = (TECHNICAL_PERSONA,)
-    elif args.persona == "system-design":
-        from interview_agent.persona import SYSTEM_DESIGN_PERSONA
-        personas = (SYSTEM_DESIGN_PERSONA,)
-    else:
-        personas = all_personas()
-
-    return [(c, p) for p in personas for c in cases]
+        return cases
+    return list(CASES)
 
 
 def main() -> int:
@@ -261,11 +239,11 @@ def main() -> int:
         )
         return 2
 
-    pairs = select_cases(args)
+    cases = select_cases(args)
     print(
         color(
-            f"Running {len(pairs)} adversarial case×persona combination(s) "
-            f"against {DEFAULT_MODEL}",
+            f"Running {len(cases)} adversarial case(s) against the panel "
+            f"prompt on {DEFAULT_MODEL}",
             BOLD,
         )
     )
@@ -274,9 +252,9 @@ def main() -> int:
     results: list[CaseResult] = []
     t0 = time.time()
 
-    for i, (case, persona) in enumerate(pairs, 1):
+    for i, case in enumerate(cases, 1):
         try:
-            r = run_case(client, case, persona)
+            r = run_case(client, case)
         except Exception as e:  # noqa: BLE001
             # An exception during the model call means we can't trust
             # the result either way. Mark as failed with the error so
@@ -286,7 +264,7 @@ def main() -> int:
             r = CaseResult(
                 case_id=case.id,
                 category=case.category,
-                persona_id=persona.id,
+                intensity="grill",
                 passed=False,
                 failures=(f"runner exception: {e}",),
                 response_text="",
@@ -294,7 +272,7 @@ def main() -> int:
             )
         results.append(r)
         glyph = color("✓", GREEN) if r.passed else color("✗", RED)
-        print(f"  [{i:>3}/{len(pairs)}] {glyph} {persona.id:<14} {case.id}")
+        print(f"  [{i:>3}/{len(cases)}] {glyph} {case.id}")
 
     elapsed = time.time() - t0
     print()
