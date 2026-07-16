@@ -22,6 +22,12 @@ const MAX_PER_RUN = 10;
 /**
  * Report-generation reconciler. Runs on a cron (see vercel.json).
  *
+ * Schedule is daily, not every-few-minutes: Vercel Hobby rejects sub-daily
+ * cron expressions AT DEPLOY TIME (the deployment fails outright, it isn't
+ * throttled). The reconciler is the safety net behind the agent's direct
+ * scoring ping, so daily is an acceptable worst-case for a missed report.
+ * On a Pro account this can be tightened to something like "*/10 * * * *".
+ *
  * This is what makes "the report will be generated" a guarantee instead of a
  * hope. The agent pings the score endpoint directly for speed, but that ping can
  * fail — the worker can be OOM-killed between writing awaiting-report and
