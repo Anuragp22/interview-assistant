@@ -40,8 +40,9 @@ import { FIXTURES } from "./fixtures";
 import { scoreFixture } from "./scorers";
 import type { FixtureScore, PartitionedGrounded, RunReport } from "./types";
 
-import { generatePartitionedQuestions } from "@/lib/llm/groq-template";
-import { regroundPartitionedQuestions } from "@/lib/llm/groq-grounding";
+import { generateRoundQuestions } from "@/lib/llm/groq-template";
+import { regroundRoundQuestions } from "@/lib/llm/groq-grounding";
+import { PRESETS } from "@/lib/presets";
 
 // ---------------------------------------------------------------------------
 // CLI
@@ -97,28 +98,40 @@ function pct(x: number): string {
 async function runFixture(
   fixture: (typeof FIXTURES)[number],
 ): Promise<FixtureScore> {
-  const phase1 = await generatePartitionedQuestions({
+  // The eval gates the SHIPPING generation path: the big-tech preset's
+  // rounds, through the same round-keyed functions production calls.
+  const rounds = PRESETS["big-tech-swe"].rounds.map((r) => ({
+    roundId: r.roundId,
+    generationFocus: r.generationFocus,
+  }));
+
+  const phase1 = await generateRoundQuestions({
     role: fixture.role,
     level: fixture.level,
     jobDescription: fixture.jobDescription,
+    rounds,
   });
 
-  const phase2 = await regroundPartitionedQuestions({
-    questionsByPersona: {
-      behavioral: phase1.behavioral.questions,
-      technical: phase1.technical.questions,
-      systemDesign: phase1.systemDesign.questions,
-    },
-    rubricsByPersona: {
-      behavioral: phase1.behavioral.rubrics,
-      technical: phase1.technical.rubrics,
-      systemDesign: phase1.systemDesign.rubrics,
-    },
+  const phase2 = await regroundRoundQuestions({
+    questionsByRound: Object.fromEntries(
+      rounds.map((r) => [r.roundId, phase1[r.roundId].questions]),
+    ),
+    rubricsByRound: Object.fromEntries(
+      rounds.map((r) => [r.roundId, phase1[r.roundId].rubrics]),
+    ),
+    rounds,
     jobDescription: fixture.jobDescription,
     cvText: fixture.cvText,
   });
 
-  return scoreFixture(fixture.id, phase2 as PartitionedGrounded, fixture.cvText);
+  // The eval rounds are exactly the big-tech three, so the round-keyed
+  // result satisfies PartitionedGrounded's fixed keys at runtime; the
+  // compiler can't see that through the index signature.
+  return scoreFixture(
+    fixture.id,
+    phase2 as unknown as PartitionedGrounded,
+    fixture.cvText,
+  );
 }
 
 // ---------------------------------------------------------------------------

@@ -7,8 +7,13 @@ import { randomBytes } from "crypto";
 
 import { auth, db } from "@/firebase/admin";
 import { extractResumeText, CvParseError } from "@/lib/cv-parse";
-import { generatePartitionedQuestions } from "@/lib/llm/groq-template";
-import { regroundPartitionedQuestions } from "@/lib/llm/groq-grounding";
+import { generateRoundQuestions } from "@/lib/llm/groq-template";
+import { regroundRoundQuestions } from "@/lib/llm/groq-grounding";
+import {
+  type Intensity,
+  type PresetId,
+  PRESETS,
+} from "@/lib/presets";
 import { traced, currentTraceparent } from "@/lib/tracing";
 
 const SESSION_COOKIE = "session";
@@ -108,10 +113,19 @@ export async function getSavedCv(): Promise<UserCv | null> {
 // Practice session creation + history
 // ──────────────────────────────────────────────────────────────────────
 
+/**
+ * Below this many characters (~600 tokens at ~4 chars/token) the CV is too
+ * thin to reground against — rewriting questions against 300 words of CV
+ * fabricates specificity. A full resume measures ~1,300 tokens.
+ */
+const CV_TOKEN_FLOOR_CHARS = 2_400;
+
 export async function createPracticeSession(input: {
   role: string;
   level: "Junior" | "Mid" | "Senior" | "Staff";
   jobDescription: string;
+  presetId: PresetId;
+  intensity: Intensity;
   // If provided, replace the saved CV with this file before grounding.
   // If absent, the user MUST already have a saved CV.
   newCv?: {
@@ -122,11 +136,21 @@ export async function createPracticeSession(input: {
 }): Promise<ActionResult<{ sessionId: string }>> {
   return traced(
     "practice.create-session",
-    { "interview.role": input.role, "interview.level": input.level },
+    {
+      "interview.role": input.role,
+      "interview.level": input.level,
+      "panel.preset": input.presetId,
+      "panel.intensity": input.intensity,
+    },
     async (rootSpan) => {
       try {
         const uid = await requireUid();
         rootSpan.setAttribute("user.id", uid);
+
+        const preset = PRESETS[input.presetId];
+        if (!preset) {
+          return { success: false, message: "Unknown panel preset." };
+        }
 
         // 1. Ensure we have a CV. Replace if a new one was provided.
         if (input.newCv) {
@@ -142,33 +166,32 @@ export async function createPracticeSession(input: {
         }
         rootSpan.setAttribute("cv.length", cv.extractedText.length);
 
-        // 2. Phase 1 — partitioned questions/rubrics across 3 personas.
+        // 2. Phase 1 — questions/rubrics per preset round.
         //    AI SDK experimental_telemetry emits the actual gen_ai.* span
-        //    inside generatePartitionedQuestions — this wrapper just gives
-        //    us our own application-level marker.
+        //    inside generateRoundQuestions — this wrapper just gives us
+        //    our own application-level marker.
         const phase1 = await traced(
           "phase1.generate-template",
           {},
           () =>
-            generatePartitionedQuestions({
+            generateRoundQuestions({
               role: input.role,
               level: input.level,
               jobDescription: input.jobDescription,
+              rounds: preset.rounds.map((r) => ({
+                roundId: r.roundId,
+                generationFocus: r.generationFocus,
+              })),
             }),
         );
 
-        // Flat concatenation for the template doc and the report generator,
-        // which still walks the full transcript holistically.
-        const flatQuestionsBase = [
-          ...phase1.behavioral.questions,
-          ...phase1.technical.questions,
-          ...phase1.systemDesign.questions,
-        ];
-        const flatRubricsBase = [
-          ...phase1.behavioral.rubrics,
-          ...phase1.technical.rubrics,
-          ...phase1.systemDesign.rubrics,
-        ];
+        // Flat concatenation for the template doc, which keeps a
+        // panel-agnostic view of the question bank.
+        const roundIds = preset.rounds.map((r) => r.roundId);
+        const flatQuestionsBase = roundIds.flatMap(
+          (rid) => phase1[rid].questions,
+        );
+        const flatRubricsBase = roundIds.flatMap((rid) => phase1[rid].rubrics);
 
         // 3. Create the template doc (hrUid = owner).
         const tref = db.collection("templates").doc();
@@ -192,42 +215,54 @@ export async function createPracticeSession(input: {
             }),
         );
 
-        // 4. Phase 2 — partitioned reground against the CV.
-        const phase2 = await traced(
-          "phase2.reground-against-cv",
-          {},
-          () =>
-            regroundPartitionedQuestions({
-              questionsByPersona: {
-                behavioral: phase1.behavioral.questions,
-                technical: phase1.technical.questions,
-                systemDesign: phase1.systemDesign.questions,
-              },
-              rubricsByPersona: {
-                behavioral: phase1.behavioral.rubrics,
-                technical: phase1.technical.rubrics,
-                systemDesign: phase1.systemDesign.rubrics,
-              },
-              jobDescription: input.jobDescription,
-              cvText: cv.extractedText,
-            }),
+        // 4. Phase 2 — reground against the CV, UNLESS the CV is too thin.
+        //    A JD-grounded base question is the right question for a thin
+        //    CV; rewriting it against 300 words fabricates specificity the
+        //    interview then confidently probes.
+        const cvIsThin = cv.extractedText.length < CV_TOKEN_FLOOR_CHARS;
+        rootSpan.setAttribute("cv.thin", cvIsThin);
+
+        const phase2 = cvIsThin
+          ? Object.fromEntries(
+              roundIds.map((rid) => [
+                rid,
+                {
+                  questionsGrounded: phase1[rid].questions,
+                  rubricsGrounded: phase1[rid].rubrics as RubricGrounded[],
+                },
+              ]),
+            )
+          : await traced(
+              "phase2.reground-against-cv",
+              {},
+              () =>
+                regroundRoundQuestions({
+                  questionsByRound: Object.fromEntries(
+                    roundIds.map((rid) => [rid, phase1[rid].questions]),
+                  ),
+                  rubricsByRound: Object.fromEntries(
+                    roundIds.map((rid) => [rid, phase1[rid].rubrics]),
+                  ),
+                  rounds: preset.rounds.map((r) => ({
+                    roundId: r.roundId,
+                    generationFocus: r.generationFocus,
+                  })),
+                  jobDescription: input.jobDescription,
+                  cvText: cv.extractedText,
+                }),
+            );
+
+        const flatQuestionsGrounded = roundIds.flatMap(
+          (rid) => phase2[rid].questionsGrounded,
+        );
+        const flatRubricsGrounded = roundIds.flatMap(
+          (rid) => phase2[rid].rubricsGrounded,
         );
 
-        const flatQuestionsGrounded = [
-          ...phase2.behavioral.questionsGrounded,
-          ...phase2.technical.questionsGrounded,
-          ...phase2.systemDesign.questionsGrounded,
-        ];
-        const flatRubricsGrounded = [
-          ...phase2.behavioral.rubricsGrounded,
-          ...phase2.technical.rubricsGrounded,
-          ...phase2.systemDesign.rubricsGrounded,
-        ];
-
-        // 5. Create the session doc with BOTH partitioned and flat shapes.
-        //    The Python agent reads questionsByPersona; the report generator
-        //    reads the flat versions. inviteToken="practice" sentinel marks
-        //    practice-origin sessions for the dashboard filter.
+        // 5. Create the session doc. The Python agent reads the panel spec
+        //    + questionsByRound; the report generator reads panel.rounds.
+        //    inviteToken="practice" sentinel marks practice-origin sessions
+        //    for the dashboard filter.
         //
         //    The `traceparent` field carries the W3C trace context for
         //    *this* server action's span — the Python agent reads it on
@@ -253,16 +288,25 @@ export async function createPracticeSession(input: {
               cvExtractedText: cv.extractedText,
               questionsGrounded: flatQuestionsGrounded,
               rubricsGrounded: flatRubricsGrounded,
-              questionsByPersona: {
-                behavioral: phase2.behavioral.questionsGrounded,
-                technical: phase2.technical.questionsGrounded,
-                systemDesign: phase2.systemDesign.questionsGrounded,
+              questionsByRound: Object.fromEntries(
+                roundIds.map((rid) => [rid, phase2[rid].questionsGrounded]),
+              ),
+              rubricsByRound: Object.fromEntries(
+                roundIds.map((rid) => [rid, phase2[rid].rubricsGrounded]),
+              ),
+              // The full panel spec, written verbatim from lib/presets.ts —
+              // the Python agent reads only this doc, so TS stays the single
+              // source of truth. generationFocus is generation-time-only.
+              panel: {
+                presetId: preset.id,
+                intensity: input.intensity,
+                personas: preset.personas,
+                rounds: preset.rounds.map(({ roundId, leadPersonaId }) => ({
+                  roundId,
+                  leadPersonaId,
+                })),
               },
-              rubricsByPersona: {
-                behavioral: phase2.behavioral.rubricsGrounded,
-                technical: phase2.technical.rubricsGrounded,
-                systemDesign: phase2.systemDesign.rubricsGrounded,
-              },
+              grounding: (cvIsThin ? "jd-only" : "cv") as "jd-only" | "cv",
               status: "awaiting-call" as const,
               livekitRoomName: `session-${sref.id}`,
               ...(traceparent ? { traceparent } : {}),
@@ -291,7 +335,12 @@ export type PracticeHistoryRow = {
   role: string;
   level: Template["level"];
   overallScore: number | null;
+  /** "Clear the bar" verdict; null while unscored or on legacy reports. */
+  barVerdict: "advance" | "not-yet" | null;
+  /** LEGACY: pre-bar-verdict reports only. */
   recommendation: Recommendation | null;
+  presetId: PresetId;
+  intensity: Intensity;
   status: Session["status"];
   createdAt: string;
   completedAt: string | null;
@@ -343,7 +392,12 @@ export async function getPracticeHistory(): Promise<PracticeHistoryRow[]> {
       role: t?.role ?? "Unknown",
       level: t?.level ?? "Mid",
       overallScore: r?.overallScore ?? null,
+      barVerdict: r?.barVerdict ?? null,
       recommendation: r?.recommendation ?? null,
+      // Legacy sessions predate presets; they ran the fixed relay, which
+      // the big-tech preset at calm intensity reproduces.
+      presetId: s.panel?.presetId ?? "big-tech-swe",
+      intensity: s.panel?.intensity ?? "calm",
       status: s.status,
       createdAt: s.createdAt,
       completedAt: s.completedAt ?? null,

@@ -158,28 +158,40 @@ export const groundingSchema = z.object({
   rubricsGrounded: z.array(rubricGroundedSchema).min(5).max(12),
 });
 
-// Multi-agent panel: one bucket = questions + base rubrics for one persona.
-const partitionedBucketSchema = z.object({
+// ---------------------------------------------------------------------------
+// Preset-round question generation — dynamic-key schemas.
+//
+// Presets have different round sets ("ownership" + "technical" vs the classic
+// three), so the generation schema is BUILT per call from the preset's round
+// ids. z.object(Object.fromEntries(...)) yields concrete keys at request
+// time, which Groq's strict json_schema decoding accepts — this is not
+// z.record (which it doesn't).
+//
+// These live here (not in lib/llm/*) because those modules are "use server",
+// which forbids non-async exports.
+// ---------------------------------------------------------------------------
+
+const roundBucketSchema = z.object({
   questions: z.array(z.string()).min(2).max(5),
   rubrics: z.array(rubricBaseSchema).min(2).max(5),
 });
 
-export const partitionedTemplateSchema = z.object({
-  behavioral: partitionedBucketSchema,
-  technical: partitionedBucketSchema,
-  systemDesign: partitionedBucketSchema,
-});
+export function roundsTemplateSchema(roundIds: string[]) {
+  return z.object(
+    Object.fromEntries(roundIds.map((id) => [id, roundBucketSchema])),
+  );
+}
 
-const partitionedGroundedBucketSchema = z.object({
+const roundGroundedBucketSchema = z.object({
   questionsGrounded: z.array(z.string()).min(2).max(5),
   rubricsGrounded: z.array(rubricGroundedSchema).min(2).max(5),
 });
 
-export const partitionedGroundingSchema = z.object({
-  behavioral: partitionedGroundedBucketSchema,
-  technical: partitionedGroundedBucketSchema,
-  systemDesign: partitionedGroundedBucketSchema,
-});
+export function roundsGroundingSchema(roundIds: string[]) {
+  return z.object(
+    Object.fromEntries(roundIds.map((id) => [id, roundGroundedBucketSchema])),
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Scoring — evidence-first, per-round, 0-5 BARS. See lib/rubric.ts for the

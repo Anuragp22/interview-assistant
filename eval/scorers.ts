@@ -15,7 +15,10 @@
  *    still matches a CV that says "Razorpay (2021-present): ... search".
  */
 
-import { partitionedGroundingSchema } from "@/constants";
+import { roundsGroundingSchema } from "@/constants";
+
+/** The big-tech loop's rounds — the shape every eval fixture exercises. */
+const EVAL_ROUND_IDS = ["behavioral", "technical", "systemDesign"];
 
 import type {
   FixtureScore,
@@ -284,7 +287,7 @@ export function scoreHallucinationGuard(
 export function scoreSchemaPass(
   grounded: unknown,
 ): { pass: boolean; error?: string } {
-  const result = partitionedGroundingSchema.safeParse(grounded);
+  const result = roundsGroundingSchema(EVAL_ROUND_IDS).safeParse(grounded);
   if (result.success) return { pass: true };
   return {
     pass: false,

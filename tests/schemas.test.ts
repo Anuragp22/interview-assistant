@@ -1,14 +1,20 @@
 import { describe, it, expect } from "vitest";
 
 import {
-  partitionedTemplateSchema,
-  partitionedGroundingSchema,
+  roundsTemplateSchema,
+  roundsGroundingSchema,
   judgeScoresSchema,
   judgeVerdictSchema,
   rubricBaseSchema,
 } from "@/constants";
 
-describe("partitionedTemplateSchema", () => {
+// The big-tech loop — the shape these fixtures exercise. The builders are
+// preset-agnostic; question-gen.test.ts covers other round sets.
+const THREE_ROUNDS = ["behavioral", "technical", "systemDesign"];
+const partitionedTemplateSchema = roundsTemplateSchema(THREE_ROUNDS);
+const partitionedGroundingSchema = roundsGroundingSchema(THREE_ROUNDS);
+
+describe("roundsTemplateSchema (three-round panel)", () => {
   const validBucket = {
     questions: ["q1", "q2", "q3"],
     rubrics: [
@@ -83,7 +89,7 @@ describe("partitionedTemplateSchema", () => {
   });
 });
 
-describe("partitionedGroundingSchema", () => {
+describe("roundsGroundingSchema (three-round panel)", () => {
   const validGroundedBucket = {
     questionsGrounded: ["q1", "q2", "q3"],
     rubricsGrounded: [
