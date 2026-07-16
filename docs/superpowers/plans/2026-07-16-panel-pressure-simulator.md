@@ -1,7 +1,5 @@
 # Panel-Pressure Simulator Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
-
 **Goal:** Replace the three-agent relay with one `PanelAgent` that roleplays a multi-voice
 interview panel, add an intensity dial (calm/standard/grill), a 3-preset library, a
 "clear the bar" verdict, and a beat-the-panel dashboard loop.
@@ -28,9 +26,7 @@ Groq gpt-oss-120b, Firestore.
 - Model ids come only from `livekit-agent/src/interview_agent/models.py` and `lib/judge.ts`/`lib/groq.ts`.
 - Legacy sessions (docs with `questionsByPersona`, `currentPersonaId`, reports with `recommendation`) must still load, resume, and render.
 - Python tests run from `livekit-agent/`: `uv run pytest -q`. Web: `npm test`, `npx tsc --noEmit`.
-- Commit after every task with the trailer:
-  `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>` and
-  `Claude-Session: https://claude.ai/code/session_01Bcw3d12dE4gqAv2tzPDFy2`.
+- Commit after every task; plain conventional-commit messages, no trailers.
 
 ---
 
