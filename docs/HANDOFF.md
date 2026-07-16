@@ -148,9 +148,17 @@ Everything above rests on unit tests, type checks, and vendor docs.
 
 # PART 2 — THE OPEN QUESTIONS
 
-Nothing below is decided. Some of it questions work that is already built.
+**Update 2026-07-16: the questions below were answered and built** — see the
+answer notes under each heading and the design spec at
+docs/superpowers/specs/2026-07-16-panel-pressure-simulator-design.md. The original
+reasoning is preserved because it documents WHY each decision fell the way it
+did.
+
+Nothing below was decided when first written. Some of it questions work that is already built.
 
 ## Why three agents at all?
+
+> *Answered 2026-07-16: wrong question — the product needs three INTERVIEWERS, not three agents. One PanelAgent roleplays the panel. See docs/superpowers/specs/2026-07-16-panel-pressure-simulator-design.md.*
 
 The honest case against, stated as strongly as possible:
 
@@ -176,6 +184,8 @@ If the answer is "cut it," a lot of complexity goes with it. If the answer is
 "keep it," the next question gets sharper.
 
 ## It is a relay, not a panel
+
+> *Answered 2026-07-16: built option 1 — one agent roleplaying the panel with per-utterance TTS voice routing, plus an intensity dial (Calm/Standard/Grill) governing an interjection budget.*
 
 "Panel" implies people in a room together. What exists is three interviews back
 to back. Sarah leaves before Adam arrives. They never interact. The candidate
@@ -209,6 +219,8 @@ empirical question nobody has asked.
 
 ## Why is a prep tool emitting "no-hire"?
 
+> *Answered 2026-07-16: it isn't any more. The verdict is "clear the bar" (advance | not-yet) + the one highest-leverage fix. All scoring rigour survived; only the vocabulary died.*
+
 The report currently ends with
 `recommendation: strong-hire | hire | lean-hire | lean-no-hire | no-hire | inconclusive`.
 
@@ -235,6 +247,8 @@ still misleads someone about their own weaknesses.
 
 ## Should the user choose their panel?
 
+> *Answered 2026-07-16: preset library (big-tech-swe / startup-generalist / new-grad-swe). Users pick context, never rubric content.*
+
 Fixed today: Behavioral → Technical → System Design. That's a generic FAANG loop.
 It is wrong for a startup interview, a data role, a PM role, a new grad, an SRE.
 
@@ -253,6 +267,8 @@ isn't the mechanism — it's:
   grad") beat free configuration?
 
 ## What is the loop?
+
+> *Answered 2026-07-16: beat the panel — bar-clearance tracked per preset×intensity, rematch links to the next heat. The sparkline is gone.*
 
 Nobody has articulated why someone comes back a second time.
 

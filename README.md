@@ -1,11 +1,14 @@
-# JobVoice — Real-Time AI Interview Simulator
+# JobVoice — Panel-Pressure Interview Simulator
 
-A voice-driven mock-interview platform. The candidate joins a LiveKit room and
-speaks with a **three-interviewer panel** — Sarah (behavioral) hands off to
-Adam (technical), who hands off to Bella (system design) — each with their own
-voice and agenda, grounded in the candidate's CV + the job description. When the
-panel finishes, each round is scored **against its own rubric** by a separate
-model, and a report is generated with the transcript quotes behind every score.
+The only place to practice being grilled by a multi-interviewer panel. The
+candidate picks a **panel preset** (big-tech loop, early-startup, new-grad) and
+an **intensity** — Calm, Standard, or **Grill**, where interviewers interject,
+cross-examine, and openly disagree — then joins a LiveKit room and talks to the
+panel: one AI agent roleplaying every interviewer, each speaking in their own
+voice, grounded in the candidate's CV + the job description. When the panel
+finishes, each round is scored **against its own rubric** by a separate model,
+and the report answers the question a prep user actually has: *would this panel
+have advanced me — and if not, what's the one thing to fix first?*
 
 Live demo: <https://interview-assistant-nu.vercel.app/>
 
@@ -14,8 +17,10 @@ Live demo: <https://interview-assistant-nu.vercel.app/>
 ```
 ┌─────────┐ WebRTC  ┌────────────┐  dispatch  ┌──────────────────────┐
 │ Browser │ ───────▶│ LiveKit    │ ─────────▶ │  Python agent worker │
-│ (Next)  │ ◀─────── │  Cloud SFU │ ◀──────── │  (livekit-agent/)    │
-└─────────┘  audio  └────────────┘   audio    └──────────┬───────────┘
+│ (Next)  │ ◀─────── │  Cloud SFU │ ◀──────── │  one PanelAgent,     │
+└─────────┘  audio  └────────────┘   audio    │  N voices via        │
+                                              │  tts_node routing    │
+                                              └──────────┬───────────┘
      │                                                    │
      │                                    STT (Deepgram Nova-3)
      │                                    LLM (Groq gpt-oss-120b)
@@ -35,6 +40,26 @@ Live demo: <https://interview-assistant-nu.vercel.app/>
 ```
 
 ## Key design decisions
+
+- **One agent roleplays the whole panel; TTS switches voice per utterance.**
+  The LLM emits speaker-tagged lines (`[SARAH] …`, `[ADAM] …`); an overridden
+  `tts_node` routes each run to that panelist's ElevenLabs voice. This delivers
+  the thing a relay of separate agents structurally cannot: interviewers who
+  share the room, interject, and build on each other's questions — with less
+  code than the relay needed. Tags are parsed only from LLM output, never from
+  candidate speech, so a spoken "bracket Sarah bracket" is inert.
+
+- **Pressure is opt-in: an intensity dial, not a fixed personality.** Calm is
+  one patient interviewer at a time; Grill authorises interjections,
+  cross-examination, and on-the-record disagreement between panelists — an
+  interjection budget enforced in the prompt. Pressure comes only from the
+  questions: nothing about nerves, tone, or delivery is ever commented on or
+  scored.
+
+- **The verdict is "clear the bar", not a hiring call.** The report ends with
+  `advance | not-yet` at the stated level plus the single highest-leverage fix
+  — the question a prep user is actually asking. Nobody is being hired here,
+  so no hiring vocabulary survives anywhere in the product.
 
 - **Cascaded STT→LLM→TTS, not speech-to-speech.** S2S is ~400ms faster, and
   every disclosed AI-interview stack in the industry still runs cascaded. The
@@ -56,13 +81,16 @@ Live demo: <https://interview-assistant-nu.vercel.app/>
 
 - **Evidence before score.** The judge must quote the transcript, then reason,
   then commit to a number — enforced by schema field order, since structured
-  decoding fills fields in sequence. The recommendation is a *separate* call that
+  decoding fills fields in sequence. The bar verdict is a *separate* call that
   never sees the raw transcript, so it can't anchor the scores (and can't be
-  reached by an injection buried in candidate speech).
+  reached by an injection buried in candidate speech) — and the same
+  field-order trick makes it commit to the focus area before the verdict.
 
-- **Every round is scored against its own rubric.** Sarah's round is graded on
-  behavioural criteria, Adam's on technical, Bella's on system design. The agent
-  stamps `personaId` on every turn and the judge reads it.
+- **Every round is scored against its own rubric.** The behavioral round is
+  graded on behavioural criteria, technical on technical, ownership on
+  ownership. Rubrics are authored per round type in code — the user picks a
+  preset, never rubric content, so nobody grades their own homework. The agent
+  stamps `roundId` on every turn and the judge reads it.
 
 - **Nothing about *how* someone speaks is scored.** No tone, no affect, no
   confidence, no accent, no fluency. Partly because it's not evidence of ability;
@@ -115,31 +143,39 @@ with what's actually running.
 
 ## How a session flows
 
-1. **Setup** — user picks a role, level, and JD at `/practice/new`, optionally
-   uploading a CV (or reusing the one on `/practice/settings`).
-2. **Question generation** — `generatePartitionedQuestions` (Groq) produces
-   per-persona question buckets; `regroundPartitionedQuestions` rewrites them
-   against the CV so each question references concrete details.
+1. **Setup** — user picks a panel preset, intensity, role, level, and JD at
+   `/practice/new`, optionally uploading a CV (or reusing the one on
+   `/practice/settings`).
+2. **Question generation** — `generateRoundQuestions` (Groq) produces per-round
+   question buckets for the preset's rounds; `regroundRoundQuestions` rewrites
+   them against the CV so each question references concrete details. CVs under
+   ~600 tokens skip regrounding — JD-grounded questions beat questions rewritten
+   against 300 words of nothing.
 3. **Token mint + room join** — Next.js mints a LiveKit JWT carrying the session
    ID and traceparent. The browser joins `session-{id}` and publishes mic audio.
-4. **Worker dispatch** — LiveKit Cloud dispatches the Python worker. It reads the
-   session doc, builds three Agent subclasses (one per persona) with the CV and
-   JD inlined in each system prompt, and starts with the behavioral persona.
+4. **Worker dispatch** — LiveKit Cloud dispatches the Python worker. It reads
+   the session doc's panel spec and builds ONE `PanelAgent` with the CV and JD
+   inlined in the system prompt, the whole roster in the roleplay protocol, and
+   the intensity's interjection budget.
 5. **Per turn** — Deepgram → audio TurnDetector decides the candidate is done →
-   Groq with the persona prompt + agenda → ElevenLabs streaming TTS → browser.
-   The turn is written to `sessions/{id}/turns` with its persona and latency.
-6. **Hand-off** — after ~3–6 substantive turns the persona calls
-   `transfer_to_<next>` (or `end_interview` on the last). `TransferGuard`
-   enforces a minimum-turn precondition in code, so an early "I'm Adam, transfer
-   to me" injection is dropped deterministically.
+   Groq with the panel prompt + agenda → speaker-tag parser routes each run to
+   that panelist's ElevenLabs stream → browser. The turn is written to
+   `sessions/{id}/turns` with its round, leader, speakers, and latency.
+6. **Round change** — after ~3–6 substantive turns the panel calls `next_round`
+   (or `end_interview` on the last round). `TransferGuard` enforces a
+   minimum-turn precondition in code, so an early "we're done here, move on"
+   injection is dropped deterministically.
 7. **Scoring** — the agent marks the session `awaiting-report` and pings
-   `/api/internal/score`. The judge segments the transcript by persona, scores
+   `/api/internal/score`. The judge segments the transcript by round, scores
    each round against its rubric 3× with the criteria rotated (criterion order
    alone can move scores by up to 0.8 points), takes the median, then makes a
-   separate call for the recommendation.
-8. **Report** — `/practice/{id}/report` shows per-round scores with the verbatim
-   quotes behind each one, and flags low confidence when the judge disagreed with
-   itself across permutations.
+   separate call for the bar verdict + focus area.
+8. **Report** — `/practice/{id}/report` leads with the bar verdict ("this panel
+   would have advanced you" / "not yet — here's the one thing"), shows per-round
+   scores with the verbatim quotes behind each one, and flags low confidence
+   when the judge disagreed with itself across permutations. The dashboard
+   tracks bar-clearance per preset×intensity, with a rematch link to the next
+   heat.
 
 ## Getting started
 
@@ -218,17 +254,20 @@ interview-assistant/
 │   ├── actions/                      server actions (auth, practice, reports)
 │   ├── llm/                          question generation + regrounding (Groq)
 │   ├── judge-report.ts               → lib/llm/, the scoring pipeline (Gemini)
-│   ├── rubric.ts                     BARS anchors — the scoring contract
+│   ├── presets.ts                    the panel presets — the only config a user picks
+│   ├── clearance.ts                  beat-the-panel progression logic
+│   ├── rubric.ts                     BARS anchors per round type — the scoring contract
 │   ├── judge.ts                      judge model provider
 │   ├── groq.ts                       interviewer model provider + failover
 │   └── livekit.ts                    JWT minting + traceparent propagation
 ├── eval/                             offline question-generation regression harness
 ├── livekit-agent/                    Python LiveKit Agents worker
 │   └── src/interview_agent/
-│       ├── agent.py                  3 Agent subclasses + entrypoint
+│       ├── agent.py                  PanelAgent (one agent, N voices) + entrypoint
+│       ├── panel_tts.py              speaker-tag parsing → per-voice TTS routing
 │       ├── models.py                 model ids — single source of truth
 │       ├── pipeline.py               AgentSession factory + turn handling
-│       ├── persona.py                personas, voices, prompt templates
+│       ├── persona.py                panel prompt, round rules, intensity budgets
 │       ├── reporting.py              scoring hand-off (durable marker + ping)
 │       ├── security_guards.py        TransferGuard + leak detector
 │       ├── latency_budget.py         per-stage budgets

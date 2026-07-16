@@ -27,7 +27,7 @@
 | **Report** | The post-call scored evaluation (`reports/{sessionId}`): scores, strengths, recommendation, rubric coverage. |
 | **Feedback** | The **legacy** equivalent of a report from the old single-agent flow (`feedback/{id}`) - distinct from Report. |
 | **Practice mode** | Self-serve flow where one user is both candidate and template owner; sessions tagged `inviteToken: "practice"`. |
-| **Recommendation** | The hire verdict enum: `strong-hire \| hire \| lean-hire \| lean-no-hire \| no-hire \| inconclusive` (`constants/index.ts` reportSchema). |
+| **Bar verdict** | The report's terminal call: `advance \| not-yet` at the stated level, plus a focus area (`constants/index.ts` judgeVerdictSchema). Not a hiring decision — this is a prep tool. |
 
 ## Grounding & question generation
 
