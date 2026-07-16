@@ -13,7 +13,7 @@ import {
   type Criterion,
   PERSONA_TO_ROUND,
   ROUND_CRITERIA,
-  ROUND_IDS,
+  LEGACY_ROUND_IDS,
   ROUND_LABELS,
   ROUND_WEIGHTS,
   type RoundId,
@@ -209,7 +209,7 @@ async function scoreOnce(input: {
   rounds: Record<RoundId, JudgeTurn[]>;
   rotation: number;
 }): Promise<Record<string, { evidence: string[]; rationale: string; score: number }>> {
-  const roundBlocks = ROUND_IDS.map((rid) => {
+  const roundBlocks = LEGACY_ROUND_IDS.map((rid) => {
     const criteria = rotate(ROUND_CRITERIA[rid], input.rotation);
     return (
       `### Round: ${ROUND_LABELS[rid]} (round id: ${rid})\n\n` +
@@ -321,7 +321,7 @@ export async function judgeInterview(input: {
   );
 
   const allCriteria: Criterion[] = [
-    ...ROUND_IDS.flatMap((r) => ROUND_CRITERIA[r]),
+    ...LEGACY_ROUND_IDS.flatMap((r) => ROUND_CRITERIA[r]),
     COMMUNICATION_CRITERION,
   ];
 
@@ -355,7 +355,7 @@ export async function judgeInterview(input: {
     });
   }
 
-  const scoredRounds: ScoredRound[] = ROUND_IDS.map((rid) => {
+  const scoredRounds: ScoredRound[] = LEGACY_ROUND_IDS.map((rid) => {
     const criteria = ROUND_CRITERIA[rid].map(
       (c) =>
         consolidated.get(c.id) ?? {
@@ -374,7 +374,7 @@ export async function judgeInterview(input: {
   const communication = consolidated.get(COMMUNICATION_CRITERION.id)!;
 
   const weightSum =
-    ROUND_IDS.reduce((s, r) => s + ROUND_WEIGHTS[r], 0) + COMMUNICATION_WEIGHT;
+    LEGACY_ROUND_IDS.reduce((s, r) => s + ROUND_WEIGHTS[r], 0) + COMMUNICATION_WEIGHT;
   const overallScore =
     (scoredRounds.reduce((s, r) => s + r.roundScore * ROUND_WEIGHTS[r.round], 0) +
       communication.score * COMMUNICATION_WEIGHT) /

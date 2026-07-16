@@ -31,7 +31,12 @@
  *    rate are never scored, and the judge is told so explicitly.
  */
 
-export type RoundId = "behavioral" | "technical" | "systemDesign";
+export type RoundId =
+  | "behavioral"
+  | "technical"
+  | "systemDesign"
+  | "ownership"
+  | "fundamentals";
 
 export interface Criterion {
   /** Stable machine id — used as the schema key and the report key. */
@@ -198,6 +203,104 @@ const SYSTEM_DESIGN_CRITERIA: Criterion[] = [
 ];
 
 // ---------------------------------------------------------------------------
+// Round — Ownership (startup-generalist preset; led by the founder persona)
+// ---------------------------------------------------------------------------
+
+const OWNERSHIP_CRITERIA: Criterion[] = [
+  {
+    id: "personalAgency",
+    label: "Personal Agency",
+    definition:
+      "Whether the candidate initiated and drove work themselves when nobody assigned it, versus executing what was handed down.",
+    anchors: [
+      SCORE_0_NO_EVIDENCE,
+      "Every example describes assigned work executed as specified; asked what they initiated, nothing surfaces.",
+      "Claims initiative, but probing shows the direction was set by someone else and they filled in steps.",
+      "One clear case of spotting a problem and acting on it without being asked, though scope is small.",
+      "Repeatedly identifies problems and acts without a mandate, and can explain how they got others to go along.",
+      "Initiated consequential work against ambiguity or mild resistance, can name the trade-off of acting without cover, and owns a case where the initiative was wrong.",
+    ],
+  },
+  {
+    id: "ambiguityNavigation",
+    label: "Navigating Ambiguity",
+    definition:
+      "How the candidate operates when requirements, priorities, or ownership are unclear — the default condition at an early startup.",
+    anchors: [
+      SCORE_0_NO_EVIDENCE,
+      "Describes ambiguity only as an obstacle that blocked them until someone resolved it.",
+      "Handles ambiguity by picking an interpretation silently; no evidence of testing it against anyone.",
+      "Makes a reasonable assumption, states it, and proceeds — but does not close the loop when reality disagrees.",
+      "Scopes the unknowns explicitly, makes a defensible call, and describes correcting course when new information arrived.",
+      "Turns ambiguity into an explicit, cheap experiment or decision framework, and can articulate what they deliberately chose NOT to resolve.",
+    ],
+  },
+  {
+    id: "scrappyExecution",
+    label: "Scrappy Execution",
+    definition:
+      "Whether the candidate ships working things with limited time, tooling, and permission — and knows what corners they cut.",
+    anchors: [
+      SCORE_0_NO_EVIDENCE,
+      "Descriptions of work stop at plans and processes; nothing concrete demonstrably shipped.",
+      "Shipped, but cannot say what was deliberately cut or why — corner-cutting was accidental.",
+      "Shipped something real under constraint, and can name at least one deliberate scope cut.",
+      "Shipped under real constraint, names the cuts AND the debt they created, and how it was tracked or repaid.",
+      "Repeatedly ships under constraint with explicit cut/keep reasoning, and can name a case where they refused to cut something and why that was right.",
+    ],
+  },
+];
+
+// ---------------------------------------------------------------------------
+// Round — Fundamentals (new-grad preset)
+// ---------------------------------------------------------------------------
+
+const FUNDAMENTALS_CRITERIA: Criterion[] = [
+  {
+    id: "conceptualUnderstanding",
+    label: "Conceptual Understanding",
+    definition:
+      "Whether core CS concepts (data structures, memory, concurrency basics) are understood as mechanisms, not vocabulary.",
+    anchors: [
+      SCORE_0_NO_EVIDENCE,
+      "Uses terms without being able to say what they mean; the first 'what does that actually do' stalls.",
+      "Defines concepts correctly but cannot apply them: given a scenario, the definition doesn't connect.",
+      "Explains the common case correctly and applies it to a straightforward scenario.",
+      "Explains mechanism and applies it to unfamiliar scenarios; knows the boundaries of the common case.",
+      "Explains mechanism, applies it to novel scenarios, and can say WHY the concept is designed that way or when it breaks down.",
+    ],
+  },
+  {
+    id: "problemDecomposition",
+    label: "Problem Decomposition",
+    definition:
+      "Whether the candidate breaks an unfamiliar problem into parts before solving, and works through them out loud.",
+    anchors: [
+      SCORE_0_NO_EVIDENCE,
+      "Jumps to a memorised answer or freezes; no visible decomposition either way.",
+      "Starts solving the middle of the problem; the parts never connect into an approach.",
+      "Identifies the main subproblems, though ordering or one dependency is off and needs a nudge.",
+      "Cleanly decomposes, states the plan, and executes it; recovers from a wrong branch on their own.",
+      "Decomposes, states the plan AND its riskiest assumption first, and adapts the plan visibly when a step falsifies it.",
+    ],
+  },
+  {
+    id: "learningSignal",
+    label: "Learning Signal",
+    definition:
+      "Evidence the candidate learns fast from projects, coursework, and mistakes — the thing a thin CV is actually hiding.",
+    anchors: [
+      SCORE_0_NO_EVIDENCE,
+      "Projects are described only by their titles or tech lists; asked what they learned, nothing specific.",
+      "Names a lesson, but it is generic ('communication matters') and unconnected to anything that happened.",
+      "Connects one concrete mistake or surprise to a specific change in how they work.",
+      "Multiple concrete learn-and-apply loops, including one where they sought out what they didn't know.",
+      "Learn-and-apply loops are the visible pattern of every story, including one self-driven deep dive they can teach back on the spot.",
+    ],
+  },
+];
+
+// ---------------------------------------------------------------------------
 // Cross-cutting — scored once across the whole interview
 // ---------------------------------------------------------------------------
 
@@ -224,12 +327,16 @@ export const ROUND_CRITERIA: Record<RoundId, Criterion[]> = {
   behavioral: BEHAVIORAL_CRITERIA,
   technical: TECHNICAL_CRITERIA,
   systemDesign: SYSTEM_DESIGN_CRITERIA,
+  ownership: OWNERSHIP_CRITERIA,
+  fundamentals: FUNDAMENTALS_CRITERIA,
 };
 
 export const ROUND_LABELS: Record<RoundId, string> = {
   behavioral: "Behavioural",
   technical: "Technical",
   systemDesign: "System Design",
+  ownership: "Ownership",
+  fundamentals: "Fundamentals",
 };
 
 /** Persona id (as written on each turn by the agent) → round id. */
@@ -240,7 +347,16 @@ export const PERSONA_TO_ROUND: Record<string, RoundId> = {
   systemDesign: "systemDesign",
 };
 
-export const ROUND_IDS: RoundId[] = ["behavioral", "technical", "systemDesign"];
+/**
+ * The fixed pre-preset loop (Sarah → Adam → Bella). Judge fallback only:
+ * sessions created before the preset rollout have no panel spec, and their
+ * reports are scored against this ordering.
+ */
+export const LEGACY_ROUND_IDS: RoundId[] = [
+  "behavioral",
+  "technical",
+  "systemDesign",
+];
 
 /**
  * Weight of each round in the overall score.
@@ -256,6 +372,8 @@ export const ROUND_WEIGHTS: Record<RoundId, number> = {
   behavioral: 1,
   technical: 1,
   systemDesign: 1,
+  ownership: 1,
+  fundamentals: 1,
 };
 
 /** Weight of the cross-cutting communication score in the overall. */
