@@ -2,6 +2,7 @@
 
 import { db } from "@/firebase/admin";
 import { judgeInterview, type JudgeTurn } from "@/lib/llm/judge-report";
+import { LEGACY_ROUND_IDS, type RoundId } from "@/lib/rubric";
 
 /**
  * Generate the report for a finished session.
@@ -39,19 +40,20 @@ export async function generateReport(
       return { success: false, message: "No turns persisted" };
     }
 
-    // Carry personaId through. The agent stamps it on every turn; the previous
-    // judge dropped it here and then scored a flat, round-blind transcript —
-    // which is why the three-interviewer panel never reached the score.
+    // Carry personaId AND roundId through. The agent stamps both on every
+    // turn; a judge that drops them scores a flat, round-blind transcript —
+    // which is exactly how the panel once failed to reach the score.
     const turns: JudgeTurn[] = turnsSnap.docs.map((d) => {
       const t = d.data() as {
         role: "user" | "assistant";
         content: string;
-        metadata?: { personaId?: string };
+        metadata?: { personaId?: string; roundId?: string };
       };
       return {
         role: t.role,
         content: t.content,
         personaId: t.metadata?.personaId ?? null,
+        roundId: t.metadata?.roundId ?? null,
       };
     });
 
@@ -64,10 +66,17 @@ export async function generateReport(
     }
     const template = templateDoc.data() as Template;
 
+    // Score against this panel's rounds. Legacy sessions (created before the
+    // preset rollout) have no panel spec and get the fixed three-round loop.
+    const roundIds =
+      session.panel?.rounds.map((r) => r.roundId as RoundId) ??
+      LEGACY_ROUND_IDS;
+
     const report = await judgeInterview({
       role: template.role,
       level: template.level,
       turns,
+      rounds: roundIds,
     });
 
     await reportRef.set({

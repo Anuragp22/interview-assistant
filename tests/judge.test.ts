@@ -4,6 +4,7 @@ import { judgeVerdictSchema } from "@/constants";
 import { segmentByRound, type JudgeTurn } from "@/lib/llm/judge-report";
 import {
   COMMUNICATION_CRITERION,
+  LEGACY_ROUND_IDS,
   ROUND_CRITERIA,
   type RoundId,
 } from "@/lib/rubric";
@@ -39,7 +40,7 @@ describe("segmentByRound", () => {
       turn("user", "Start with the read/write ratio.", "system-design"),
     ];
 
-    const out = segmentByRound(turns);
+    const out = segmentByRound(turns, LEGACY_ROUND_IDS);
 
     expect(out.behavioral).toHaveLength(2);
     expect(out.technical).toHaveLength(2);
@@ -51,7 +52,7 @@ describe("segmentByRound", () => {
   it("maps the agent's 'system-design' persona id to the systemDesign round", () => {
     // The Python agent writes "system-design"; the rubric keys on "systemDesign".
     // A mismatch here would silently drop the entire third round from scoring.
-    const out = segmentByRound([turn("user", "answer", "system-design")]);
+    const out = segmentByRound([turn("user", "answer", "system-design")], LEGACY_ROUND_IDS);
     expect(out.systemDesign).toHaveLength(1);
     expect(out.behavioral).toHaveLength(0);
   });
@@ -65,22 +66,62 @@ describe("segmentByRound", () => {
       turn("user", "Hello.", null),
       turn("user", "Still answering Adam.", null),
     ];
-    const out = segmentByRound(turns);
+    const out = segmentByRound(turns, LEGACY_ROUND_IDS);
     expect(out.technical).toHaveLength(3);
   });
 
   it("defaults to the behavioral round before any persona is stamped", () => {
-    const out = segmentByRound([turn("assistant", "Welcome.", null)]);
+    const out = segmentByRound([turn("assistant", "Welcome.", null)], LEGACY_ROUND_IDS);
     expect(out.behavioral).toHaveLength(1);
   });
 
   it("produces empty rounds rather than throwing when a round never happened", () => {
     // A candidate who hangs up during round 1 must still be scorable — the
     // later rounds score 0 for lack of evidence, they don't crash the report.
-    const out = segmentByRound([turn("user", "answer", "behavioral")]);
+    const out = segmentByRound([turn("user", "answer", "behavioral")], LEGACY_ROUND_IDS);
     expect(out.behavioral).toHaveLength(1);
     expect(out.technical).toEqual([]);
     expect(out.systemDesign).toEqual([]);
+  });
+});
+
+describe("segmentByRound with preset rounds", () => {
+  it("segments by explicit roundId", () => {
+    const out = segmentByRound(
+      [
+        { role: "assistant", content: "a", roundId: "ownership", personaId: "founder" },
+        { role: "user", content: "b" },
+        { role: "assistant", content: "c", roundId: "technical", personaId: "senior-eng" },
+      ],
+      ["ownership", "technical"],
+    );
+    expect(out.ownership.map((t) => t.content)).toEqual(["a", "b"]);
+    expect(out.technical.map((t) => t.content)).toEqual(["c"]);
+  });
+
+  it("falls back to personaId mapping for legacy turns", () => {
+    const out = segmentByRound(
+      [
+        { role: "assistant", content: "a", personaId: "behavioral" },
+        { role: "assistant", content: "b", personaId: "system-design" },
+      ],
+      ["behavioral", "technical", "systemDesign"],
+    );
+    expect(out.behavioral).toHaveLength(1);
+    expect(out.systemDesign).toHaveLength(1);
+  });
+
+  it("ignores a roundId that is not in this panel's rounds", () => {
+    // A corrupted turn must not create a phantom bucket the scorer
+    // never reads — it stays in the round currently in progress.
+    const out = segmentByRound(
+      [
+        { role: "assistant", content: "a", roundId: "ownership" },
+        { role: "user", content: "b", roundId: "not-a-round" },
+      ],
+      ["ownership", "technical"],
+    );
+    expect(out.ownership).toHaveLength(2);
   });
 });
 

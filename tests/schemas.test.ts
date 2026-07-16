@@ -210,17 +210,25 @@ describe("judgeVerdictSchema", () => {
     strengths: ["Good systems thinking"],
     areasForImprovement: ["Deeper API design probing"],
     finalAssessment: "Solid across the technical round.",
-    recommendation: "hire" as const,
-    recommendationReasoning: "Overall 3.9/5, above the hire bar.",
+    focusArea: {
+      title: "Quantify outcomes",
+      why: "Ownership scored 2/5 — impact was asserted, never shown.",
+      firstStep: "Re-run the round and put a number on every result.",
+    },
+    barVerdict: "advance" as const,
+    barReasoning: "Overall 3.9/5 with no round below 2.5.",
   };
 
   it("accepts a well-formed verdict", () => {
     expect(judgeVerdictSchema.safeParse(base).success).toBe(true);
   });
 
-  it("rejects a recommendation outside the enum", () => {
+  it("rejects a verdict outside the enum (incl. hiring vocabulary)", () => {
     expect(
-      judgeVerdictSchema.safeParse({ ...base, recommendation: "maybe" }).success,
+      judgeVerdictSchema.safeParse({ ...base, barVerdict: "hire" }).success,
+    ).toBe(false);
+    expect(
+      judgeVerdictSchema.safeParse({ ...base, barVerdict: "maybe" }).success,
     ).toBe(false);
   });
 
