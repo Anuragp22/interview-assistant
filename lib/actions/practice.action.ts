@@ -408,32 +408,3 @@ export async function getPracticeHistory(): Promise<PracticeHistoryRow[]> {
   return rows.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 
-export type PracticeScorePoint = {
-  sessionId: string;
-  overallScore: number;
-  completedAt: string;
-};
-
-export async function getPracticeScoreHistory(
-  options: { limit?: number } = {},
-): Promise<PracticeScorePoint[]> {
-  const { limit = 12 } = options;
-  const rows = await getPracticeHistory();
-  return rows
-    .filter(
-      (
-        r,
-      ): r is PracticeHistoryRow & {
-        overallScore: number;
-        completedAt: string;
-      } => r.overallScore !== null && r.completedAt !== null,
-    )
-    .sort((a, b) => b.completedAt.localeCompare(a.completedAt))
-    .slice(0, limit)
-    .reverse()
-    .map((r) => ({
-      sessionId: r.sessionId,
-      overallScore: r.overallScore,
-      completedAt: r.completedAt,
-    }));
-}
