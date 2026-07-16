@@ -86,11 +86,35 @@ function CriterionCard({ c }: { c: ScoredCriterion }) {
   );
 }
 
+function LegacyRecommendationBadge({ rec, reasoning }: { rec: Recommendation; reasoning?: string }) {
+  const style = RECOMMENDATION_STYLES[rec];
+  const RecIcon = style.icon;
+  return (
+    <>
+      <div
+        className={cn(
+          "inline-flex items-center gap-2 self-start px-3 py-1 rounded-md border text-sm font-semibold",
+          style.tone,
+        )}
+      >
+        <RecIcon className="size-4" />
+        {style.label}
+      </div>
+      {reasoning ? (
+        <p className="text-sm text-fg-default leading-relaxed">{reasoning}</p>
+      ) : null}
+    </>
+  );
+}
+
 export default function ReportView({
   report,
+  level,
   transcript,
 }: {
   report: Report;
+  /** Interview level, for the bar-verdict headline ("…at Senior level"). */
+  level?: string;
   transcript: Array<{
     role: "user" | "assistant";
     content: string;
@@ -98,11 +122,11 @@ export default function ReportView({
     metadata?: { personaId?: string };
   }>;
 }) {
-  const RecIcon = RECOMMENDATION_STYLES[report.recommendation].icon;
   // A judge that disagrees with itself by >1 point across permutations of the
   // same rubric is not measuring reliably. Say so, rather than presenting a
   // median as though it were settled.
   const lowConfidence = report.judge?.maxDisagreement >= 2;
+  const atLevel = level ? ` at ${level} level` : "";
 
   return (
     <div className="flex flex-col gap-6">
@@ -118,18 +142,39 @@ export default function ReportView({
             </span>
           </div>
           <div className="flex-1 flex flex-col gap-3">
-            <div
-              className={cn(
-                "inline-flex items-center gap-2 self-start px-3 py-1 rounded-md border text-sm font-semibold",
-                RECOMMENDATION_STYLES[report.recommendation].tone,
-              )}
-            >
-              <RecIcon className="size-4" />
-              {RECOMMENDATION_STYLES[report.recommendation].label}
-            </div>
-            <p className="text-sm text-fg-default leading-relaxed">
-              {report.recommendationReasoning}
-            </p>
+            {report.barVerdict ? (
+              <>
+                <h2 className="font-display text-xl text-fg-strong">
+                  {report.barVerdict === "advance"
+                    ? `This panel would have advanced you${atLevel}.`
+                    : "Not yet — here's the one thing."}
+                </h2>
+                {report.barReasoning ? (
+                  <p className="text-sm text-fg-muted leading-relaxed">
+                    {report.barReasoning}
+                  </p>
+                ) : null}
+                {report.focusArea ? (
+                  <div className="rounded-md bg-surface-2 border border-border-default p-3 flex flex-col gap-1">
+                    <p className="text-sm font-medium text-fg-strong">
+                      Focus first: {report.focusArea.title}
+                    </p>
+                    <p className="text-sm text-fg-muted leading-relaxed">
+                      {report.focusArea.why}
+                    </p>
+                    <p className="text-sm text-fg-default leading-relaxed">
+                      Next session: {report.focusArea.firstStep}
+                    </p>
+                  </div>
+                ) : null}
+              </>
+            ) : report.recommendation ? (
+              // Reports generated before the bar verdict existed.
+              <LegacyRecommendationBadge
+                rec={report.recommendation}
+                reasoning={report.recommendationReasoning}
+              />
+            ) : null}
           </div>
         </div>
 

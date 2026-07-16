@@ -51,6 +51,17 @@ export default async function PracticeReportPage({
   }
   const report = reportDoc.data() as Report;
 
+  // The level lives on the template; the bar-verdict headline names it
+  // ("…advanced you at Senior level"). Absent template ⇒ headline degrades
+  // gracefully to no level.
+  const templateDoc = await db
+    .collection("templates")
+    .doc(session.templateId)
+    .get();
+  const level = templateDoc.exists
+    ? (templateDoc.data() as Template).level
+    : undefined;
+
   const turnsSnap = await db
     .collection("sessions")
     .doc(sessionId)
@@ -76,7 +87,7 @@ export default async function PracticeReportPage({
         <ArrowLeft className="size-3.5" />
         Back to dashboard
       </Link>
-      <ReportView report={report} transcript={transcript} />
+      <ReportView report={report} level={level} transcript={transcript} />
     </div>
   );
 }
