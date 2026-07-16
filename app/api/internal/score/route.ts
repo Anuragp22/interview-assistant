@@ -5,10 +5,11 @@ import { db } from "@/firebase/admin";
 import { generateReport } from "@/lib/actions/reports.action";
 
 export const runtime = "nodejs";
-// Scoring is 3 permutation calls + 1 verdict call against Gemini. 60s was the
-// old ceiling and it was tight; Fluid Compute allows far more headroom, and
-// nobody is waiting on this — the candidate has already hung up.
-export const maxDuration = 300;
+// Scoring is 3 permutation calls (parallel) + 1 verdict call against Gemini
+// Flash-Lite — comfortably inside a minute. 60 is also the HARD ceiling on
+// the Hobby plan: exporting more fails the whole deployment with "invalid
+// maxDuration value". Raise only after moving to Pro.
+export const maxDuration = 60;
 
 /**
  * Internal, service-to-service scoring trigger.

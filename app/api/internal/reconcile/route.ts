@@ -4,7 +4,9 @@ import { db } from "@/firebase/admin";
 import { generateReport } from "@/lib/actions/reports.action";
 
 export const runtime = "nodejs";
-export const maxDuration = 300;
+// 60 is the HARD ceiling on the Hobby plan — exporting more fails the whole
+// deployment with "invalid maxDuration value". Raise only after moving to Pro.
+export const maxDuration = 60;
 
 /** Sessions stuck this long are considered the agent's ping having been lost. */
 const AWAITING_REPORT_STALE_MS = 2 * 60 * 1000;
@@ -16,8 +18,13 @@ const AWAITING_REPORT_STALE_MS = 2 * 60 * 1000;
  */
 const IN_CALL_STALE_MS = 30 * 60 * 1000;
 
-/** Cap per run so one sweep can't blow maxDuration on a large backlog. */
-const MAX_PER_RUN = 10;
+/**
+ * Cap per run so one sweep can't blow maxDuration on a large backlog. A judge
+ * run is ~15-30s (3 parallel permutation calls + a verdict call), and
+ * maxDuration is 60s on Hobby — two sequential reports is the safe fit. A
+ * deeper backlog drains across subsequent cron ticks.
+ */
+const MAX_PER_RUN = 2;
 
 /**
  * Report-generation reconciler. Runs on a cron (see vercel.json).
