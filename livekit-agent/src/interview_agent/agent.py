@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from collections.abc import AsyncIterator
 from contextlib import aclosing
 from datetime import datetime, timezone
@@ -621,6 +622,52 @@ async def entrypoint(ctx: JobContext) -> None:
     def _on_usage(event: Any) -> None:
         cost_aggregator.handle_usage_event(event)
 
+    # Per-session quality telemetry. The panel's whole promise is that
+    # other interviewers cut in, as often as the chosen intensity allows
+    # (calm=0, standard≤1, grill≤3 per round) — a promise the prompt makes
+    # and, until this, nothing checked. Counting interjections and timing
+    # rounds is what turns it from a claim into a measurement.
+    #
+    # Per-process, like cost_aggregator above: a resumed session's write
+    # covers only the leg this process saw, not the turns replayed into its
+    # chat context.
+    quality: dict[str, Any] = {"interjections": 0, "byRound": {}}
+
+    def _round_stats(round_id: str) -> dict[str, Any]:
+        return quality["byRound"].setdefault(
+            round_id,
+            {"turns": 0, "interjections": 0, "firstTurnAt": time.monotonic()},
+        )
+
+    def _close_round(round_id: str) -> None:
+        """Freeze a round's duration at the moment the panel left it.
+
+        Called at every round boundary, and once more per still-open round
+        at teardown. Measuring instead at teardown alone — one
+        ``now - firstTurnAt`` per round — reads correctly only for the
+        final round and silently adds the whole rest of the interview to
+        every earlier one. Idempotent, so the boundary's answer always
+        wins over teardown's.
+        """
+        stats = quality["byRound"].get(round_id)
+        if stats is not None and "durationSeconds" not in stats:
+            stats["durationSeconds"] = round(time.monotonic() - stats["firstTurnAt"])
+
+    def _leader_tag(leader_persona_id: str) -> str | None:
+        """The round leader's speaker tag, or None if unresolvable.
+
+        ``naturalize_tags`` reports speakers as the TAG it matched
+        ("SARAH"), not the display name, so this is what a speakers entry
+        has to be compared against to decide lead-vs-interjection.
+        """
+        panel = _PANEL[0]
+        if panel is None:
+            return None
+        return next(
+            (p.name.upper() for p in panel.personas if p.id == leader_persona_id),
+            None,
+        )
+
     pending_hook_tasks: set[asyncio.Task[Any]] = set()
 
     def _track_task(coro: Any) -> None:
@@ -633,13 +680,17 @@ async def entrypoint(ctx: JobContext) -> None:
     # and the report generator depend on.
     turn_index = len(existing_turns)
 
+    # The round the previous turn belonged to — the only way to notice a
+    # round boundary from in here, since next_round is the tools' business.
+    last_round_id: str | None = None
+
     def _current_round_spec():
         panel = _PANEL[0]
         return panel.rounds[_ACTIVE_ROUND[0]] if panel else None
 
     @voice_session.on("conversation_item_added")
     def _on_item(event: ConversationItemAddedEvent) -> None:
-        nonlocal turn_index
+        nonlocal turn_index, last_round_id
         item = event.item
         if not isinstance(item, ChatMessage):
             return
@@ -651,6 +702,15 @@ async def entrypoint(ctx: JobContext) -> None:
         leader_persona_id = (
             round_spec.lead_persona_id if round_spec else "behavioral"
         )
+        round_id = round_spec.round_id if round_spec else "behavioral"
+
+        # Quality telemetry, part 1: turn accounting. A boundary closes the
+        # round we just left before the new one opens its own clock.
+        if last_round_id is not None and round_id != last_round_id:
+            _close_round(last_round_id)
+        last_round_id = round_id
+        stats = _round_stats(round_id)
+        stats["turns"] += 1
 
         # Per-turn latency telemetry + post-hoc leak detection on
         # assistant turns; guard accounting on user turns.
@@ -677,6 +737,17 @@ async def entrypoint(ctx: JobContext) -> None:
                 content, speakers = naturalize_tags(
                     content, {p.name.upper(): p.name for p in panel.personas}
                 )
+                # Quality telemetry, part 2: every speaker in this turn who
+                # isn't leading the round cut in — that IS an interjection.
+                # An unresolvable leader counts nothing rather than counting
+                # everyone: we can't tell lead from interjection, and a zero
+                # is a smaller lie than "the whole panel interrupted".
+                leader_tag = _leader_tag(leader_persona_id)
+                if leader_tag is not None:
+                    interjections = sum(1 for s in speakers if s != leader_tag)
+                    if interjections:
+                        stats["interjections"] += interjections
+                        quality["interjections"] += interjections
         elif item.role == "user":
             if _GUARD is not None and round_spec is not None:
                 _GUARD.record_user_turn(round_spec.round_id)
@@ -684,7 +755,7 @@ async def entrypoint(ctx: JobContext) -> None:
         now = datetime.now(timezone.utc)
         metadata: dict[str, Any] = {
             "personaId": leader_persona_id,
-            "roundId": round_spec.round_id if round_spec else "behavioral",
+            "roundId": round_id,
             "modelId": llm_model_id(),
         }
         if speakers:
@@ -747,6 +818,34 @@ async def entrypoint(ctx: JobContext) -> None:
             except Exception:  # noqa: BLE001
                 logger.exception(
                     "failed to write session.estimatedCost for %s", session_id
+                )
+
+            # Final quality rollup, same best-effort contract as the cost
+            # write above: a crashed session still gets the interjection
+            # counts for the rounds it did reach, and a failure here never
+            # costs us the report handoff below.
+            try:
+                by_round: dict[str, Any] = {}
+                for rid, s in quality["byRound"].items():
+                    # No-op for rounds already closed at their boundary; this
+                    # only stamps the round the session ended in.
+                    _close_round(rid)
+                    by_round[rid] = {
+                        "turns": s["turns"],
+                        "interjections": s["interjections"],
+                        "durationSeconds": s["durationSeconds"],
+                    }
+                db.collection("sessions").document(session_id).update(
+                    {
+                        "qualityTelemetry": {
+                            "interjections": quality["interjections"],
+                            "byRound": by_round,
+                        }
+                    }
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "failed to write session.qualityTelemetry for %s", session_id
                 )
 
             # Hand off to scoring. The durable marker goes down FIRST, so

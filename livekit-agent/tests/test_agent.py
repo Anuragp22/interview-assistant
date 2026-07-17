@@ -7,8 +7,9 @@ the entrypoint's startup-failure path.
 The startup-failure tests are cheap to write precisely because that path
 bails before any of the LiveKit session machinery is built: a JobContext
 with a room name and a connect() is the whole surface it touches. The
-happy path is still not unit-tested end-to-end (see test_resume.py's note
-on mocking the AgentSession lifecycle).
+quality-telemetry tests at the bottom do drive the entrypoint's happy
+path, by faking the one collaborator it hangs everything off — the
+AgentSession returned by build_session.
 """
 
 import asyncio
@@ -17,9 +18,17 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
+from livekit.agents.llm import ChatMessage
+from livekit.agents.voice.events import ConversationItemAddedEvent
 
 import interview_agent.agent as agent_module
 from interview_agent.agent import drain_pending_tasks
+from interview_agent.session_data import (
+    PanelPersonaSpec,
+    PanelRoundSpec,
+    PanelSpec,
+    SessionData,
+)
 
 
 @pytest.mark.asyncio
@@ -125,12 +134,23 @@ class _FakeDb:
 
     Same double as test_reporting.py's, plus the doc path — the breadcrumb
     landing on the wrong document would be silently useless.
+
+    ``raise_on_keys`` fails only the updates carrying one of those field
+    names, which is how a single best-effort write (qualityTelemetry) is
+    broken without also breaking the unguarded status:"in-call" write that
+    has to land first for the session to run at all.
     """
 
-    def __init__(self, raises: bool = False) -> None:
+    def __init__(
+        self, raises: bool = False, raise_on_keys: tuple[str, ...] = ()
+    ) -> None:
         self.raises = raises
+        self.raise_on_keys = raise_on_keys
         self.path: list[str] = []
         self.updated: dict[str, Any] | None = None
+        # A full session writes several times (status, estimatedCost,
+        # qualityTelemetry); `updated` alone only remembers the last one.
+        self.updates: list[dict[str, Any]] = []
 
     def collection(self, name: str) -> "_FakeDb":
         self.path.append(name)
@@ -141,20 +161,30 @@ class _FakeDb:
         return self
 
     def update(self, payload: dict) -> None:
-        if self.raises:
+        if self.raises or any(k in payload for k in self.raise_on_keys):
             raise RuntimeError("firestore down")
         self.updated = payload
+        self.updates.append(payload)
+
+    def written(self, key: str) -> Any:
+        """The value of the first update carrying ``key``."""
+        for payload in self.updates:
+            if key in payload:
+                return payload[key]
+        pytest.fail(f"no session-doc update carried {key!r}")
 
 
 def _fake_ctx(session_id: str = "s1", connect_error: Exception | None = None):
     """Minimal JobContext double.
 
     The startup-failure path only ever reads room.name and awaits
-    connect(), so faking those two is the whole contract.
+    connect(); the full path additionally reads the prewarmed VAD off
+    ctx.proc and hands ctx.room to the session.
     """
     return SimpleNamespace(
         room=SimpleNamespace(name=f"session-{session_id}"),
         connect=AsyncMock(side_effect=connect_error),
+        proc=SimpleNamespace(userdata={}),
     )
 
 
@@ -326,3 +356,252 @@ async def test_entrypoint_breadcrumb_error_is_truncated(
 
     assert db.updated is not None
     assert len(db.updated["agentStartError"]) == 500
+
+
+# ---------------------------------------------------------------------------
+# Quality telemetry
+#
+# The product's whole claim is that a panel interjects, at a pressure level
+# the candidate picked. Cost and latency were measured; the claim itself was
+# not. These tests pin the two numbers that make it checkable — how often a
+# non-lead panelist cut in, and how long each round actually ran.
+#
+# They drive entrypoint end-to-end, which is affordable because the session
+# is reached through exactly one seam (build_session) and the fake below
+# feeds turns in from inside start(), the same place the real SDK does.
+# ---------------------------------------------------------------------------
+
+
+def _mk_persona(pid: str, name: str) -> PanelPersonaSpec:
+    return PanelPersonaSpec(
+        id=pid, name=name, expertise_area=f"{pid} interviewer",
+        voice_id="v-" + pid, stability=0.5, similarity_boost=0.8,
+        speed=1.0, style=0.3, use_speaker_boost=True,
+    )
+
+
+def _session_data() -> SessionData:
+    """A grill-intensity big-tech panel — the preset whose ≤3-interjections
+    -per-round promise this telemetry exists to make auditable."""
+    panel = PanelSpec(
+        preset_id="big-tech-swe",
+        intensity="grill",
+        personas=(
+            _mk_persona("behavioral", "Sarah"),
+            _mk_persona("technical", "Adam"),
+            _mk_persona("system-design", "Bella"),
+        ),
+        rounds=(
+            PanelRoundSpec("behavioral", "behavioral"),
+            PanelRoundSpec("technical", "technical"),
+            PanelRoundSpec("systemDesign", "system-design"),
+        ),
+    )
+    return SessionData(
+        session_id="s1",
+        candidate_uid="u1",
+        candidate_name="Anurag",
+        role="Senior Frontend",
+        level="Senior",
+        job_description="JD text",
+        cv_extracted_text="CV text",
+        panel=panel,
+        questions_by_round={
+            "behavioral": ["B1"], "technical": ["T1"], "systemDesign": ["SD1"]
+        },
+    )
+
+
+class _FakeTurnsRepo:
+    """No persisted turns ⇒ a fresh (non-resume) session."""
+
+    def __init__(self, client: Any, *, session_id: str) -> None:
+        self.session_id = session_id
+        self.appended: list[Any] = []
+
+    def list_turns(self) -> list[Any]:
+        return []
+
+    def append_turn(self, turn: Any) -> None:
+        self.appended.append(turn)
+
+
+class _FakeVoiceSession:
+    """AgentSession double that is also the event source.
+
+    ``start()`` is where the real session's conversation_item_added events
+    come from, so that is where the script runs: a test's turns are
+    delivered to the entrypoint's live handler, in flight, before teardown.
+    """
+
+    def __init__(self) -> None:
+        self.handlers: dict[str, Any] = {}
+        self.script: Any = None
+        self.closed = 0
+
+    def on(self, name: str):
+        def _register(fn):
+            self.handlers[name] = fn
+            return fn
+
+        return _register
+
+    async def start(self, *, agent: Any, room: Any) -> None:
+        if self.script is not None:
+            self.script(self)
+
+    async def aclose(self) -> None:
+        self.closed += 1
+
+    def emit_item(self, role: str, content: str) -> None:
+        self.handlers["conversation_item_added"](
+            ConversationItemAddedEvent(item=ChatMessage(role=role, content=[content]))
+        )
+
+
+class _FakeClock:
+    """Hand-cranked monotonic clock.
+
+    Round durations can only be asserted against a clock the test controls —
+    on the real one every round of a sub-second test is 0s, and 0 == 0 would
+    pass just as happily against the over-counting teardown-delta version
+    this replaced.
+
+    It is installed by rebinding agent.py's ``time`` name rather than
+    patching ``time.monotonic`` itself: asyncio's event loop reads that same
+    function, so freezing it process-wide would hang the loop.
+    """
+
+    def __init__(self, start: float = 1_000.0) -> None:
+        self._now = start
+
+    def monotonic(self) -> float:
+        return self._now
+
+    def advance(self, seconds: float) -> None:
+        self._now += seconds
+
+
+@pytest.fixture
+def harness(monkeypatch: pytest.MonkeyPatch):
+    """entrypoint with every out-of-process collaborator stubbed."""
+    db = _FakeDb()
+    voice = _FakeVoiceSession()
+    clock = _FakeClock()
+    report_marks: list[str] = []
+
+    monkeypatch.setattr(agent_module, "init_firebase", lambda: db)
+    monkeypatch.setattr(
+        agent_module, "load_session_data", lambda _db, _sid: _session_data()
+    )
+    monkeypatch.setattr(agent_module, "TurnsRepository", _FakeTurnsRepo)
+    monkeypatch.setattr(agent_module, "build_session", lambda vad=None: voice)
+    monkeypatch.setattr(agent_module, "_build_tts_for_spec", lambda spec: object())
+    monkeypatch.setattr(
+        agent_module,
+        "mark_awaiting_report",
+        lambda _db, sid: report_marks.append(sid),
+    )
+    monkeypatch.setattr(agent_module, "ping_score_endpoint", lambda _sid: None)
+    monkeypatch.setattr(agent_module, "time", SimpleNamespace(monotonic=clock.monotonic))
+
+    yield SimpleNamespace(db=db, voice=voice, clock=clock, report_marks=report_marks)
+
+    # entrypoint owns module-level state; a leaked _PANEL/_ACTIVE_ROUND would
+    # silently re-target the next test's speaker lookups.
+    agent_module._PANEL[0] = None
+    agent_module._ACTIVE_ROUND[0] = 0
+    agent_module._PANEL_CONTEXT.clear()
+    agent_module._END_INTERVIEW_FLAG.clear()
+    agent_module._DB = None
+    agent_module._GUARD = None
+
+
+@pytest.mark.asyncio
+async def test_quality_telemetry_counts_interjections(harness) -> None:
+    """Sarah leads behavioral, so a Sarah-only turn is 0 interjections and
+    Adam cutting into her turn is 1. Turns count both roles."""
+
+    def _script(session: _FakeVoiceSession) -> None:
+        session.emit_item("assistant", "[SARAH] Tell me about a conflict you owned.")
+        harness.clock.advance(5)
+        session.emit_item("user", "At Razorpay I owned the payments refactor.")
+        harness.clock.advance(7)
+        session.emit_item(
+            "assistant",
+            "[SARAH] What did you trade off? [ADAM] Hang on — what was the p99 after?",
+        )
+
+    harness.voice.script = _script
+
+    await agent_module.entrypoint(_fake_ctx("s1"))
+
+    telemetry = harness.db.written("qualityTelemetry")
+    assert telemetry["interjections"] == 1
+    assert telemetry["byRound"]["behavioral"] == {
+        "turns": 3,  # 2 assistant + 1 user
+        "interjections": 1,
+        "durationSeconds": 12,
+    }
+
+
+@pytest.mark.asyncio
+async def test_quality_telemetry_closes_round_duration_at_the_round_boundary(
+    harness,
+) -> None:
+    """A round's clock stops when the panel leaves it, not at teardown.
+
+    The regression this pins: measuring every round as
+    ``teardown - firstTurnAt`` gives the last round the right answer and
+    every earlier one the whole rest of the interview on top. Here that
+    would report behavioral as 510s — the full session — instead of 120s.
+    """
+
+    def _script(session: _FakeVoiceSession) -> None:
+        session.emit_item("assistant", "[SARAH] Walk me through a conflict.")  # t+0
+        harness.clock.advance(30)
+        session.emit_item("user", "We disagreed on the rollout plan.")  # t+30
+        harness.clock.advance(30)
+        session.emit_item(
+            "assistant", "[SARAH] And the outcome? [ADAM] Who owned the call?"
+        )  # t+60
+        harness.clock.advance(60)
+
+        # What PanelAgent.next_round does: the entrypoint's handler reads the
+        # live round off _ACTIVE_ROUND, so this is the round boundary.
+        agent_module._ACTIVE_ROUND[0] = 1
+
+        session.emit_item("assistant", "[ADAM] Let's look at code.")  # t+120
+        harness.clock.advance(90)
+        session.emit_item("user", "Sure.")  # t+210
+        harness.clock.advance(300)  # long tail: teardown lands at t+510
+
+    harness.voice.script = _script
+
+    await agent_module.entrypoint(_fake_ctx("s1"))
+
+    telemetry = harness.db.written("qualityTelemetry")
+    assert telemetry["byRound"] == {
+        "behavioral": {"turns": 3, "interjections": 1, "durationSeconds": 120},
+        "technical": {"turns": 2, "interjections": 0, "durationSeconds": 390},
+    }
+    assert telemetry["interjections"] == 1
+
+
+@pytest.mark.asyncio
+async def test_quality_telemetry_write_failure_does_not_escape(harness) -> None:
+    """Best-effort, like estimatedCost: telemetry is the least valuable
+    thing in the teardown path and must never cost us the report handoff
+    behind it."""
+    harness.db.raise_on_keys = ("qualityTelemetry",)
+
+    def _script(session: _FakeVoiceSession) -> None:
+        session.emit_item("assistant", "[SARAH] Hello. [ADAM] Quick one first.")
+
+    harness.voice.script = _script
+
+    await agent_module.entrypoint(_fake_ctx("s1"))  # must NOT raise
+
+    # The write blew up; the durable "this session owes a report" marker
+    # after it still went down.
+    assert harness.report_marks == ["s1"]
