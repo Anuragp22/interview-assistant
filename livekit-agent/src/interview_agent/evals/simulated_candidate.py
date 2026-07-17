@@ -20,6 +20,7 @@ from interview_agent.security.runner import (
     RotatingGroqClient,
     _make_system_prompt,
 )
+from interview_agent.security_guards import TransferGuard
 
 # The roster _make_system_prompt() actually renders (behavioral/technical/
 # systemDesign led by Sarah/Adam/Bella). Kept here as the single source of
@@ -31,6 +32,12 @@ PANEL_TAGS: tuple[str, ...] = ("SARAH", "ADAM", "BELLA")
 # by LEADERS_IN_ORDER[i]; anyone else who speaks in that segment is an
 # interjection counted against the round's budget.
 LEADERS_IN_ORDER: tuple[str, ...] = ("SARAH", "ADAM", "BELLA")
+# Round N's round_id, in panel order — mirrors the rounds _make_system_prompt
+# renders (behavioral/technical/systemDesign) and the keys production's
+# TransferGuard is indexed by. The sim consults the guard with these same
+# per-round ids so record_user_turn / may_transfer / reset_persona line up
+# with PanelAgent.next_round exactly.
+ROUND_IDS_IN_ORDER: tuple[str, ...] = ("behavioral", "technical", "systemDesign")
 
 _TAG_RE = re.compile(r"^\s*\[([A-Z][A-Z .'-]{0,29})\]")
 # Any bracket tag anywhere in an utterance, used to count interjections.
@@ -90,7 +97,15 @@ class SimTranscript:
     intensity: str
     persona_id: str
     assistant_texts: list[str] = field(default_factory=list)
+    # Tool calls that TOOK EFFECT: an allowed next_round (a real round
+    # boundary) and end_interview. A next_round the guard refused is NOT a
+    # boundary and is deliberately kept out of here so segment_texts_by_round
+    # still aligns segments with actual round changes.
     tool_calls: list[tuple[int, str]] = field(default_factory=list)  # (assistant_turn_idx, tool)
+    # next_round calls the guard refused: (assistant_turn_idx, refusal_text).
+    # Mirrors production returning TransferGuard's refusal without advancing,
+    # and lets the checker see an early-skip attempt the guard blocked.
+    guard_refusals: list[tuple[int, str]] = field(default_factory=list)
 
 
 def run_simulation(
@@ -108,17 +123,32 @@ def run_simulation(
     is one panel turn followed by one candidate reply, so the loop makes up
     to ``2 * max_candidate_turns`` model calls (fewer if the panel ends the
     interview early).
+
+    A ``next_round`` tool call is gated by the SAME ``TransferGuard`` that
+    production's ``PanelAgent.next_round`` consults: until the current round
+    has gathered ``MIN_USER_TURNS_BEFORE_TRANSFER`` candidate turns the guard
+    refuses, and the sim (like production) feeds the refusal back and does not
+    advance. Without this the adversarial persona — which repeatedly asks to
+    skip ahead — advanced rounds the sim that production would block, so the
+    gate exercised impossible conversations.
     """
     # Index of the round the panel is currently in. Starts at 0 (behavioral,
-    # led by Sarah) and advances on each next_round, mirroring production's
-    # _ACTIVE_ROUND. Clamped to the final round so an over-advancing panel
-    # never indexes past the roster.
+    # led by Sarah) and advances on each ALLOWED next_round, mirroring
+    # production's _ACTIVE_ROUND.
     current_round = 0
     _FINAL_ROUND = len(LEADERS_IN_ORDER) - 1
+    # Per-round user-turn accounting, exactly as production's entrypoint keeps
+    # it: record_user_turn on each candidate turn, may_transfer before an
+    # advance, reset_persona after one.
+    guard = TransferGuard()
     panel_msgs: list[dict] = [
         {"role": "system", "content": _make_system_prompt(intensity, current_round=current_round)},
         {"role": "user", "content": "Hi, I'm ready to start."},
     ]
+    # The opening "I'm ready" is a fixed kickoff, not candidate signal, so it
+    # is NOT recorded as a user turn — counting it would let a transfer through
+    # one real candidate turn earlier than production allows (production greets
+    # first, then needs MIN_USER_TURNS_BEFORE_TRANSFER real candidate turns).
     out = SimTranscript(intensity=intensity, persona_id=persona.id)
 
     for _ in range(max_candidate_turns):
@@ -156,34 +186,48 @@ def run_simulation(
             ]
         panel_msgs.append(assistant_msg)
 
+        turn_idx = len(out.assistant_texts) - 1
         ended = False
         for tc in tcs:
-            out.tool_calls.append((len(out.assistant_texts) - 1, tc.function.name))
-            panel_msgs.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": tc.id,
-                    "content": (
-                        "Round advanced."
-                        if tc.function.name == "next_round"
-                        else "Interview ended."
-                    ),
-                }
-            )
-            if tc.function.name == "next_round":
-                # Mirror production: advancing the round MUST re-render the
-                # system prompt so the panel is told it is now in a later round
-                # (technical/Adam, then systemDesign/Bella). Without this the
-                # panel behaves as round 0 for the whole conversation while the
-                # per-round checkers judge later segments against Adam/Bella —
-                # validating rounds the panel was never told it entered.
-                current_round = min(current_round + 1, _FINAL_ROUND)
-                panel_msgs[0] = {
-                    "role": "system",
-                    "content": _make_system_prompt(intensity, current_round=current_round),
-                }
-            if tc.function.name == "end_interview":
+            name = tc.function.name
+            if name == "next_round":
+                # Mirror PanelAgent.next_round's two early returns, in order:
+                # the final-round check, then TransferGuard.may_transfer. Only
+                # an ALLOWED transfer advances the round, re-renders the prompt
+                # (so the panel is told it is now in technical/Adam, then
+                # systemDesign/Bella), and counts as a real round boundary in
+                # tool_calls. A refusal leaves the round untouched — exactly
+                # what production does — and is surfaced in guard_refusals.
+                if current_round >= _FINAL_ROUND:
+                    tool_content = (
+                        "This is the final round — call end_interview when "
+                        "you have enough signal."
+                    )
+                else:
+                    from_round = ROUND_IDS_IN_ORDER[current_round]
+                    allowed, refusal = guard.may_transfer(from_round)
+                    if not allowed:
+                        tool_content = refusal or "Not yet."
+                        out.guard_refusals.append((turn_idx, tool_content))
+                    else:
+                        current_round += 1
+                        guard.reset_persona(ROUND_IDS_IN_ORDER[current_round])
+                        panel_msgs[0] = {
+                            "role": "system",
+                            "content": _make_system_prompt(
+                                intensity, current_round=current_round
+                            ),
+                        }
+                        out.tool_calls.append((turn_idx, "next_round"))
+                        tool_content = "Round advanced."
+            else:  # end_interview — unguarded in the sim; production's
+                # end_interview guard is out of scope for this eval.
+                out.tool_calls.append((turn_idx, "end_interview"))
+                tool_content = "Interview ended."
                 ended = True
+            panel_msgs.append(
+                {"role": "tool", "tool_call_id": tc.id, "content": tool_content}
+            )
         if ended:
             return out
 
@@ -201,6 +245,10 @@ def run_simulation(
         )
         cand_text = (cand.choices[0].message.content or "").strip()
         panel_msgs.append({"role": "user", "content": cand_text})
+        # Mirror production's per-user-turn accounting: this candidate turn
+        # counts toward the round now active (after any advance above), which
+        # is what the next may_transfer will read.
+        guard.record_user_turn(ROUND_IDS_IN_ORDER[current_round])
 
     return out
 

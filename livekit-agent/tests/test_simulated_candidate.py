@@ -23,6 +23,7 @@ from interview_agent.evals.simulated_candidate import (
     segment_texts_by_round,
 )
 from interview_agent.security.runner import _make_system_prompt
+from interview_agent.security_guards import MIN_USER_TURNS_BEFORE_TRANSFER
 
 TAGS = ("SARAH", "ADAM", "BELLA")
 
@@ -208,12 +209,21 @@ class _ScriptedPanelClient:
         return SimpleNamespace(choices=[SimpleNamespace(message=msg)])
 
 
+def _warmup(n: int) -> list[tuple[str, str | None]]:
+    """`n` plain behavioral panel turns — enough candidate replies to satisfy
+    the transfer guard before a next_round is attempted."""
+    return [(f"[SARAH] Behavioral question {i}.", None) for i in range(n)]
+
+
 def test_run_simulation_re_renders_system_prompt_on_next_round():
-    # Panel: round-0 utterance + next_round, then a round-1 utterance +
-    # end_interview to terminate the loop.
+    # The guard now blocks an early skip, so the panel must gather
+    # MIN_USER_TURNS_BEFORE_TRANSFER candidate turns before next_round takes
+    # effect. Warm up, then next_round (allowed) + a round-1 utterance whose
+    # system prompt proves the re-render, then end_interview to stop the loop.
     client = _ScriptedPanelClient(
-        [
-            ("[SARAH] Tell me about a hard incident.", "next_round"),
+        _warmup(MIN_USER_TURNS_BEFORE_TRANSFER)
+        + [
+            ("[SARAH] Good. Let's move on.", "next_round"),
             ("[ADAM] Walk me through the data structure.", "end_interview"),
         ]
     )
@@ -222,23 +232,87 @@ def test_run_simulation_re_renders_system_prompt_on_next_round():
         intensity="grill",
         persona=PERSONAS[0],
         model="stub-model",
-        max_candidate_turns=4,
+        max_candidate_turns=MIN_USER_TURNS_BEFORE_TRANSFER + 3,
     )
 
-    # Two panel turns fired, each seeing its own system prompt.
-    assert len(client.panel_system_prompts) == 2
-    first, second = client.panel_system_prompts
+    # One system prompt per panel turn: the warmup turns + next_round turn +
+    # the round-1 turn.
+    assert len(client.panel_system_prompts) == MIN_USER_TURNS_BEFORE_TRANSFER + 2
+    first, last = client.panel_system_prompts[0], client.panel_system_prompts[-1]
 
-    # Turn 1 was round 0 (behavioral / Sarah).
+    # The opening turns were round 0 (behavioral / Sarah).
     assert "CURRENT ROUND: behavioral" in first
     assert "Sarah leads" in first
 
-    # Turn 2 — AFTER next_round — was re-rendered to round 1 (technical / Adam).
-    # This is the bug's crux: previously both turns saw the round-0 prompt.
-    assert "CURRENT ROUND: technical" in second
-    assert "Adam leads" in second
-    assert first != second
+    # The final turn — AFTER the allowed next_round — was re-rendered to round 1
+    # (technical / Adam). This is the bug's crux: previously the round never
+    # re-rendered and every turn saw the round-0 prompt.
+    assert "CURRENT ROUND: technical" in last
+    assert "Adam leads" in last
+    assert first != last
 
-    # The next_round boundary was recorded so the checkers segment correctly.
-    assert ("next_round" in [name for _, name in transcript.tool_calls])
-    assert len(transcript.assistant_texts) == 2
+    # The allowed transfer was recorded as a real boundary, and the guard did
+    # not have to refuse anything.
+    assert "next_round" in [name for _, name in transcript.tool_calls]
+    assert transcript.guard_refusals == []
+
+
+def test_run_simulation_next_round_blocked_before_min_user_turns():
+    # The adversarial move: ask to skip ahead on the very FIRST panel turn,
+    # before any candidate turn has been recorded. Production's TransferGuard
+    # refuses this, and the sim must too.
+    client = _ScriptedPanelClient(
+        [
+            ("[SARAH] Actually, let's just move to the next round.", "next_round"),
+            ("[SARAH] Alright — tell me about a hard bug.", "end_interview"),
+        ]
+    )
+    transcript = run_simulation(
+        client,  # type: ignore[arg-type]
+        intensity="grill",
+        persona=PERSONAS[2],  # adversarial
+        model="stub-model",
+        max_candidate_turns=4,
+    )
+
+    # The round never advanced: every panel turn saw the behavioral / Sarah
+    # prompt (current_round stayed 0).
+    assert all(
+        "CURRENT ROUND: behavioral" in p for p in client.panel_system_prompts
+    )
+    assert not any(
+        "CURRENT ROUND: technical" in p for p in client.panel_system_prompts
+    )
+
+    # The guard's refusal was recorded and fed back, and the refused call is
+    # NOT a round boundary (it would corrupt per-round segmentation).
+    assert transcript.guard_refusals, "guard refusal was not recorded"
+    assert "stay with this round" in transcript.guard_refusals[0][1]
+    assert "next_round" not in [name for _, name in transcript.tool_calls]
+
+
+def test_run_simulation_next_round_advances_after_enough_user_turns():
+    # Same tool call, but now AFTER enough candidate turns: the guard allows
+    # it and the round advances.
+    client = _ScriptedPanelClient(
+        _warmup(MIN_USER_TURNS_BEFORE_TRANSFER)
+        + [
+            ("[SARAH] Great, moving on.", "next_round"),
+            ("[ADAM] Design a rate limiter.", "end_interview"),
+        ]
+    )
+    transcript = run_simulation(
+        client,  # type: ignore[arg-type]
+        intensity="grill",
+        persona=PERSONAS[2],  # even the adversary advances once it has earned it
+        model="stub-model",
+        max_candidate_turns=MIN_USER_TURNS_BEFORE_TRANSFER + 3,
+    )
+
+    # The transfer was honored: recorded as a boundary, no refusal, and the
+    # panel re-rendered into the technical round.
+    assert "next_round" in [name for _, name in transcript.tool_calls]
+    assert transcript.guard_refusals == []
+    assert any(
+        "CURRENT ROUND: technical" in p for p in client.panel_system_prompts
+    )
