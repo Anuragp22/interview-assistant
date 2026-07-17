@@ -62,3 +62,6 @@ next-env.d.ts
 
 # SDD execution scratch (progress ledger, task briefs)
 /.superpowers/
+
+# Owner's personal interview-prep material — kept locally, never published.
+/docs/interview-prep-archive/
