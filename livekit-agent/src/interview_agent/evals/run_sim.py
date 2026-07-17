@@ -89,12 +89,25 @@ def color(s: str, c: str) -> str:
 
 
 def _load_env() -> None:
-    """Match the agent's own env-loading: prefer .env.local at repo root."""
-    repo_root = Path(__file__).resolve().parents[4]
-    for candidate in (repo_root / ".env.local", repo_root / ".env"):
-        if candidate.exists():
-            load_dotenv(dotenv_path=candidate, override=False)
-            return
+    """Replicate the live agent's env-loading (agent.py::_load_env) exactly, so
+    the eval finds Groq keys wherever the agent would.
+
+    The order mirrors the agent precisely:
+      1. Load the repo-root ``.env.local`` (no override).
+      2. ``load_dotenv(override=True)`` with no path, which walks up from the
+         current working directory and loads the first ``.env`` it finds — i.e.
+         ``livekit-agent/.env`` when this eval is run from ``livekit-agent/``,
+         which is exactly where pipeline.py tells users to put the Groq keys.
+
+    The earlier version loaded ONLY the repo-root ``.env.local``/``.env`` and
+    returned, so keys living in ``livekit-agent/.env`` were never seen. The
+    agent's LIVEKIT_URL fallback is intentionally omitted here: the eval never
+    touches LiveKit.
+    """
+    repo_root_env = Path(__file__).resolve().parents[4] / ".env.local"
+    if repo_root_env.exists():
+        load_dotenv(dotenv_path=repo_root_env)
+    load_dotenv(override=True)
 
 
 @dataclass
