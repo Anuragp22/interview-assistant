@@ -42,6 +42,14 @@ on:
   schedule:
     - cron: "0 6 * * 1" # weekly, Monday 06:00 UTC (LLM gates only)
 
+# Minimal token scope for the whole workflow: every job only checks out and
+# runs tests/evals — none post comments, push, or cut releases. Granting only
+# `contents: read` drops the broad default GITHUB_TOKEN grant (CodeQL finding).
+# A job that later needs more should carry its own `permissions:` block rather
+# than widening this one.
+permissions:
+  contents: read
+
 jobs:
   web-checks:
     name: Web - typecheck, lint, unit tests
