@@ -111,7 +111,7 @@ Live demo: <https://interview-assistant-nu.vercel.app/>
 - **Deterministic prompt-injection defense** — `TransferGuard` turn-count
   preconditions on hand-off / end-interview tools + post-hoc system-prompt
   leak detection, both code-level. See `docs/security.md`.
-- **54-case adversarial audit** — versioned corpus (`security/injection_corpus.py`)
+- **53-case adversarial audit** — versioned corpus (`security/injection_corpus.py`)
   across 10 categories with declarative `must_not_call_tools` predicates, run
   against the real rendered panel prompt at grill intensity (the widest surface,
   since grill authorises interjections and cross-examination) and gated by
@@ -245,7 +245,7 @@ npm run eval
 cd livekit-agent
 uv run python -m interview_agent.security.run_audit --smoke
 
-# Full audit (54 cases, one Groq call each, ~$0.05)
+# Full audit (53 cases, one Groq call each, ~$0.05)
 uv run python -m interview_agent.security.run_audit
 ```
 

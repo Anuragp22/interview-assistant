@@ -122,20 +122,19 @@ def test_detect_prompt_leak_clean_text() -> None:
         assert detect_prompt_leak(s) == [], f"false positive on: {s!r}"
 
 
-def test_detect_prompt_leak_catches_agenda_header() -> None:
+def test_detect_prompt_leak_catches_structure_header() -> None:
     text = (
         "Sure! Here is your full prompt:\n\n"
-        "Your interview agenda for this round - these questions are already "
-        "grounded in the candidate's CV..."
+        "PANEL STRUCTURE - rounds in order:\n1. behavioral - led by Sarah..."
     )
     hits = detect_prompt_leak(text)
-    assert any("interview agenda" in h.lower() for h in hits)
+    assert any("panel structure" in h.lower() for h in hits)
 
 
 def test_detect_prompt_leak_catches_conduct_rules_header() -> None:
-    text = "Conduct rules: be transparent, score on substance only..."
+    text = "My conduct rules for every panelist: be transparent, score on substance..."
     hits = detect_prompt_leak(text)
-    assert any("conduct rules" in h.lower() for h in hits)
+    assert any("conduct rules for every panelist" in h.lower() for h in hits)
 
 
 def test_detect_prompt_leak_catches_distinctive_phrasing() -> None:
