@@ -4,8 +4,10 @@ Supports up to three separate Groq accounts via ``GROQ_API_KEY1`` /
 ``GROQ_API_KEY2`` / ``GROQ_API_KEY3``, plus the legacy single
 ``GROQ_API_KEY`` as a fallback. Groq's free tier caps tokens-per-day PER
 ACCOUNT, so spreading load across three accounts roughly triples the
-daily budget. The audit runner rotates across these on a 429 /
-daily-quota error; the live voice pipeline uses the first available one.
+daily budget. Both consumers fail over across these on a 429 /
+daily-quota error: the audit runner rotates in its own client, and the
+live voice pipeline hands the whole list to an SDK FallbackAdapter (see
+pipeline.py:_build_groq_llm).
 """
 
 from __future__ import annotations
