@@ -417,7 +417,11 @@ async function main(): Promise<void> {
       allowMismatch: ALLOW_MODEL_MISMATCH,
     });
     if (check.message) console.error(color(`\n${check.message}`, "yellow"));
-    if (check.fatal) process.exit(1);
+    // A cross-model baseline is a config/"couldn't run" condition, not a
+    // quality regression — exit 2, matching the header contract (1 = regressed,
+    // 2 = couldn't run). Exiting 1 here would misfile a model swap as a
+    // regression, the exact infra-vs-quality conflation this gate prevents.
+    if (check.fatal) process.exit(2);
     comparable = check.comparable;
   }
   const regressions =
