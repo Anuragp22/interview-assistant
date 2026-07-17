@@ -35,15 +35,14 @@ def _provider_env(monkeypatch):
     Each plugin raises ValueError at construction if its API key env var
     is unset. We're not making live calls — construction is what we're
     verifying — so dummy values are sufficient.
+
+    Only GROQ_API_KEY is set, so these tests see exactly one Groq account and
+    build_session() returns a plain LLM. conftest's _no_real_credentials
+    fixture guarantees the numbered keys are absent.
     """
     monkeypatch.setenv("DEEPGRAM_API_KEY", "test-deepgram-key")
     monkeypatch.setenv("GROQ_API_KEY", "test-groq-key")
     monkeypatch.setenv("ELEVEN_API_KEY", "test-eleven-key")
-    # Multi-account keys may be present from .env.local (loaded by
-    # agent._load_env at import). Clear them so these construction tests
-    # are deterministic on the single GROQ_API_KEY set above.
-    for _name in ("GROQ_API_KEY1", "GROQ_API_KEY2", "GROQ_API_KEY3"):
-        monkeypatch.delenv(_name, raising=False)
 
 
 def test_build_session_returns_agent_session():
@@ -183,8 +182,6 @@ def test_build_groq_llm_single_key_plain(monkeypatch):
     Wrapping a single instance in a FallbackAdapter would buy nothing and
     add a layer to every turn's error path.
     """
-    for name in ("GROQ_API_KEY1", "GROQ_API_KEY2", "GROQ_API_KEY3"):
-        monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("GROQ_API_KEY", "gsk_only")
 
     built = _build_groq_llm()
@@ -195,7 +192,8 @@ def test_build_groq_llm_multi_key_fallback(monkeypatch):
     """Two+ accounts — a mid-interview 429 must fail over, not kill the turn."""
     monkeypatch.setenv("GROQ_API_KEY1", "gsk_a")
     monkeypatch.setenv("GROQ_API_KEY2", "gsk_b")
-    monkeypatch.delenv("GROQ_API_KEY3", raising=False)
+    # Undoes _provider_env above, which sets the legacy key for the
+    # construction tests; without this the list would be three accounts long.
     monkeypatch.delenv("GROQ_API_KEY", raising=False)
 
     built = _build_groq_llm()
@@ -214,7 +212,7 @@ def test_build_groq_llm_fallback_spreads_distinct_keys(monkeypatch):
     """
     monkeypatch.setenv("GROQ_API_KEY1", "gsk_a")
     monkeypatch.setenv("GROQ_API_KEY2", "gsk_b")
-    monkeypatch.delenv("GROQ_API_KEY3", raising=False)
+    # Undoes _provider_env above; the assertion below pins the exact key list.
     monkeypatch.delenv("GROQ_API_KEY", raising=False)
 
     built = _build_groq_llm()

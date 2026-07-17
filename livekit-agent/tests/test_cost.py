@@ -267,14 +267,11 @@ def test_cost_table_prices_the_models_the_pipeline_actually_runs(
     monkeypatch.setenv("DEEPGRAM_API_KEY", "test")
     monkeypatch.setenv("GROQ_API_KEY", "test")
     monkeypatch.setenv("ELEVEN_API_KEY", "test")
-    # Multi-account keys may be present from .env.local (loaded by
-    # agent._load_env at import, so it depends on which tests ran first).
-    # With 2+ keys the pipeline returns a FallbackAdapter, whose .model is
-    # the literal "FallbackAdapter" — it has no single model id to read.
-    # Pin to one key so the model assertion below has a real id to check;
+    # Exactly one Groq account, so build_session() returns a plain LLM with a
+    # readable .model. With 2+ keys it returns a FallbackAdapter, whose .model
+    # is the literal "FallbackAdapter" — no single model id to assert on. The
+    # numbered keys are cleared by conftest's _no_real_credentials fixture;
     # the failover shape itself is covered in test_pipeline.py.
-    for _name in ("GROQ_API_KEY1", "GROQ_API_KEY2", "GROQ_API_KEY3"):
-        monkeypatch.delenv(_name, raising=False)
 
     from interview_agent.models import STT_MODEL, TTS_MODEL, llm_model_id
     from interview_agent.pipeline import build_session
