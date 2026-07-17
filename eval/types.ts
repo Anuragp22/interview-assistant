@@ -33,6 +33,15 @@ export interface FixtureScore {
   hallucinationGuard: number;
   schemaPass: boolean;
   aggregate: number;
+  /**
+   * Set when the fixture never produced questions at all (provider error,
+   * schema failure, scorer throw) — an infrastructure event, NOT a quality
+   * signal. The numeric fields above stay 0 so render code doesn't crash,
+   * but they are meaningless: consumers must branch on THIS flag, never on
+   * the zeros. Errored fixtures are excluded from the baseline, the
+   * regression gate, and the aggregate.
+   */
+  errored?: { message: string };
   details: {
     cvUnmatched: Array<{ persona: PersonaId; cvReference: string }>;
     placeholderHits: Array<{ persona: PersonaId; question: string; marker: string }>;
@@ -46,7 +55,10 @@ export interface RunReport {
   finishedAt: string;
   model: string;
   fixtures: FixtureScore[];
+  /** Mean aggregate over fixtures that actually scored — errored ones excluded. */
   aggregateScore: number;
+  /** How many fixtures never produced a measurement (see FixtureScore.errored). */
+  erroredCount: number;
   passedRegression: boolean;
   regressions: Array<{ fixtureId: string; metric: string; baseline: number; current: number }>;
 }
