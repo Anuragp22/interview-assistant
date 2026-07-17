@@ -1,9 +1,12 @@
 # CI for JobVoice / Interview Assistant.
 #
 # This file makes the resume claims literally true:
-#   - "tests run in CI"                -> web-checks + agent-checks (always run, no keys)
-#   - "eval harness gating CI on drift"-> eval-gate (10pp regression vs eval/baselines.json)
-#   - "gated by a 50-prompt audit"     -> security-audit (50 cases x 3 personas vs baseline)
+#   - "tests run in CI"        -> web-checks + agent-checks (always run, no keys)
+#   - "eval harness runs weekly/dispatch against committed baselines"
+#                              -> eval-gate (10pp regression vs eval/baselines.json)
+#   - "54-case prompt-injection audit"
+#                              -> security-audit (54 cases, one call each, at grill
+#                                 intensity, vs security_baseline.json's 52 passing)
 #
 # The LLM-backed gates need Groq keys as repo secrets (Settings -> Secrets and
 # variables -> Actions): up to three separate Groq accounts for failover, plus

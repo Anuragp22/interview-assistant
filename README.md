@@ -111,16 +111,22 @@ Live demo: <https://interview-assistant-nu.vercel.app/>
 - **Deterministic prompt-injection defense** — `TransferGuard` turn-count
   preconditions on hand-off / end-interview tools + post-hoc system-prompt
   leak detection, both code-level. See `docs/security.md`.
-- **50-prompt adversarial audit** — versioned corpus (`security/injection_corpus.py`)
-  with declarative `must_not_call_tools` predicates, gated by `security_baseline.json`.
+- **54-case adversarial audit** — versioned corpus (`security/injection_corpus.py`)
+  across 10 categories with declarative `must_not_call_tools` predicates, run
+  against the real rendered panel prompt at grill intensity (the widest surface,
+  since grill authorises interjections and cross-examination) and gated by
+  `security_baseline.json`. Runs weekly + on dispatch in CI, not on every push.
 - **LLM eval harness** — offline regression gate (`eval/`) for question
-  generation; fails CI on any per-fixture metric dropping >10 percentage points.
+  generation; fails on any per-fixture metric dropping >10 percentage points.
+  Also weekly + on dispatch: both LLM gates are nondeterministic, so they are
+  deliberately kept off the push/PR path.
 - **Per-stage latency budgets** (`latency_budget.py`) with per-turn OTel spans.
 - **Per-session cost telemetry** (`cost_aggregator.py`), surfaced in the dashboard.
 - **End-to-end OpenTelemetry tracing** — one trace ID spans the Next.js server
   action → Firestore session doc → Python agent worker, via a W3C `traceparent`.
-- **Mid-interview resume** — reopening a closed tab continues at the persona the
-  panel was on.
+- **Mid-interview resume** — reopening a closed tab replays the persisted turns
+  into a fresh chat context and continues at the round the panel was on
+  (`sessions/{id}.currentRound`), greeting suppressed.
 
 ## Tech stack
 
@@ -151,12 +157,16 @@ with what's actually running.
    them against the CV so each question references concrete details. CVs under
    ~600 tokens skip regrounding — JD-grounded questions beat questions rewritten
    against 300 words of nothing.
-3. **Token mint + room join** — Next.js mints a LiveKit JWT carrying the session
-   ID and traceparent. The browser joins `session-{id}` and publishes mic audio.
-4. **Worker dispatch** — LiveKit Cloud dispatches the Python worker. It reads
-   the session doc's panel spec and builds ONE `PanelAgent` with the CV and JD
-   inlined in the system prompt, the whole roster in the roleplay protocol, and
-   the intensity's interjection budget.
+3. **Token mint + room join** — Next.js mints a LiveKit JWT whose metadata
+   carries the session ID. The browser joins `session-{id}` and publishes mic
+   audio. (The OTel `traceparent` does *not* ride the JWT — it was already
+   written onto the session doc in step 1; see step 4.)
+4. **Worker dispatch** — LiveKit Cloud dispatches the Python worker; it rejects
+   any room not named `session-*`. It reads the session doc's panel spec and
+   builds ONE `PanelAgent` with the CV and JD inlined in the system prompt, the
+   whole roster in the roleplay protocol, and the intensity's interjection
+   budget. It also reads the `traceparent` written in step 1 and continues that
+   trace, so the whole call nests under the server action that created it.
 5. **Per turn** — Deepgram → audio TurnDetector decides the candidate is done →
    Groq with the panel prompt + agenda → speaker-tag parser routes each run to
    that panelist's ElevenLabs stream → browser. The turn is written to
@@ -227,16 +237,21 @@ npx tsc --noEmit
 # Python agent tests
 cd livekit-agent && uv run pytest -v
 
-# Question-generation eval harness — gates CI on per-fixture metric drift
+# Question-generation eval harness — 10 fixtures vs eval/baselines.json
+# (runs weekly + on dispatch in CI, not on push/PR)
 npm run eval
 
-# Prompt-injection audit (smoke: ~10s, ~$0.01)
+# Prompt-injection audit (smoke: one case per category, ~10s, ~$0.01)
 cd livekit-agent
 uv run python -m interview_agent.security.run_audit --smoke
 
-# Full audit (50 cases × 3 personas = 150, ~3 min)
+# Full audit (54 cases, one Groq call each, ~$0.05)
 uv run python -m interview_agent.security.run_audit
 ```
+
+Both LLM-backed gates need a Groq key and are nondeterministic, so CI runs them
+on the weekly schedule + `workflow_dispatch` only. The deterministic gates
+(typecheck, lint, Vitest, pytest) block every push and PR.
 
 ## Project structure
 
@@ -259,7 +274,7 @@ interview-assistant/
 │   ├── rubric.ts                     BARS anchors per round type — the scoring contract
 │   ├── judge.ts                      judge model provider
 │   ├── groq.ts                       interviewer model provider + failover
-│   └── livekit.ts                    JWT minting + traceparent propagation
+│   └── livekit.ts                    LiveKit JWT minting (metadata = {sessionId})
 ├── eval/                             offline question-generation regression harness
 ├── livekit-agent/                    Python LiveKit Agents worker
 │   └── src/interview_agent/
