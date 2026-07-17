@@ -210,6 +210,16 @@ interface Session {
   startedAt?: string;
   /** Set by the agent when the call ends, alongside status: awaiting-report. */
   endedAt?: string;
+  /**
+   * Breadcrumbs written by the Python agent when its startup crashes (bad CV
+   * text, LiveKit unreachable, Firebase init failure). The status stays
+   * "awaiting-call" — the session was created but no call ever began — so
+   * these are the only record of WHY it is stranded. Truncated to 500 chars
+   * at the writer. The cron reconciler sweeps such sessions to "abandoned"
+   * once they are an hour stale; see lib/reconcile-staleness.ts.
+   */
+  agentStartError?: string;
+  agentStartFailedAt?: string;
   completedAt?: string;
   createdAt: string;
   // W3C `traceparent` value (e.g. "00-{trace_id}-{span_id}-01"). Written

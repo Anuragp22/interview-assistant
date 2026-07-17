@@ -2,6 +2,7 @@ import { NextRequest } from "next/server";
 
 import { db } from "@/firebase/admin";
 import { generateReport } from "@/lib/actions/reports.action";
+import { isStaleAwaitingCall } from "@/lib/reconcile-staleness";
 
 export const runtime = "nodejs";
 // 60 is the HARD ceiling on the Hobby plan — exporting more fails the whole
@@ -99,6 +100,29 @@ export async function GET(req: NextRequest) {
 
     const r = await generateReport(doc.id);
     results.push({ sessionId: doc.id, from: "in-call-stale", ok: r.success, note: r.success ? undefined : r.message });
+  }
+
+  // 3. The call never started at all (pre-call bail or agent startup crash).
+  //
+  // This runs last, after both scoring sweeps have already spent most of the
+  // 60s budget. It is safe there because it is abandon-only: one indexed query
+  // plus at most MAX_PER_RUN Firestore updates, no judge call. By definition a
+  // never-started session has no turns, so there is nothing to score and no
+  // report to generate — this pass costs tens of milliseconds, not tens of
+  // seconds. If the budget does run out mid-sweep, the only cost is that these
+  // rows wait for the next cron tick.
+  const awaitingCall = await db
+    .collection("sessions")
+    .where("status", "==", "awaiting-call")
+    .limit(MAX_PER_RUN)
+    .get();
+
+  for (const doc of awaitingCall.docs) {
+    const s = doc.data() as Session;
+    if (!isStaleAwaitingCall(s.createdAt, now)) continue;
+    // No turns exist — nothing to score, so no report is manufactured.
+    await doc.ref.update({ status: "abandoned" });
+    results.push({ sessionId: doc.id, from: "awaiting-call", ok: true, note: "abandoned (never started)" });
   }
 
   return Response.json({ success: true, reconciled: results.length, results });
