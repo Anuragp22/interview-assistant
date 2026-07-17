@@ -51,10 +51,20 @@ debiased judge, durable report reconciler.
 
 Everything a reviewer can falsify in minutes gets fixed. No new features.
 
+- **Doc archive policy (owner's request):** outgoing doc versions are NOT destroyed.
+  Before any rewrite, the current version is copied to `docs/interview-prep-archive/`
+  which is gitignored — kept locally for the owner's interview preparation, never
+  committed. (Git history also retains everything, but the archive is the convenient
+  copy.)
 - **Rewrite `docs/observability.md`** around the real architecture: traceparent via
   Firestore session doc, `agent.panel-session` parenting, `metrics_bridge` latency spans
   (including the honest partial-span policy), `SessionCostAggregator` → `estimatedCost`,
-  current models and rates. Delete every RAG/transfer/verify-claim reference.
+  current models and rates. The tracked copy carries no RAG/transfer/verify-claim
+  references; the outgoing version lands in the archive.
+- **Rewrite `docs/ARCHITECTURE.md` and `docs/TECH_DECISIONS.md`** to match the panel
+  architecture (same archive treatment) — edited in place, not deleted.
+- **Untrack `docs/INTERVIEW_PREP.md`** (`git rm --cached` + gitignore): personal prep
+  material moves to the archive folder and out of the public repo.
 - **Fix `livekit-agent/README.md`**: `session-*` room pattern, gpt-oss-120b, accurate
   run instructions.
 - **Fix main `README.md`**: traceparent claim, audit-size claim. Fix `docs/security.md`
