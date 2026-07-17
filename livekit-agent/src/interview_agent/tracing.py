@@ -3,10 +3,23 @@
 The Next.js server action that creates the session writes a W3C
 `traceparent` value to the session doc. When the agent boots into a
 room, it loads the session, extracts that traceparent, and continues
-the same trace — every span emitted by the agent (per-persona on_enter,
-panel hand-off, verify_cv_claim tool calls, RAG queries, Groq/ElevenLabs/
-Deepgram HTTP calls) becomes a descendant of the originating root span
-in Honeycomb / Tempo / Jaeger.
+the same trace — the spans this worker emits become descendants of the
+originating root span in Honeycomb / Tempo / Jaeger:
+
+    agent.panel-session   the whole call (agent.py::entrypoint)
+    agent.on-enter        the greeting (skipped on the resume path)
+    agent.turn-latency    one per assistant turn (metrics_bridge.py)
+    agent.next-round      round advance (agent.py::PanelAgent.next_round)
+    agent.end-interview   the end tool (agent.py::PanelAgent.end_interview)
+    session.cost          final $$$ rollup (cost_aggregator.py::finalize)
+
+Because we install the GLOBAL TracerProvider below, livekit-agents' own
+telemetry tracer resolves through it too — so its spans (job_entrypoint,
+agent_session, agent_turn, llm_node, tts_node, eou_detection,
+function_tool, ...) export alongside ours with no extra wiring. The raw
+HTTP calls to Groq / ElevenLabs / Deepgram are NOT separately
+instrumented: that needs opentelemetry-instrumentation-httpx, which this
+worker does not ship (see pyproject.toml).
 
 Exporter selection mirrors the Next side:
   - If OTEL_EXPORTER_OTLP_ENDPOINT is set we ship to that OTLP/HTTP+
