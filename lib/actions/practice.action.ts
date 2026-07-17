@@ -14,6 +14,7 @@ import {
   type PresetId,
   PRESETS,
 } from "@/lib/presets";
+import { consumePracticeQuota } from "@/lib/quota";
 import { traced, currentTraceparent } from "@/lib/tracing";
 
 const SESSION_COOKIE = "session";
@@ -146,6 +147,24 @@ export async function createPracticeSession(input: {
       try {
         const uid = await requireUid();
         rootSpan.setAttribute("user.id", uid);
+
+        // Bound the spend before incurring any. Everything below this line
+        // costs money — two Groq calls here, then TTS/STT/judge dollars once
+        // the session runs — and Groq's free tier is a per-DAY token cap
+        // shared across keys, so an unthrottled loop here drains the whole
+        // day's budget for everyone.
+        const quota = await consumePracticeQuota(uid);
+        rootSpan.setAttribute("quota.outcome", quota.outcome);
+        rootSpan.setAttribute("quota.limit", quota.limit);
+        if (quota.outcome !== "allowed") {
+          return {
+            success: false,
+            message:
+              quota.outcome === "unavailable"
+                ? "Could not verify your daily session quota — please try again."
+                : `Daily limit reached (${quota.limit} practice sessions per day). Resets at midnight UTC.`,
+          };
+        }
 
         const preset = PRESETS[input.presetId];
         if (!preset) {
