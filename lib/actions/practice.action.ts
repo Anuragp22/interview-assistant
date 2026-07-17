@@ -15,6 +15,7 @@ import {
   PRESETS,
 } from "@/lib/presets";
 import { consumePracticeQuota } from "@/lib/quota";
+import { buildJdOnlyGroundedBuckets } from "@/lib/grounding-passthrough";
 import { traced, currentTraceparent } from "@/lib/tracing";
 
 const SESSION_COOKIE = "session";
@@ -242,15 +243,10 @@ export async function createPracticeSession(input: {
         rootSpan.setAttribute("cv.thin", cvIsThin);
 
         const phase2 = cvIsThin
-          ? Object.fromEntries(
-              roundIds.map((rid) => [
-                rid,
-                {
-                  questionsGrounded: phase1[rid].questions,
-                  rubricsGrounded: phase1[rid].rubrics as RubricGrounded[],
-                },
-              ]),
-            )
+          ? // Phase-1 template rubrics carry no cvReference; the grounding
+            // contract requires it as an explicit null (Groq strict mode).
+            // Attach it here rather than persisting schema-violating rubrics.
+            buildJdOnlyGroundedBuckets(roundIds, phase1)
           : await traced(
               "phase2.reground-against-cv",
               {},
