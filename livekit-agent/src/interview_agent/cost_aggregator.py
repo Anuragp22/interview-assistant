@@ -22,6 +22,7 @@ from typing import Any
 
 from interview_agent.cost_rates import CostBreakdown, roll_up_cost
 from interview_agent.latency_budget import BUDGETS  # noqa: F401 (kept for parity with metrics_bridge)
+from interview_agent.models import llm_model_id
 from interview_agent.tracing import get_tracer
 
 logger = logging.getLogger("interview-agent.cost-aggregator")
@@ -133,6 +134,20 @@ class SessionCostAggregator:
                 "usage.llm_output_tokens": self._llm_output_tokens,
                 "usage.tts_characters_count": self._tts_characters_count,
                 "usage.stt_audio_seconds": self._stt_audio_seconds,
+                # OTel GenAI semantic conventions. Langfuse (and any other
+                # LLM-aware backend) groups token usage by these names, so
+                # the counts above are aliased rather than left as attributes
+                # only this repo knows how to read. Aliases only — the
+                # usage.* keys stay, because eval/latency-report.ts and the
+                # existing queries read those.
+                #
+                # Note what is NOT here: gen_ai.prompt / gen_ai.completion.
+                # Langfuse renders them, and filling them would put CV text
+                # and transcript content into a third-party trace backend.
+                # The absence is the privacy property, and it is deliberate.
+                "gen_ai.usage.input_tokens": self._llm_input_tokens,
+                "gen_ai.usage.output_tokens": self._llm_output_tokens,
+                "gen_ai.request.model": llm_model_id(),
                 "cost.groq_usd": breakdown.groq_usd,
                 "cost.tts_usd": breakdown.tts_usd,
                 "cost.stt_usd": breakdown.stt_usd,

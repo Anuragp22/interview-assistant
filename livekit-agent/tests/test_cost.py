@@ -10,6 +10,11 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+from opentelemetry import trace
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+    InMemorySpanExporter,
+)
 
 from interview_agent.cost_aggregator import SessionCostAggregator
 from interview_agent.cost_rates import (
@@ -22,6 +27,21 @@ from interview_agent.cost_rates import (
     stt_usd,
     tts_usd,
 )
+from interview_agent.models import llm_model_id
+from interview_agent.tracing import install_tracer_provider
+
+
+def _attach_in_memory_exporter() -> InMemorySpanExporter:
+    """Attach an in-memory exporter to the existing global TracerProvider.
+
+    Same pattern as test_tracing.py — we can't swap the global provider
+    once installed, but adding a SimpleSpanProcessor on top works.
+    """
+    install_tracer_provider()
+    provider = trace.get_tracer_provider()
+    exporter = InMemorySpanExporter()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))  # type: ignore[attr-defined]
+    return exporter
 
 
 def _expected_groq_usd(input_tokens: int, output_tokens: int) -> float:
@@ -186,6 +206,43 @@ def test_aggregator_finalize_is_idempotent() -> None:
     first = agg.finalize()
     second = agg.finalize()
     assert first.total_usd == second.total_usd
+
+
+def test_session_cost_span_carries_gen_ai_attributes() -> None:
+    """Langfuse groups LLM telemetry by the OTel GenAI semantic
+    conventions, so the token counts we already collect are aliased onto
+    gen_ai.* names alongside our own usage.* ones.
+
+    Aliases only — no new data collection, and deliberately no prompt or
+    completion content. Langfuse would happily render gen_ai.prompt /
+    gen_ai.completion, and putting a candidate's CV or transcript there
+    is exactly the privacy leak this codebase avoids by construction.
+    """
+    exporter = _attach_in_memory_exporter()
+    exporter.clear()
+
+    agg = SessionCostAggregator(session_id="s1")
+    agg.handle_usage_event(_make_usage_event(llm_in=1000, llm_out=500))
+    agg.finalize()
+
+    spans = [s for s in exporter.get_finished_spans() if s.name == "session.cost"]
+    assert len(spans) == 1
+    attrs = dict(spans[0].attributes or {})
+
+    assert attrs["gen_ai.usage.input_tokens"] == 1000
+    assert attrs["gen_ai.usage.output_tokens"] == 500
+    # Read from models.llm_model_id() rather than hardcoded: a GROQ_MODEL
+    # override in the environment must not make this test lie about what
+    # the span says.
+    assert attrs["gen_ai.request.model"] == llm_model_id()
+
+    # The aliases sit alongside the originals, they don't replace them —
+    # eval/latency-report.ts and the existing dashboards read usage.*.
+    assert attrs["usage.llm_input_tokens"] == 1000
+    assert attrs["usage.llm_output_tokens"] == 500
+
+    # No prompt/completion content on the span. Ever.
+    assert not [k for k in attrs if k in ("gen_ai.prompt", "gen_ai.completion")]
 
 
 # ---------------------------------------------------------------------------

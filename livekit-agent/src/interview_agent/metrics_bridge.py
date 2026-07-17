@@ -31,6 +31,7 @@ from typing import Any
 from livekit.agents.llm.chat_context import MetricsReport
 
 from interview_agent.latency_budget import BUDGETS, violated
+from interview_agent.models import llm_model_id
 from interview_agent.tracing import get_tracer
 
 logger = logging.getLogger("interview-agent.metrics-bridge")
@@ -101,6 +102,11 @@ def emit_turn_latency_span(
     attributes: dict[str, Any] = {
         "session.id": session_id,
         "persona.id": persona_id,
+        # OTel GenAI semantic convention — lets an LLM-aware backend group
+        # these turns by model, so a latency regression can be read against
+        # a model migration. An alias of what models.py already knows; no
+        # new data collection, and no prompt/completion content.
+        "gen_ai.request.model": llm_model_id(),
         "latency.budget_violated": bool(violations),
         # Tag every span so a query can separate complete turns from partial
         # ones — rather than the old behaviour, where partial turns simply

@@ -6,13 +6,18 @@
  * call gets traced automatically, and so custom spans we open via
  * `trace.getTracer("...").startActiveSpan(...)` get exported too.
  *
- * Exporter selection:
+ * Exporter selection — mirrors the agent side
+ * (livekit-agent/src/interview_agent/tracing.py::_resolve_otlp_config):
  *   - If OTEL_EXPORTER_OTLP_ENDPOINT is set, we ship spans to that
  *     OTLP/HTTP+JSON endpoint. For Honeycomb the endpoint is
  *     https://api.honeycomb.io/v1/traces and the API key goes in the
  *     X-Honeycomb-Team header. For Grafana Tempo, point at your tempo
- *     gateway.
- *   - If not set, we keep a ConsoleSpanExporter so local `npm run dev`
+ *     gateway. An explicit endpoint always wins — it's a deliberate
+ *     operator decision, so Langfuse keys in the same env can't hijack it.
+ *   - Else, if LANGFUSE_PUBLIC_KEY + LANGFUSE_SECRET_KEY are both set,
+ *     we ship to Langfuse's OTLP endpoint (Basic auth over the key
+ *     pair). The zero-config path: paste two keys, get traces.
+ *   - If neither, we keep a ConsoleSpanExporter so local `npm run dev`
  *     dumps spans to stdout without any signup. Good for first-touch
  *     verification of trace propagation; useless in production.
  */
@@ -24,10 +29,16 @@ import {
   SimpleSpanProcessor,
 } from "@opentelemetry/sdk-trace-base";
 
+/** Langfuse Cloud EU. LANGFUSE_HOST switches region (us./jp./hipaa.) or
+ * points at a self-hosted instance. */
+const LANGFUSE_DEFAULT_HOST = "https://cloud.langfuse.com";
+
 export function register(): void {
   const endpoint = process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
   const honeycombKey = process.env.HONEYCOMB_API_KEY;
   const honeycombDataset = process.env.HONEYCOMB_DATASET ?? "interview-assistant";
+  const langfusePk = process.env.LANGFUSE_PUBLIC_KEY;
+  const langfuseSk = process.env.LANGFUSE_SECRET_KEY;
 
   const spanProcessors = [];
 
@@ -44,6 +55,29 @@ export function register(): void {
     spanProcessors.push(
       new BatchSpanProcessor(
         new OTLPHttpJsonTraceExporter({ url: endpoint, headers }),
+      ),
+    );
+  } else if (langfusePk && langfuseSk) {
+    // BOTH keys required: half a credential would 401 on every export
+    // for the life of the process, and a batch exporter fails quietly.
+    // `||`, not `??`: LANGFUSE_HOST= in a .env file loads as an empty
+    // string, and an empty host would build a relative `/api/...` URL
+    // that only fails once spans start exporting.
+    const host = (process.env.LANGFUSE_HOST || LANGFUSE_DEFAULT_HOST).replace(
+      /\/$/,
+      "",
+    );
+    spanProcessors.push(
+      new BatchSpanProcessor(
+        new OTLPHttpJsonTraceExporter({
+          url: `${host}/api/public/otel/v1/traces`,
+          headers: {
+            Authorization: `Basic ${Buffer.from(`${langfusePk}:${langfuseSk}`).toString("base64")}`,
+            // Opts into Langfuse Cloud's real-time ingestion. Optional
+            // per their docs; without it traces lag behind the session.
+            "x-langfuse-ingestion-version": "4",
+          },
+        }),
       ),
     );
   } else {

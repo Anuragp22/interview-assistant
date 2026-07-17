@@ -7,8 +7,10 @@ processes we own: the Next.js server (`instrumentation.ts`) and the Python agent
 worker (`livekit-agent/src/interview_agent/tracing.py`). Firestore is the
 carrier — a W3C `traceparent` field rides on the session doc and is rehydrated
 by the agent on entry. LiveKit is the transport: it dispatches the agent into
-the room. One trace ID covers the whole flow in Honeycomb / Grafana Tempo /
-Jaeger.
+the room. One trace ID covers the whole flow in Langfuse / Honeycomb / Grafana
+Tempo / Jaeger — set two Langfuse keys and there is nothing else to configure
+(see "Langfuse quickstart"), or leave everything unset and read the spans on
+stdout.
 
 ## Why this exists
 
@@ -21,16 +23,55 @@ a Vercel function and a long-lived Python worker in another region.
 
 ## Architecture
 
-| Side | Bootstrap | Exporter when `OTEL_EXPORTER_OTLP_ENDPOINT` is set | Exporter when unset |
+| Side | Bootstrap | Exporter when a sink is configured | Exporter when nothing is set |
 |---|---|---|---|
 | Web | `instrumentation.ts` → `registerOTel()` from `@vercel/otel`, `serviceName: interview-assistant-web` | `BatchSpanProcessor` + `OTLPHttpJsonTraceExporter` (OTLP/**HTTP+JSON**) | `SimpleSpanProcessor` + `ConsoleSpanExporter` |
 | Agent | `tracing.py` → `install_tracer_provider()`, `service.name: interview-assistant-agent` | `BatchSpanProcessor` + `OTLPSpanExporter` (OTLP/**HTTP+protobuf**) | `SimpleSpanProcessor` + `ConsoleSpanExporter` |
 
-Both sides read the same two optional Honeycomb variables (`HONEYCOMB_API_KEY`,
-`HONEYCOMB_DATASET`, defaulting to `interview-assistant`) and attach them as
-`x-honeycomb-team` / `x-honeycomb-dataset` headers when the key is present.
-Neither side requires a backend: leave the endpoint unset and each process
-prints spans to stdout instead. Nothing else changes.
+### Which sink, and why that order
+
+Both sides resolve the sink from env with the same three-step priority. The
+agent's copy is `_resolve_otlp_config()` (`tracing.py`) — a pure env-reader,
+unit-tested exhaustively; the web side open-codes the same chain in
+`register()` (`instrumentation.ts`).
+
+1. **`OTEL_EXPORTER_OTLP_ENDPOINT`** — ships there, plus the optional Honeycomb
+   headers (`HONEYCOMB_API_KEY` → `x-honeycomb-team`, `HONEYCOMB_DATASET` →
+   `x-honeycomb-dataset`, defaulting to `interview-assistant`). An explicit
+   endpoint is a deliberate operator decision, so it **always wins** — Langfuse
+   keys left in the same env cannot hijack a Honeycomb deploy.
+2. **`LANGFUSE_PUBLIC_KEY` + `LANGFUSE_SECRET_KEY`** — the zero-config path.
+   The endpoint is derived, not configured. **Both** keys are required: half a
+   credential builds an endpoint that 401s on every export for the life of the
+   process, and a `BatchSpanProcessor` swallows that quietly — strictly worse
+   than the console fallback, which at least shows you the spans.
+3. **Neither** — `ConsoleSpanExporter`, spans to stdout. No signup, no config.
+
+Neither side requires a backend. Nothing else changes between the three.
+
+### GenAI semantic conventions
+
+The spans carrying LLM usage also carry the OTel GenAI convention names, so an
+LLM-aware backend groups them without per-attribute configuration:
+
+| Span | Attribute | Aliased from |
+|---|---|---|
+| `session.cost` | `gen_ai.usage.input_tokens` | `usage.llm_input_tokens` |
+| `session.cost` | `gen_ai.usage.output_tokens` | `usage.llm_output_tokens` |
+| `session.cost` | `gen_ai.request.model` | `models.llm_model_id()` |
+| `agent.turn-latency` | `gen_ai.request.model` | `models.llm_model_id()` |
+
+These are **aliases, not new instrumentation** — the same numbers the aggregator
+already had, under a second name. The `usage.*` keys stay exactly where they
+were, because `eval/latency-report.ts` and every existing query read those.
+
+What is deliberately **not** aliased: `gen_ai.prompt` and `gen_ai.completion`.
+Langfuse renders them prominently and it is the obvious next thing to add —
+which is the point of writing it down. Filling them would put CV text and
+transcript content into a third-party backend. No span in this repo has ever
+carried candidate content, and that is a property to keep on purpose rather
+than lose by accident. (`practice.create-session` carries `cv.length` and
+`cv.thin` — the size and a boolean, never the text.)
 
 The agent supports one extra sink, independent of the primary exporter:
 `OTEL_TRACES_FILE` adds a `JSONLSpanExporter` (`tracing.py`) that appends one
@@ -236,7 +277,8 @@ the signal to revisit.
 
 ## Local dev (no signup required)
 
-Leave `OTEL_EXPORTER_OTLP_ENDPOINT` unset. Both processes fall back to
+Leave `OTEL_EXPORTER_OTLP_ENDPOINT` unset and set no Langfuse keys. Both
+processes fall back to
 `ConsoleSpanExporter` and dump each span to stdout as it ends. The agent side
 uses `SimpleSpanProcessor` specifically so spans appear immediately —
 `BatchSpanProcessor` would delay console output by up to 5 s, which is
@@ -244,7 +286,64 @@ miserable when you are watching a turn happen.
 
 ## Backend setup
 
-Honeycomb (recommended default — free tier, good UX for a demo):
+### Langfuse quickstart (the zero-config path)
+
+Two keys, no endpoint. Langfuse is the recommended sink here because it reads
+the `gen_ai.*` attributes above natively — token counts and model land in its
+UI as LLM telemetry rather than as anonymous span attributes you have to build
+a query for.
+
+1. Create a free account and a project at
+   [cloud.langfuse.com](https://cloud.langfuse.com).
+2. **Settings → API Keys → Create new API keys.** Copy the public key
+   (`pk-lf-…`) and the secret key (`sk-lf-…`). The secret is shown once.
+3. Set both, in **one** place for local dev — the repo-root `.env.local` is
+   read by the Next.js app and by the agent (`_load_env()` in `agent.py`):
+
+```bash
+# .env.local
+LANGFUSE_PUBLIC_KEY=pk-lf-...
+LANGFUSE_SECRET_KEY=sk-lf-...
+# Only if you are not on the EU region or are self-hosting.
+# Default: https://cloud.langfuse.com   US: https://us.cloud.langfuse.com
+# LANGFUSE_HOST=https://cloud.langfuse.com
+```
+
+4. For deployed environments, set the same two vars on **both** sides:
+   the Vercel project (Settings → Environment Variables) for the web spans,
+   and the agent host's env for the agent spans. Both must be set — each
+   process exports independently. Set only one and you get half the trace,
+   which is a confusing way to find out.
+5. Run a session. Traces appear under **Tracing → Traces**, keyed by the
+   session's trace id — the *same* id across both processes, so the Next.js
+   root span and the agent's spans land in one tree (see "Cross-process
+   propagation" above). `session.cost` carries the dollar rollup;
+   `agent.turn-latency` carries the per-leg timings.
+
+Make sure `OTEL_EXPORTER_OTLP_ENDPOINT` is **unset** — it wins over these keys
+by design (see the priority above), so leaving a stale Honeycomb endpoint in
+your env means the Langfuse keys are read and then ignored. That is the first
+thing to check if traces don't show up.
+
+Under the hood: the derived endpoint is
+`{LANGFUSE_HOST}/api/public/otel/v1/traces` with HTTP Basic auth over
+`base64(public_key:secret_key)`, plus `x-langfuse-ingestion-version: 4` — an
+optional header that opts into Langfuse Cloud's real-time ingestion, because a
+trace you have to wait for is a trace you don't watch. Langfuse accepts OTLP
+over both HTTP/JSON and HTTP/protobuf on that path, which is what lets the web
+(JSON) and agent (protobuf) sides share one endpoint. gRPC is not supported.
+
+> **Status: not yet verified against a live Langfuse project.** No account is
+> wired to this repo, so the endpoint, auth scheme, and header above are
+> verified against Langfuse's current docs and covered by unit tests
+> (`test_tracing.py`) — but no trace has been watched landing in the UI. The
+> first run with real keys is the confirmation, and it happens at the Phase-4
+> smoke. Treat this section as instructions, not as a report of something
+> already observed.
+
+### Honeycomb (or any other OTLP backend)
+
+Unchanged, and it still takes precedence over the Langfuse keys:
 
 ```bash
 # .env.local
@@ -305,6 +404,20 @@ sanitised numbers, never raw transcripts.
 The fourth is the load-bearing one. If it fails, distributed traces are broken
 end-to-end and the `trace.propagated` attribute is lying.
 
+It also pins `_resolve_otlp_config()` — the sink priority: Langfuse keys derive
+the right endpoint and Basic auth header, `LANGFUSE_HOST` is honoured (trailing
+slash stripped), an explicit endpoint outranks the keys and keeps its Honeycomb
+headers with no Langfuse auth smuggled onto it, one key alone resolves to
+`None`, and no config at all resolves to `None`. Every var these tests read is
+explicitly set or deleted per-test: the agent loads the repo-root `.env.local`
+at import, so anything left implicit would pass or fail depending on test order
+and on what a given developer has in their env.
+
+The equivalent chain in `instrumentation.ts` is **not** unit-tested — it is
+open-coded in `register()`, which has no seam to test it through. It's ~15
+lines mirroring a tested function; the risk is drift between the two, and the
+mitigation is that they sit in the same commit and this doc names both.
+
 ## What's NOT here
 
 Stated plainly, because an observability doc that overclaims is worse than none:
@@ -312,8 +425,14 @@ Stated plainly, because an observability doc that overclaims is worse than none:
 - **No metrics.** No counters, no histograms, no meter provider. Span
   attributes only. Percentiles are computed offline by
   `eval/latency-report.ts` from a JSONL capture, not by a metrics backend.
-- **No in-repo dashboard.** The "dashboard" is whatever queries you write in
-  Honeycomb/Tempo, plus the cost card the practice UI renders from Firestore.
+- **No in-repo dashboard.** The "dashboard" is Langfuse's own trace UI (or
+  whatever queries you write in Honeycomb/Tempo), plus the cost card the
+  practice UI renders from Firestore. Nothing in this repo renders a chart of
+  its own telemetry.
+- **No Langfuse-native features beyond OTLP ingestion.** No `langfuse` SDK, no
+  prompt management, no datasets, no scores pushed to it, no sessions/users
+  linked. It is an OTLP sink that happens to understand `gen_ai.*` — the repo
+  stays portable to any OTLP backend, and swapping it out is two env vars.
 - **No per-turn cost attribution.** By design: correct per-turn attribution
   needs the deprecated per-plugin events, and per-session totals are the right
   granularity for "how much did that session cost". Per-turn cost is a
