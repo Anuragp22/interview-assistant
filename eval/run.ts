@@ -38,6 +38,7 @@ if (!hasGroqKey()) {
 // Must come AFTER loadEnv so env vars are visible.
 import { FIXTURES } from "./fixtures";
 import { scoreFixture } from "./scorers";
+import { checkBaselineModel } from "./baseline-check";
 import type { FixtureScore, PartitionedGrounded, RunReport } from "./types";
 
 import { generateRoundQuestions } from "@/lib/llm/groq-template";
@@ -50,6 +51,7 @@ import { PRESETS } from "@/lib/presets";
 
 const args = new Set(process.argv.slice(2));
 const WRITE_BASELINE = args.has("--baseline");
+const ALLOW_MODEL_MISMATCH = args.has("--allow-model-mismatch");
 // 10 percentage points absolute. Lower thresholds (e.g. 5pp) fire false-
 // positive regressions because LLM output is non-deterministic and a
 // single question misclassification on a 9-question fixture swings the
@@ -158,33 +160,6 @@ function loadBaselines(): BaselineFile | null {
     console.error(`Failed to parse ${BASELINES_PATH}:`, err);
     return null;
   }
-}
-
-/**
- * Decide what to do when the baseline was recorded on a different model than
- * the one we just ran (e.g. after the llama-3.3 → gpt-oss-120b migration).
- *
- * This matters because the regression gate subtracts baseline from current and
- * fails on a >10pp drop. If the baseline came from a *different model*, that
- * delta measures a model swap, not a regression — so the gate is either
- * crying wolf or, worse, silently rubber-stamping a real regression that the
- * model change happened to mask.
- *
- * Return `true` to proceed with the comparison, `false` to skip the gate.
- * Throw to hard-fail the run.
- *
- * TODO(you): implement the policy. Trade-offs to weigh:
- *   - Hard fail ("regenerate baselines with --baseline"): safest, but blocks
- *     CI the moment anyone experiments with GROQ_MODEL locally.
- *   - Skip the gate with a loud warning: keeps CI green through a migration,
- *     but a stale baseline then silently protects nothing until someone
- *     remembers to regenerate.
- *   - Compare anyway with a warning: preserves the signal, accepts the noise.
- * Consider: this runs on a weekly schedule + manual dispatch, not per-push.
- */
-function checkBaselineModel(baseline: BaselineFile, currentModel: string): boolean {
-  // TODO(you): implement
-  return true;
 }
 
 function buildBaselinePayload(scores: FixtureScore[]): BaselineFile {
@@ -409,10 +384,19 @@ async function main(): Promise<void> {
       ` ${color(pct(aggregateScore), scoreColor(aggregateScore))}`,
   );
 
-  // Baseline comparison. Skipped when the baseline was recorded on a different
-  // model — comparing across models measures the swap, not a regression.
+  // Baseline comparison. Hard-fails when the baseline was recorded on a
+  // different model — comparing across models measures the swap, not a
+  // regression. --allow-model-mismatch downgrades to a loud skip.
   const baselines = WRITE_BASELINE ? null : loadBaselines();
-  const comparable = baselines ? checkBaselineModel(baselines, MODEL) : false;
+  let comparable = false;
+  if (baselines) {
+    const check = checkBaselineModel(baselines.model, MODEL, {
+      allowMismatch: ALLOW_MODEL_MISMATCH,
+    });
+    if (check.message) console.error(color(`\n${check.message}`, "yellow"));
+    if (check.fatal) process.exit(1);
+    comparable = check.comparable;
+  }
   const regressions =
     baselines && comparable ? compareToBaselines(scores, baselines) : [];
   printRegressions(regressions);
