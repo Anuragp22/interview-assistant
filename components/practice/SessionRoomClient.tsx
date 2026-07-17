@@ -57,6 +57,11 @@ export default function SessionRoomClient({
     };
   }, []);
 
+  function clearSpeaking() {
+    setAgentSpeaking(false);
+    setUserSpeaking(false);
+  }
+
   async function startCall() {
     setConnectionState("connecting");
     setErrorMessage(null);
@@ -90,12 +95,21 @@ export default function SessionRoomClient({
         watchdogRef.current = null;
       }
     });
-    room.on(RoomEvent.Reconnecting, () => setConnectionState("reconnecting"));
+    room.on(RoomEvent.Reconnecting, () => {
+      setConnectionState("reconnecting");
+      // ActiveSpeakersChanged is the only writer of the speaking state, and it
+      // goes quiet the moment the transport drops. Without this, an agent that
+      // was mid-sentence keeps its ring lit for the whole reconnect — and
+      // "reconnecting" keeps isLive true, so the tile stays on screen to show
+      // it. Clear it and let the next event re-light it.
+      clearSpeaking();
+    });
     room.on(RoomEvent.Reconnected, () => setConnectionState("connected"));
     room.on(RoomEvent.Disconnected, (_reason?: DisconnectReason) => {
       setConnectionState((s) =>
         s === "error" || s === "ended" ? s : "ended",
       );
+      clearSpeaking();
       if (endAttemptedRef.current) return;
       endAttemptedRef.current = true;
       // Navigate only. The agent triggers scoring from its own teardown, so
