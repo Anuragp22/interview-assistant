@@ -68,19 +68,20 @@ def test_groq_usd_matches_published_rates() -> None:
 
 
 def test_tts_usd_matches_published_rates() -> None:
-    assert abs(tts_usd(1_000) - 0.18) < 1e-4
-    assert abs(tts_usd(5_000) - 0.9) < 1e-4
+    # $0.05 / 1k chars published API rate.
+    assert abs(tts_usd(1_000) - 0.05) < 1e-4
+    assert abs(tts_usd(5_000) - 0.25) < 1e-4
 
 
 def test_stt_usd_converts_seconds_to_minutes() -> None:
-    # 60s * $0.0058/min = $0.0058
-    assert abs(stt_usd(60.0) - 0.0058) < 1e-6
-    assert abs(stt_usd(30.0) - 0.0029) < 1e-6
+    # 60s * $0.0048/min = $0.0048
+    assert abs(stt_usd(60.0) - 0.0048) < 1e-6
+    assert abs(stt_usd(30.0) - 0.0024) < 1e-6
 
 
 def test_livekit_usd_charges_both_participants() -> None:
-    # 10 min * 2 participants * $0.005 = $0.10
-    assert abs(livekit_usd(600.0) - 0.10) < 1e-4
+    # 10 min * 2 participants * $0.0005 = $0.01
+    assert abs(livekit_usd(600.0) - 0.01) < 1e-4
 
 
 def test_roll_up_cost_sums_all_legs() -> None:
@@ -92,10 +93,14 @@ def test_roll_up_cost_sums_all_legs() -> None:
         session_duration_seconds=600.0,
     )
     assert abs(breakdown.groq_usd - _expected_groq_usd(2_000, 1_000)) < 1e-6
-    assert abs(breakdown.tts_usd - 0.54) < 1e-4
-    assert abs(breakdown.stt_usd - 0.0174) < 1e-4
-    assert abs(breakdown.livekit_usd - 0.10) < 1e-4
-    assert breakdown.total_usd > 0.6 and breakdown.total_usd < 0.7
+    # tts: 3000 * 0.05 / 1000 = 0.15
+    assert abs(breakdown.tts_usd - 0.15) < 1e-4
+    # stt: 3 min * 0.0048 = 0.0144
+    assert abs(breakdown.stt_usd - 0.0144) < 1e-4
+    # livekit: 10 min * 2 * 0.0005 = 0.01
+    assert abs(breakdown.livekit_usd - 0.01) < 1e-4
+    # total = 0.0009 groq + 0.15 tts + 0.0144 stt + 0.01 lk = 0.1753
+    assert breakdown.total_usd > 0.17 and breakdown.total_usd < 0.18
     assert breakdown.rates_sourced_at == RATES_SOURCED_AT
 
 
@@ -181,10 +186,10 @@ def test_aggregator_handles_cumulative_event() -> None:
 
     bd = agg.finalize()
     assert abs(bd.groq_usd - _expected_groq_usd(1_000, 500)) < 1e-6
-    # tts: 2000 * 0.18 / 1000 = 0.36
-    assert abs(bd.tts_usd - 0.36) < 1e-4
-    # stt: 120 s = 2 min, 2 * 0.0058 = 0.0116
-    assert abs(bd.stt_usd - 0.0116) < 1e-4
+    # tts: 2000 * 0.05 / 1000 = 0.10
+    assert abs(bd.tts_usd - 0.10) < 1e-4
+    # stt: 120 s = 2 min, 2 * 0.0048 = 0.0096
+    assert abs(bd.stt_usd - 0.0096) < 1e-4
 
 
 def test_aggregator_ignores_event_without_usage() -> None:

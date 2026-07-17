@@ -9,11 +9,18 @@ deliberate: this table previously billed Deepgram nova-3 while the pipeline ran
 nova-2, so every cost figure on the dashboard was wrong for a model that was
 never running.
 
-Sourcing notes (links live in the TS mirror):
-  - Groq openai/gpt-oss-120b:      $0.15 / 1M in, $0.75 / 1M out
-  - ElevenLabs eleven_flash_v2_5:  $0.18 / 1k characters (Creator tier)
-  - Deepgram nova-3:               $0.0058 / audio minute
-  - LiveKit Build plan:            $0.005 / participant-minute,
+Sourcing notes (verified 2026-07-17; links + full rationale in the TS mirror):
+  - Groq openai/gpt-oss-120b:      $0.15 / 1M in, $0.60 / 1M out
+                                   (was $0.75 out — stale)
+  - ElevenLabs eleven_flash_v2_5:  $0.05 / 1k characters (published API rate,
+                                   billed in USD not credits; Flash/Turbo
+                                   consume 0.5 credits/char, so the old $0.18
+                                   blended-subscription figure was wrong)
+  - Deepgram nova-3:               $0.0048 / audio minute (monolingual
+                                   streaming; pipeline pins en-US. Was $0.0058,
+                                   the multilingual rate — wrong variant)
+  - LiveKit:                       $0.0005 / participant (WebRTC) minute
+                                   (was $0.005, a 10x decimal error),
                                    2 participants/session
 """
 
@@ -21,20 +28,21 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-RATES_SOURCED_AT = "2026-07-14"
+RATES_SOURCED_AT = "2026-07-17"
 
 # Groq DEFAULT_LLM_MODEL.
 _GROQ_INPUT_USD_PER_MILLION = 0.15
-_GROQ_OUTPUT_USD_PER_MILLION = 0.75
+_GROQ_OUTPUT_USD_PER_MILLION = 0.6
 
-# ElevenLabs TTS_MODEL.
-_TTS_USD_PER_THOUSAND_CHARS = 0.18
+# ElevenLabs TTS_MODEL. Published per-character API rate ($0.05/1k), not a
+# subscription blended rate — API usage bills in USD, not credits.
+_TTS_USD_PER_THOUSAND_CHARS = 0.05
 
-# Deepgram STT_MODEL.
-_STT_USD_PER_AUDIO_MINUTE = 0.0058
+# Deepgram STT_MODEL. Monolingual streaming (pipeline pins en-US).
+_STT_USD_PER_AUDIO_MINUTE = 0.0048
 
-# LiveKit Build plan.
-_LIVEKIT_USD_PER_PARTICIPANT_MINUTE = 0.005
+# LiveKit WebRTC minutes. Build tier includes 5k min/mo free.
+_LIVEKIT_USD_PER_PARTICIPANT_MINUTE = 0.0005
 _LIVEKIT_PARTICIPANTS_PER_SESSION = 2
 
 

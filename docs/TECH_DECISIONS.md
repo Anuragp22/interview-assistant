@@ -489,8 +489,8 @@ worth knowing.
   put the literal word "JSON" in the prompt, described the shape inline, and let
   the SDK validate against Zod client-side.
 - **Why it was reversed:** Groq decommissions it on 2026-08-16. gpt-oss-120b is
-  faster (~500 vs ~280 tok/s), cheaper ($0.15/$0.75), and supports strict
-  decoding.
+  faster (~500 vs ~280 tok/s), cheaper ($0.15/$0.60 per 1M in/out), and supports
+  strict decoding.
 - **What it cost:** strict mode on gpt-oss is validate-after-generation, which
   introduced the `json_validate_failed` class that `withSchemaRetry` now absorbs
   (§3). The inline shape descriptions were kept for exactly that reason.

@@ -233,7 +233,7 @@ guarantees.
 Every session writes an estimated dollar cost broken down by provider. Sources
 of truth: `lib/cost-rates.ts` (TypeScript) and
 `livekit-agent/src/interview_agent/cost_rates.py` (Python mirror). Both carry
-`RATES_SOURCED_AT` — currently **2026-07-14** — and both must be bumped
+`RATES_SOURCED_AT` — currently **2026-07-17** — and both must be bumped
 together when a number changes. Model ids are imported from
 `interview_agent.models`, never retyped: this table once billed Deepgram
 `nova-3` while the pipeline ran `nova-2`, so every cost figure on the dashboard
@@ -243,10 +243,10 @@ Current rates, copied from `cost_rates.py` / `cost-rates.ts`:
 
 | Provider | Model | Pricing dimension | Rate |
 |---|---|---|---|
-| Groq | `openai/gpt-oss-120b` | Input / output tokens | $0.15 / 1M in, $0.75 / 1M out |
-| ElevenLabs | `eleven_flash_v2_5` | Characters synthesized | $0.18 / 1k chars (Creator tier) |
-| Deepgram | `nova-3` | Audio minutes | $0.0058 / minute streaming |
-| LiveKit | Build plan | Participant-minutes | $0.005 × 2 participants/session |
+| Groq | `openai/gpt-oss-120b` | Input / output tokens | $0.15 / 1M in, $0.60 / 1M out |
+| ElevenLabs | `eleven_flash_v2_5` | Characters synthesized | $0.05 / 1k chars (published API rate) |
+| Deepgram | `nova-3` | Audio minutes | $0.0048 / minute streaming (monolingual, en-US) |
+| LiveKit | WebRTC minutes | Participant-minutes | $0.0005 × 2 participants/session |
 
 **How it flows:**
 
