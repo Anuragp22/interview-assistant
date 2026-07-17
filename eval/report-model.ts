@@ -54,13 +54,26 @@ export function buildBaselinePayload(
   scores: FixtureScore[],
   model: string,
   recordedAt: string = new Date().toISOString(),
+  previous: BaselineFile | null = null,
 ): BaselineFile {
   const fixtures: BaselineFile["fixtures"] = {};
   for (const s of scores) {
-    // No entry at all for an errored fixture. A future healthy run records
-    // it naturally (compareToBaselines skips fixtures absent from the
-    // baseline), whereas a zero written here would poison the gate for good.
-    if (isErrored(s)) continue;
+    if (isErrored(s)) {
+      // An errored fixture produced no measurement this run. Dropping it
+      // outright would silently delete its regression coverage until someone
+      // regenerates, so carry forward its PRIOR baseline entry instead — but
+      // only when that entry was recorded on the SAME model. Carrying an
+      // entry from a different model would smuggle a cross-model number into
+      // a same-model baseline (the exact lie the model-mismatch gate
+      // forbids), so a stale-model entry is omitted, not carried. A fixture
+      // with no prior entry (first-ever run) is omitted too. Either way, a
+      // future healthy run records it naturally, and a zero is never written.
+      const prior = previous?.fixtures[s.fixtureId];
+      if (prior && previous.model === model) {
+        fixtures[s.fixtureId] = prior;
+      }
+      continue;
+    }
     fixtures[s.fixtureId] = {
       cvGroundingRate: s.cvGroundingRate,
       partitionOverall: s.partitionCorrectness.overall,

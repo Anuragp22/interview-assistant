@@ -115,6 +115,53 @@ describe("buildBaselinePayload", () => {
     expect(payload.model).toBe("openai/gpt-oss-120b");
     expect(payload.recordedAt).toBe("2026-07-17T08:00:00.000Z");
   });
+
+  it("carries forward an errored fixture's prior entry when the model matches", () => {
+    // Regression coverage must not vanish on a transient provider failure:
+    // reuse the existing same-model baseline entry rather than dropping it.
+    const previous = baselineOf({ "ios-mobile-mid": 0.83 }); // openai/gpt-oss-120b
+    const payload = buildBaselinePayload(
+      [
+        healthy("frontend-lead-staff", 0.9),
+        errored("ios-mobile-mid", "Failed to generate JSON"),
+      ],
+      "openai/gpt-oss-120b",
+      undefined,
+      previous,
+    );
+    expect(payload.fixtures["ios-mobile-mid"]).toEqual(
+      previous.fixtures["ios-mobile-mid"],
+    );
+    // Healthy fixtures still record this run's fresh score.
+    expect(payload.fixtures["frontend-lead-staff"].aggregate).toBe(0.9);
+  });
+
+  it("does NOT carry forward when the prior baseline is a different model", () => {
+    // A carried llama entry under a gpt-oss baseline is exactly the cross-
+    // model lie the mismatch gate forbids — omit and let a healthy run redo it.
+    const previous: BaselineFile = {
+      ...baselineOf({ "ios-mobile-mid": 0.83 }),
+      model: "llama-3.3-70b-versatile",
+    };
+    const payload = buildBaselinePayload(
+      [errored("ios-mobile-mid", "Failed to generate JSON")],
+      "openai/gpt-oss-120b",
+      undefined,
+      previous,
+    );
+    expect(payload.fixtures["ios-mobile-mid"]).toBeUndefined();
+  });
+
+  it("omits an errored fixture with no prior baseline entry (first-ever run)", () => {
+    const previous = baselineOf({ "some-other-fixture": 0.9 });
+    const payload = buildBaselinePayload(
+      [errored("brand-new-fixture", "boom")],
+      "openai/gpt-oss-120b",
+      undefined,
+      previous,
+    );
+    expect(payload.fixtures["brand-new-fixture"]).toBeUndefined();
+  });
 });
 
 describe("compareToBaselines", () => {

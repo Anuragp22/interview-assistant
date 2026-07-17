@@ -438,19 +438,54 @@ async function main(): Promise<void> {
   console.log(color(`\nReport: ${REPORT_PATH}`, "gray"));
 
   if (WRITE_BASELINE) {
-    writeFileSync(
-      BASELINES_PATH,
-      JSON.stringify(buildBaselinePayload(scores, MODEL), null, 2),
-    );
+    // Carry forward the existing baseline entry for any fixture that errored
+    // this run, so a transient provider failure doesn't silently delete a
+    // fixture's regression coverage. buildBaselinePayload only carries an
+    // entry recorded on the SAME model; a stale-model entry (or none) is
+    // dropped, and a later healthy run re-records it.
+    const previous = loadBaselines();
+    const payload = buildBaselinePayload(scores, MODEL, undefined, previous);
+    writeFileSync(BASELINES_PATH, JSON.stringify(payload, null, 2));
     console.log(color(`Baselines written: ${BASELINES_PATH}`, "green"));
+
     if (errored.length > 0) {
-      console.log(
-        color(
-          `  ${errored.length} errored fixture(s) got NO baseline entry — ` +
-            `a later healthy run will record them.`,
-          "gray",
-        ),
-      );
+      const carried: string[] = [];
+      const droppedStaleModel: string[] = [];
+      const droppedNoEntry: string[] = [];
+      for (const e of errored) {
+        if (payload.fixtures[e.fixtureId]) carried.push(e.fixtureId);
+        else if (previous?.fixtures[e.fixtureId]) droppedStaleModel.push(e.fixtureId);
+        else droppedNoEntry.push(e.fixtureId);
+      }
+      if (carried.length > 0) {
+        console.log(
+          color(
+            `  Carried forward ${carried.length} errored fixture(s) from the ` +
+              `existing baseline (same model): ${carried.join(", ")}.`,
+            "gray",
+          ),
+        );
+      }
+      if (droppedStaleModel.length > 0) {
+        console.log(
+          color(
+            `  ${droppedStaleModel.length} errored fixture(s) NOT carried — ` +
+              `existing baseline is a different model (${previous?.model} ≠ ${MODEL}): ` +
+              `${droppedStaleModel.join(", ")}. A healthy run re-records them.`,
+            "yellow",
+          ),
+        );
+      }
+      if (droppedNoEntry.length > 0) {
+        console.log(
+          color(
+            `  ${droppedNoEntry.length} errored fixture(s) got NO baseline entry ` +
+              `(no prior entry) — a later healthy run will record them: ` +
+              `${droppedNoEntry.join(", ")}.`,
+            "gray",
+          ),
+        );
+      }
     }
     return;
   }
