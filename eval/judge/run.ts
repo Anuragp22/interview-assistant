@@ -33,6 +33,9 @@ import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { loadEnv } from "../env";
+// Pure gate arithmetic, extracted so it can be unit-tested without booting the
+// judge. Safe to import statically (before loadEnv): no env, no client.
+import { evaluateGate, MAX_SPREAD } from "./gate";
 
 loadEnv();
 
@@ -47,7 +50,6 @@ if (!process.env.GEMINI_API_KEY) {
 }
 
 const RUNS_PER_FIXTURE = 3;
-const MAX_SPREAD = 1.0;
 
 const REPORT_PATH = join(process.cwd(), "eval", "judge", "report.json");
 
@@ -94,12 +96,6 @@ type FixtureOutcome = {
    */
   errored?: { message: string };
 };
-
-function median(xs: number[]): number {
-  const s = [...xs].sort((a, b) => a - b);
-  const mid = Math.floor(s.length / 2);
-  return s.length % 2 === 0 ? (s[mid - 1] + s[mid]) / 2 : s[mid];
-}
 
 // ---------------------------------------------------------------------------
 // Rate-limit aware retry
@@ -210,14 +206,12 @@ async function main(): Promise<void> {
       continue;
     }
 
-    const med = median(overalls);
-    const spread = Math.max(...overalls) - Math.min(...overalls);
-    const inRange = med >= f.expect.overall[0] && med <= f.expect.overall[1];
-    const stable = spread <= MAX_SPREAD;
-    const verdictMatches =
-      verdicts.filter((v) => v === f.expect.barVerdict).length * 2 >
-      verdicts.length;
-    const pass = inRange && stable && verdictMatches;
+    const { median: med, spread, inRange, stable, verdictMatches, pass } =
+      evaluateGate({
+        overallScores: overalls,
+        barVerdicts: verdicts,
+        expect: f.expect,
+      });
 
     console.log(pass ? color("PASS", "green") : color("FAIL", "red"));
 
