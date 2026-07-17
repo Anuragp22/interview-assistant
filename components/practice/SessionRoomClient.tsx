@@ -47,6 +47,7 @@ export default function SessionRoomClient({
   const [connectionState, setConnectionState] = useState<ConnectionState>("idle");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [agentSpeaking, setAgentSpeaking] = useState(false);
+  const [userSpeaking, setUserSpeaking] = useState(false);
   const [micEnabled, setMicEnabled] = useState(true);
 
   useEffect(() => {
@@ -113,11 +114,12 @@ export default function SessionRoomClient({
     );
 
     room.on(RoomEvent.ActiveSpeakersChanged, (speakers: Participant[]) => {
-      // The agent is the only remote participant; any non-local active
-      // speaker lighting up means the panel is talking.
-      setAgentSpeaking(
-        speakers.some((p) => p.identity !== room.localParticipant.identity),
-      );
+      // The payload carries every active speaker, local participant included,
+      // so both rings are driven from the same source of truth. The agent is
+      // the only remote participant, so "not us" means the panel is talking.
+      const localIdentity = room.localParticipant.identity;
+      setAgentSpeaking(speakers.some((p) => p.identity !== localIdentity));
+      setUserSpeaking(speakers.some((p) => p.identity === localIdentity));
     });
 
     try {
@@ -175,10 +177,14 @@ export default function SessionRoomClient({
     <div className="fixed inset-0 z-40 bg-black">
       <audio ref={audioElRef} autoPlay playsInline className="hidden" />
       <div className="absolute inset-0 grid grid-cols-1 md:grid-cols-2 gap-2 p-2 pb-24 md:p-3 md:pb-28">
-        <Tile name="AI Interviewer" speaking={agentSpeaking && isLive} icon="bot" />
+        {/* Both tiles render only while isLive, so neither ring needs to
+            re-check it. A muted mic publishes nothing, so the user cannot be
+            an active speaker — the guard keeps the ring dark if the last event
+            landed just before the mute. */}
+        <Tile name="AI Interviewer" speaking={agentSpeaking} icon="bot" />
         <Tile
           name="You"
-          speaking={!agentSpeaking && isLive && micEnabled}
+          speaking={userSpeaking && micEnabled}
           muted={!micEnabled}
         />
       </div>
