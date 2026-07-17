@@ -7,6 +7,7 @@ import {
   RoomEvent,
   Track,
   type DisconnectReason,
+  type Participant,
   type RemoteParticipant,
   type RemoteTrack,
   type RemoteTrackPublication,
@@ -14,6 +15,7 @@ import {
 import { Bot, Mic, MicOff, PhoneOff, Users } from "lucide-react";
 
 import { cn } from "@/lib/utils";
+import PreCallReadyScreen from "./PreCallReadyScreen";
 
 const AGENT_JOIN_TIMEOUT_MS = 10_000;
 
@@ -44,7 +46,7 @@ export default function SessionRoomClient({
 
   const [connectionState, setConnectionState] = useState<ConnectionState>("idle");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [agentSpeaking] = useState(false);
+  const [agentSpeaking, setAgentSpeaking] = useState(false);
   const [micEnabled, setMicEnabled] = useState(true);
 
   useEffect(() => {
@@ -110,6 +112,14 @@ export default function SessionRoomClient({
       },
     );
 
+    room.on(RoomEvent.ActiveSpeakersChanged, (speakers: Participant[]) => {
+      // The agent is the only remote participant; any non-local active
+      // speaker lighting up means the panel is talking.
+      setAgentSpeaking(
+        speakers.some((p) => p.identity !== room.localParticipant.identity),
+      );
+    });
+
     try {
       await room.connect(tokenJson.connection.wsUrl, tokenJson.connection.token);
       await room.localParticipant.setMicrophoneEnabled(true);
@@ -149,33 +159,13 @@ export default function SessionRoomClient({
 
   if (!isLive) {
     return (
-      <div className="min-h-screen flex flex-col items-center justify-center gap-6 px-6">
-        <div className="card-border max-w-md w-full">
-          <div className="flex flex-col gap-4 p-8 text-center">
-            <h1 className="text-xl font-semibold text-fg-strong">
-              Ready when you are
-            </h1>
-            <p className="text-sm text-fg-muted">
-              Make sure your microphone is working. The AI will speak first.
-            </p>
-            <button
-              type="button"
-              onClick={startCall}
-              disabled={isLoading}
-              className={cn(
-                "inline-flex items-center justify-center gap-2 px-8 py-4",
-                "rounded-full bg-accent text-accent-fg text-sm font-semibold",
-                "hover:bg-accent-hover active:scale-[0.98] transition-all",
-              )}
-            >
-              <Mic className="size-4" />
-              Start interview
-            </button>
-            {errorMessage && (
-              <p className="text-sm text-destructive-100">{errorMessage}</p>
-            )}
-          </div>
-        </div>
+      <div className="min-h-screen flex flex-col items-center justify-center px-6">
+        <PreCallReadyScreen
+          errorMessage={errorMessage}
+          starting={isLoading}
+          retry={connectionState === "error" || connectionState === "ended"}
+          onStart={startCall}
+        />
         <audio ref={audioElRef} autoPlay playsInline className="hidden" />
       </div>
     );
