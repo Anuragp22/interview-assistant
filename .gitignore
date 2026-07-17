@@ -59,3 +59,6 @@ next-env.d.ts
 /cv.pdf
 /cv.tex
 /cv.txt
+
+# SDD execution scratch (progress ledger, task briefs)
+/.superpowers/
