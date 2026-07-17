@@ -311,75 +311,140 @@ class PanelAgent(Agent):
     # -- multi-voice synthesis ---------------------------------------------
 
     async def tts_node(self, text, model_settings):
-        """Route contiguous speaker runs to per-panelist TTS streams.
+        """Route contiguous speaker runs to per-panelist TTS streams,
+        streaming each piece to ElevenLabs the moment it arrives.
 
-        Segments are synthesized one at a time: audio must play in order
-        anyway, and LLM text arrives far ahead of speech.
+        Each text piece is pushed to the current speaker's stream AS IT
+        ARRIVES from the LLM, so synthesis starts while the model is still
+        generating — the first audio does not wait for the full completion.
+        A single-speaker reply (every calm turn, most standard turns) is the
+        common case, and buffering the whole run before pushing would add the
+        entire generation time to time-to-first-audio.
 
-        Deliberate trade-off — a segment's text is buffered and pushed to
-        the TTS only once the run is complete, rather than streamed in
-        token by token. That is what makes a failed segment replayable:
-        the full text is still in hand, so a retry can re-speak it from
-        the start instead of resuming mid-sentence. The cost is bounded,
-        because a segment is one speaker's few sentences and the text
-        races far ahead of the audio regardless.
+        Retry resilience is kept without paying that latency: alongside the
+        incremental push we keep a replay copy of the pieces sent so far
+        (``pieces``). If the primed stream fails BEFORE any frame is yielded,
+        ``_finish_run`` opens a fresh stream and replays the buffer — first on
+        the same voice, then on the round leader's — exactly the Task-10
+        fallback. A failure AFTER a frame is yielded drops the remainder (a
+        replay would double-speak the opening).
+
+        Streams are drained one run at a time (audio plays in order anyway),
+        and each drain is wrapped in ``aclosing`` so a barge-in that closes
+        tts_node mid-run promptly closes the active ElevenLabs stream rather
+        than leaking the websocket to the GC.
         """
-        async for persona_id, segment in self._speaker_segments(text):
-            # aclosing(), not a bare `async for`: on barge-in the framework
-            # closes tts_node mid-segment, and only an explicit close runs
-            # _synthesize_segment's cleanup promptly. Left to the GC, the
-            # ElevenLabs stream outlives the segment that opened it.
-            async with aclosing(
-                self._synthesize_segment(persona_id, segment)
-            ) as frames:
-                async for frame in frames:
-                    yield frame
-
-    async def _speaker_segments(
-        self, text: Any
-    ) -> AsyncIterator[tuple[str, list[str]]]:
-        """Group the tagged token stream into contiguous speaker runs."""
         current: str | None = None
-        buffer: list[str] = []
-        async for speaker, piece in split_speaker_segments(
-            text, self._tag_to_persona, self.current_leader.id
-        ):
-            if speaker != current:
-                if current is not None:
-                    yield current, buffer
-                current = speaker
-                buffer = []
-            buffer.append(piece)
-        if current is not None:
-            yield current, buffer
+        pieces: list[str] = []          # replay buffer for the current run
+        stream: Any = None              # attempt-1 stream, primed as text arrives
+        primed_ok = False               # True while the primed stream is healthy
 
-    async def _synthesize_segment(
-        self, persona_id: str, pieces: list[str]
-    ) -> AsyncIterator[Any]:
-        """Speak one segment: retry the same voice, then the round leader.
+        try:
+            async for speaker, piece in split_speaker_segments(
+                text, self._tag_to_persona, self.current_leader.id
+            ):
+                if speaker != current:
+                    if current is not None:
+                        primed = stream if primed_ok else None
+                        stream = None  # ownership handed to _finish_run
+                        # aclosing(): on barge-in the framework closes tts_node
+                        # at the `yield frame` below, and only an explicit
+                        # aclose runs _finish_run's cleanup promptly (closing
+                        # the live ElevenLabs stream). Left to the GC, that
+                        # stream outlives the run.
+                        async with aclosing(
+                            self._finish_run(current, pieces, primed)
+                        ) as frames:
+                            async for frame in frames:
+                                yield frame
+                    current = speaker
+                    pieces = []
+                    stream = self._open_stream(speaker)
+                    primed_ok = stream is not None
+                pieces.append(piece)
+                if primed_ok and stream is not None:
+                    try:
+                        stream.push_text(piece)
+                    except Exception:  # noqa: BLE001
+                        logger.warning(
+                            "TTS push_text failed (persona=%s); will replay on a "
+                            "fresh stream",
+                            current,
+                            exc_info=True,
+                        )
+                        await _aclose_quietly(stream)
+                        stream = None
+                        primed_ok = False
 
-        A TTS error must degrade one segment, never the session — worst
-        case the segment is silent and the interview carries on.
+            if current is not None:
+                primed = stream if primed_ok else None
+                stream = None
+                async with aclosing(
+                    self._finish_run(current, pieces, primed)
+                ) as frames:
+                    async for frame in frames:
+                        yield frame
+        finally:
+            # A barge-in or cancellation between opening a run's stream and
+            # handing it to _finish_run leaves it dangling — close it here.
+            # A stream already given to _finish_run has been nulled out above,
+            # so this never double-closes.
+            if stream is not None:
+                await _aclose_quietly(stream)
 
-        The attempt order (persona, persona again, leader) reflects what
-        actually goes wrong: a transient ElevenLabs error usually clears
-        on a retry, and if that one voice is genuinely down, the leader
-        re-speaking the line is still a coherent panel. Silence is not.
+    def _open_stream(self, persona_id: str) -> Any:
+        """Open a persona's TTS stream, or return None if opening fails.
 
-        The `yielded` guard is the subtle part. Once a frame has been
-        handed downstream the candidate is already hearing the line, so
-        replaying it would speak the opening twice — worse than the
-        failure. Past that point the only safe degradation is to drop the
-        rest of the segment.
+        A failed open is attempt 1 spent: ``_finish_run`` sees ``primed=None``
+        and moves straight to a fresh-stream retry rather than opening twice.
         """
-        attempts = (persona_id, persona_id, self.current_leader.id)
-        for attempt_no, pid in enumerate(attempts, start=1):
+        try:
+            return self._tts_by_persona[persona_id].stream()
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "TTS stream open failed (persona=%s)", persona_id, exc_info=True
+            )
+            return None
+
+    async def _finish_run(
+        self, persona_id: str, pieces: list[str], primed: Any
+    ) -> AsyncIterator[Any]:
+        """Drain one speaker run's audio, retrying the voice then the leader.
+
+        ``primed`` is attempt 1 — the stream opened at run start and fed each
+        piece as it arrived. When it survived priming we drain it directly;
+        when opening or a push already failed it is None, and attempt 1 is
+        already spent, so we fall straight through to a fresh stream that
+        replays ``pieces`` from the start.
+
+        A TTS error must degrade one run, never the session — worst case the
+        run is silent and the interview carries on. The attempt order
+        (persona, persona again, leader) reflects what goes wrong: a transient
+        ElevenLabs error usually clears on a retry, and if that voice is
+        genuinely down, the leader re-speaking the line is still a coherent
+        panel. Silence is not.
+
+        The ``yielded`` guard is the subtle part. Once a frame has been handed
+        downstream the candidate is already hearing the line, so replaying it
+        would speak the opening twice — worse than the failure. Past that
+        point the only safe degradation is to drop the rest of the run.
+        """
+        leader_id = self.current_leader.id
+        if primed is not None:
+            # (ready_stream_or_None, persona_for_this_attempt)
+            plan = ((primed, persona_id), (None, persona_id), (None, leader_id))
+        else:
+            # Eager open/priming already burned attempt 1 on the persona.
+            plan = ((None, persona_id), (None, leader_id))
+
+        for attempt_no, (ready, pid) in enumerate(plan, start=1):
             yielded = False
-            stream = None
+            stream = ready
             try:
-                stream = self._tts_by_persona[pid].stream()
-                for piece in pieces:
-                    stream.push_text(piece)
+                if stream is None:
+                    stream = self._tts_by_persona[pid].stream()
+                    for piece in pieces:
+                        stream.push_text(piece)
                 stream.end_input()
                 async for ev in stream:
                     yielded = True
@@ -387,10 +452,10 @@ class PanelAgent(Agent):
                 return
             except Exception:  # noqa: BLE001
                 logger.warning(
-                    "TTS segment failed (persona=%s attempt=%d/%d yielded=%s)",
+                    "TTS run failed (persona=%s attempt=%d/%d yielded=%s)",
                     pid,
                     attempt_no,
-                    len(attempts),
+                    len(plan),
                     yielded,
                     exc_info=True,
                 )
@@ -398,12 +463,12 @@ class PanelAgent(Agent):
                     return
             finally:
                 # Runs on success, failure, and on the GeneratorExit that
-                # barge-in throws in at the yield above — the only place
-                # that closes every stream this attempt opened.
+                # barge-in throws in at the yield above — the only place that
+                # closes every stream this attempt opened.
                 await _aclose_quietly(stream)
         logger.error(
-            "TTS segment dropped after %d attempts (persona=%s): %.80r",
-            len(attempts),
+            "TTS run dropped after %d attempts (persona=%s): %.80r",
+            len(plan),
             persona_id,
             "".join(pieces),
         )

@@ -301,6 +301,44 @@ def _three_persona_panel() -> PanelSpec:
 
 
 @pytest.mark.asyncio
+async def test_tts_node_streams_pieces_before_upstream_is_exhausted(panel_agent):
+    """Regression guard for the Task-10 buffering: a single-speaker reply
+    (every calm turn, most standard turns) must push each text piece to the
+    persona's TTS stream AS IT ARRIVES, not buffer the whole run and push
+    only once the upstream LLM stream is exhausted. Buffering delays
+    synthesis-start until the full completion, adding the entire generation
+    time to time-to-first-audio — the exact regression this test catches.
+
+    One shared event log interleaves two markers: every ``push_text`` (a
+    tuple, recorded by the fake stream) and, exactly once, the upstream
+    generator running to exhaustion (a string). Streaming means the FIRST
+    push lands BEFORE that exhaustion marker; buffering puts it after.
+    """
+    events: list = []
+    sarah = _ScriptedTTS(events, "sarah-voice", frames=1)
+    panel_agent._tts_by_persona = {
+        "behavioral": sarah,
+        "technical": _ScriptedTTS(events, "adam-voice"),
+    }
+
+    async def _slow_upstream():
+        for chunk in ["[SARAH] one ", "two ", "three "]:
+            yield chunk
+        events.append("upstream-exhausted")
+
+    async for _ in panel_agent.tts_node(_slow_upstream(), model_settings=None):
+        pass
+
+    assert "upstream-exhausted" in events, "upstream never ran to exhaustion"
+    push_positions = [i for i, e in enumerate(events) if isinstance(e, tuple)]
+    assert push_positions, "no text was ever pushed to the TTS stream"
+    assert push_positions[0] < events.index("upstream-exhausted"), (
+        "first push_text landed only AFTER the upstream was fully consumed — "
+        "tts_node buffered the whole speaker run instead of streaming it"
+    )
+
+
+@pytest.mark.asyncio
 async def test_tts_node_happy_path_unchanged(panel_agent):
     """Multi-speaker text still yields frames in speaker order, one stream
     per segment (regression guard for the buffering rework)."""
