@@ -27,6 +27,15 @@ type ConnectionState =
   | "ended"
   | "error";
 
+// Shape of POST /api/sessions/[id]/livekit-token. Every field is optional
+// because the body is untrusted until parsed and checked — an error page or a
+// non-2xx JSON body carries none of them.
+type TokenResponse = {
+  success?: boolean;
+  error?: string;
+  connection?: { token: string; wsUrl: string; roomName: string };
+};
+
 export default function SessionRoomClient({
   sessionId,
   doneHref,
@@ -66,13 +75,43 @@ export default function SessionRoomClient({
     setConnectionState("connecting");
     setErrorMessage(null);
 
-    const tokenRes = await fetch(`/api/sessions/${sessionId}/livekit-token`, {
-      method: "POST",
-    });
-    const tokenJson = await tokenRes.json();
-    if (!tokenRes.ok || !tokenJson.success) {
+    // Nothing awaits startCall (it is a click handler), so a throw here is
+    // swallowed and the UI sits on "Connecting…" forever with no error and no
+    // way back. Every failure below has to land on connectionState "error",
+    // which is what makes the "Try again" button reachable.
+    let tokenRes: Response;
+    try {
+      tokenRes = await fetch(`/api/sessions/${sessionId}/livekit-token`, {
+        method: "POST",
+      });
+    } catch (err) {
       setConnectionState("error");
-      setErrorMessage(tokenJson.error ?? "Token mint failed");
+      setErrorMessage(
+        `Couldn't reach the server to start your session${
+          err instanceof Error ? ` (${err.message})` : ""
+        }. Check your connection and try again.`,
+      );
+      return;
+    }
+
+    // A proxy 502, a Vercel error page or an empty body is not JSON. Name the
+    // status so the failure is diagnosable rather than a bare parse error.
+    let tokenJson: TokenResponse;
+    try {
+      tokenJson = (await tokenRes.json()) as TokenResponse;
+    } catch {
+      setConnectionState("error");
+      setErrorMessage(
+        `The server returned an unreadable response (HTTP ${tokenRes.status}) when starting your session. Please try again.`,
+      );
+      return;
+    }
+
+    if (!tokenRes.ok || !tokenJson.success || !tokenJson.connection) {
+      setConnectionState("error");
+      setErrorMessage(
+        tokenJson.error ?? `Token mint failed (HTTP ${tokenRes.status})`,
+      );
       return;
     }
 
