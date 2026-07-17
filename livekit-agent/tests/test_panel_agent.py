@@ -39,7 +39,13 @@ def _spec() -> PanelSpec:
 
 
 @pytest.fixture()
-def panel_agent(monkeypatch):
+def panel_agent_factory(monkeypatch):
+    """Builds PanelAgents against a stubbed module state.
+
+    A factory rather than a plain fixture because the TTS fallback tests
+    need a roster where the failing persona is *not* the round leader,
+    which the two-persona default can't express.
+    """
     # Don't build real ElevenLabs TTS instances in unit tests.
     monkeypatch.setattr(agent_mod, "_build_tts_for_spec", lambda spec: object())
     agent_mod._PANEL_CONTEXT.clear()
@@ -50,14 +56,23 @@ def panel_agent(monkeypatch):
     agent_mod._GUARD = TransferGuard()
     agent_mod._DB = None
     agent_mod._END_INTERVIEW_FLAG.clear()
-    a = PanelAgent(
-        session_id="s1",
-        panel=_spec(),
-        questions_by_round={"behavioral": ["B1"], "technical": ["T1"]},
-    )
-    yield a
+
+    def _make(panel: PanelSpec | None = None, questions=None) -> PanelAgent:
+        return PanelAgent(
+            session_id="s1",
+            panel=panel or _spec(),
+            questions_by_round=questions
+            or {"behavioral": ["B1"], "technical": ["T1"]},
+        )
+
+    yield _make
     agent_mod._PANEL_CONTEXT.clear()
     agent_mod._END_INTERVIEW_FLAG.clear()
+
+
+@pytest.fixture()
+def panel_agent(panel_agent_factory):
+    return panel_agent_factory()
 
 
 def test_leader_and_round_id(panel_agent):
@@ -186,3 +201,209 @@ async def test_tts_node_routes_runs_to_speaker_voices(panel_agent):
     adam_text = "".join(t for v, t in log if v == "adam-voice")
     assert "Why Redis?" in adam_text
     assert "[ADAM]" not in adam_text
+
+
+# -- TTS error handling ---------------------------------------------------
+#
+# `_FakeSynthStream` above yields no audio, which is enough for routing but
+# can't express "failed after the candidate already heard something". These
+# extend it with frames and a failure script.
+
+
+class _FakeFrame:
+    """Stand-in for an audio frame; the voice tag is what tests assert on."""
+
+    def __init__(self, voice: str, index: int) -> None:
+        self.voice, self.index = voice, index
+
+
+class _FakeEvent:
+    """tts_node reads `.frame` off each event the stream yields."""
+
+    def __init__(self, frame: _FakeFrame) -> None:
+        self.frame = frame
+
+
+class _ScriptedSynthStream(_FakeSynthStream):
+    """`_FakeSynthStream` that emits frames and can fail on a schedule.
+
+    `raise_after=None` streams cleanly; `raise_after=0` fails before any
+    audio plays (retryable); `raise_after=1` fails mid-playback.
+    """
+
+    def __init__(self, log, voice, *, frames, raise_after, closed):
+        super().__init__(log, voice)
+        self._frames, self._raise_after, self._closed = frames, raise_after, closed
+        self._emitted = 0
+
+    async def aclose(self):
+        # Suspends, like the real websocket close does. A cleanup that
+        # awaits while a GeneratorExit is in flight is exactly where an
+        # async generator can trip "ignored GeneratorExit", so the fake
+        # must not close instantly.
+        await asyncio.sleep(0)
+        self._closed.append(self._voice)
+
+    async def __anext__(self):
+        if self._raise_after is not None and self._emitted >= self._raise_after:
+            raise RuntimeError("boom")
+        if self._emitted >= self._frames:
+            raise StopAsyncIteration
+        self._emitted += 1
+        return _FakeEvent(_FakeFrame(self._voice, self._emitted))
+
+
+class _ScriptedTTS(_FakeTTS):
+    """`_FakeTTS` whose streams follow a failure script.
+
+    Counts `stream()` calls so tests can prove how many attempts were made.
+    """
+
+    def __init__(
+        self, log, voice, *, frames=1, raise_after=None, raise_on_stream=False
+    ):
+        super().__init__(log, voice)
+        self._frames, self._raise_after = frames, raise_after
+        self._raise_on_stream = raise_on_stream
+        self.stream_calls = 0
+        self.closed: list[str] = []
+
+    def stream(self):
+        self.stream_calls += 1
+        if self._raise_on_stream:
+            raise RuntimeError("boom")
+        return _ScriptedSynthStream(
+            self._log, self._voice, frames=self._frames,
+            raise_after=self._raise_after, closed=self.closed,
+        )
+
+
+async def _drain(agent, *chunks):
+    async def _stream():
+        for c in chunks:
+            yield c
+
+    return [f async for f in agent.tts_node(_stream(), model_settings=None)]
+
+
+def _three_persona_panel() -> PanelSpec:
+    """Sarah leads; Adam and Bella are non-leaders."""
+    return PanelSpec(
+        preset_id="big-tech-swe",
+        intensity="standard",
+        personas=(
+            _mk_persona("behavioral", "Sarah"),
+            _mk_persona("technical", "Adam"),
+            _mk_persona("system-design", "Bella"),
+        ),
+        rounds=(PanelRoundSpec("behavioral", "behavioral"),),
+    )
+
+
+@pytest.mark.asyncio
+async def test_tts_node_happy_path_unchanged(panel_agent):
+    """Multi-speaker text still yields frames in speaker order, one stream
+    per segment (regression guard for the buffering rework)."""
+    log: list[tuple[str, str]] = []
+    sarah = _ScriptedTTS(log, "sarah-voice", frames=1)
+    adam = _ScriptedTTS(log, "adam-voice", frames=2)
+    panel_agent._tts_by_persona = {"behavioral": sarah, "technical": adam}
+
+    frames = await _drain(panel_agent, "[SARAH] Thanks. ", "[ADAM] Why Redis?")
+
+    assert [f.voice for f in frames] == [
+        "sarah-voice", "adam-voice", "adam-voice",
+    ]
+    assert (sarah.stream_calls, adam.stream_calls) == (1, 1)
+    assert sarah.closed == ["sarah-voice"] and adam.closed == ["adam-voice"]
+
+
+@pytest.mark.asyncio
+async def test_tts_node_persona_failure_falls_back_to_leader(panel_agent):
+    """Adam's TTS raises on stream(); the segment is retried once on Adam,
+    then re-spoken in full by the leader's voice, and frames still come out."""
+    log: list[tuple[str, str]] = []
+    adam = _ScriptedTTS(log, "adam-voice", raise_on_stream=True)
+    sarah = _ScriptedTTS(log, "sarah-voice", frames=2)
+    panel_agent._tts_by_persona = {"behavioral": sarah, "technical": adam}
+
+    frames = await _drain(panel_agent, "[ADAM] Why Redis?")
+
+    assert adam.stream_calls == 2  # original + one retry before falling back
+    assert [f.voice for f in frames] == ["sarah-voice", "sarah-voice"]
+    # The leader speaks the WHOLE segment, not the tail that survived.
+    assert "".join(t for v, t in log if v == "sarah-voice") == " Why Redis?"
+
+
+@pytest.mark.asyncio
+async def test_tts_node_error_does_not_propagate(panel_agent_factory):
+    """Even when persona AND leader TTS raise, tts_node completes without
+    raising: the broken segment yields nothing and the next one still speaks."""
+    agent = panel_agent_factory(
+        panel=_three_persona_panel(), questions={"behavioral": ["B1"]}
+    )
+    log: list[tuple[str, str]] = []
+    agent._tts_by_persona = {
+        "behavioral": _ScriptedTTS(log, "sarah-voice", raise_on_stream=True),
+        "technical": _ScriptedTTS(log, "adam-voice", raise_on_stream=True),
+        "system-design": _ScriptedTTS(log, "bella-voice", frames=1),
+    }
+
+    frames = await _drain(agent, "[ADAM] Broken. ", "[BELLA] Fine.")
+
+    assert [f.voice for f in frames] == ["bella-voice"]
+
+
+@pytest.mark.asyncio
+async def test_tts_node_mid_playback_failure_drops_remainder(panel_agent):
+    """A failure AFTER audio has played must not retry — replaying the
+    segment would speak its opening twice."""
+    log: list[tuple[str, str]] = []
+    adam = _ScriptedTTS(log, "adam-voice", frames=3, raise_after=1)
+    sarah = _ScriptedTTS(log, "sarah-voice", frames=2)
+    panel_agent._tts_by_persona = {"behavioral": sarah, "technical": adam}
+
+    frames = await _drain(panel_agent, "[ADAM] Why Redis?")
+
+    assert [f.voice for f in frames] == ["adam-voice"]  # the one frame, no replay
+    assert adam.stream_calls == 1  # no retry
+    assert sarah.stream_calls == 0  # no leader fallback either
+    assert adam.closed == ["adam-voice"]  # the half-used stream is still closed
+
+
+@pytest.mark.asyncio
+async def test_tts_node_closes_stream_on_every_failed_attempt(panel_agent):
+    """A stream that dies mid-drain still gets closed — a leaked ElevenLabs
+    websocket per failure would outlive the segment."""
+    log: list[tuple[str, str]] = []
+    adam = _ScriptedTTS(log, "adam-voice", frames=2, raise_after=0)
+    sarah = _ScriptedTTS(log, "sarah-voice", frames=1)
+    panel_agent._tts_by_persona = {"behavioral": sarah, "technical": adam}
+
+    frames = await _drain(panel_agent, "[ADAM] Why Redis?")
+
+    assert [f.voice for f in frames] == ["sarah-voice"]
+    assert adam.closed == ["adam-voice", "adam-voice"]  # both failed attempts
+    assert sarah.closed == ["sarah-voice"]
+
+
+@pytest.mark.asyncio
+async def test_tts_node_closes_stream_when_consumer_stops_early(panel_agent):
+    """Barge-in closes tts_node mid-segment; the open TTS stream must close
+    then and there rather than waiting on the GC to notice."""
+    log: list[tuple[str, str]] = []
+    adam = _ScriptedTTS(log, "adam-voice", frames=5)
+    panel_agent._tts_by_persona = {
+        "behavioral": _ScriptedTTS(log, "sarah-voice"),
+        "technical": adam,
+    }
+
+    node = panel_agent.tts_node(_one_chunk("[ADAM] Why Redis?"), model_settings=None)
+    assert (await node.__anext__()).voice == "adam-voice"
+    await node.aclose()
+
+    assert adam.closed == ["adam-voice"]
+
+
+async def _one_chunk(text: str):
+    yield text

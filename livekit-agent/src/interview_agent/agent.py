@@ -25,6 +25,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from collections.abc import AsyncIterator
+from contextlib import aclosing
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -165,6 +167,22 @@ async def drain_pending_tasks(tasks: set[asyncio.Task[Any]]) -> None:
         raise first_exc
 
 
+async def _aclose_quietly(stream: Any) -> None:
+    """Close a TTS stream without letting the close mask the real failure.
+
+    Called from the ``finally`` of a synthesis attempt, which is often
+    already unwinding an ElevenLabs error. An aclose() that raised there
+    would replace the diagnosis with its own noise, and — worse — turn a
+    fully-spoken segment into a failed one.
+    """
+    if stream is None:
+        return
+    try:
+        await stream.aclose()
+    except Exception:  # noqa: BLE001
+        logger.debug("TTS stream aclose failed", exc_info=True)
+
+
 def _build_tts_for_spec(spec: PanelPersonaSpec) -> elevenlabs.TTS:
     """One prewarmed ElevenLabs TTS per panelist.
 
@@ -294,29 +312,100 @@ class PanelAgent(Agent):
     async def tts_node(self, text, model_settings):
         """Route contiguous speaker runs to per-panelist TTS streams.
 
-        Sequential drain on speaker change is deliberate: audio must play
-        in order anyway, and LLM text arrives far ahead of speech.
+        Segments are synthesized one at a time: audio must play in order
+        anyway, and LLM text arrives far ahead of speech.
+
+        Deliberate trade-off — a segment's text is buffered and pushed to
+        the TTS only once the run is complete, rather than streamed in
+        token by token. That is what makes a failed segment replayable:
+        the full text is still in hand, so a retry can re-speak it from
+        the start instead of resuming mid-sentence. The cost is bounded,
+        because a segment is one speaker's few sentences and the text
+        races far ahead of the audio regardless.
         """
-        pieces = split_speaker_segments(
-            text, self._tag_to_persona, self.current_leader.id
-        )
+        async for persona_id, segment in self._speaker_segments(text):
+            # aclosing(), not a bare `async for`: on barge-in the framework
+            # closes tts_node mid-segment, and only an explicit close runs
+            # _synthesize_segment's cleanup promptly. Left to the GC, the
+            # ElevenLabs stream outlives the segment that opened it.
+            async with aclosing(
+                self._synthesize_segment(persona_id, segment)
+            ) as frames:
+                async for frame in frames:
+                    yield frame
+
+    async def _speaker_segments(
+        self, text: Any
+    ) -> AsyncIterator[tuple[str, list[str]]]:
+        """Group the tagged token stream into contiguous speaker runs."""
         current: str | None = None
-        stream = None
-        async for speaker, piece in pieces:
+        buffer: list[str] = []
+        async for speaker, piece in split_speaker_segments(
+            text, self._tag_to_persona, self.current_leader.id
+        ):
             if speaker != current:
-                if stream is not None:
-                    stream.end_input()
-                    async for ev in stream:
-                        yield ev.frame
-                    await stream.aclose()
+                if current is not None:
+                    yield current, buffer
                 current = speaker
-                stream = self._tts_by_persona[speaker].stream()
-            stream.push_text(piece)
-        if stream is not None:
-            stream.end_input()
-            async for ev in stream:
-                yield ev.frame
-            await stream.aclose()
+                buffer = []
+            buffer.append(piece)
+        if current is not None:
+            yield current, buffer
+
+    async def _synthesize_segment(
+        self, persona_id: str, pieces: list[str]
+    ) -> AsyncIterator[Any]:
+        """Speak one segment: retry the same voice, then the round leader.
+
+        A TTS error must degrade one segment, never the session — worst
+        case the segment is silent and the interview carries on.
+
+        The attempt order (persona, persona again, leader) reflects what
+        actually goes wrong: a transient ElevenLabs error usually clears
+        on a retry, and if that one voice is genuinely down, the leader
+        re-speaking the line is still a coherent panel. Silence is not.
+
+        The `yielded` guard is the subtle part. Once a frame has been
+        handed downstream the candidate is already hearing the line, so
+        replaying it would speak the opening twice — worse than the
+        failure. Past that point the only safe degradation is to drop the
+        rest of the segment.
+        """
+        attempts = (persona_id, persona_id, self.current_leader.id)
+        for attempt_no, pid in enumerate(attempts, start=1):
+            yielded = False
+            stream = None
+            try:
+                stream = self._tts_by_persona[pid].stream()
+                for piece in pieces:
+                    stream.push_text(piece)
+                stream.end_input()
+                async for ev in stream:
+                    yielded = True
+                    yield ev.frame
+                return
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "TTS segment failed (persona=%s attempt=%d/%d yielded=%s)",
+                    pid,
+                    attempt_no,
+                    len(attempts),
+                    yielded,
+                    exc_info=True,
+                )
+                if yielded:
+                    return
+            finally:
+                # Runs on success, failure, and on the GeneratorExit that
+                # barge-in throws in at the yield above — the only place
+                # that closes every stream this attempt opened.
+                await _aclose_quietly(stream)
+        logger.error(
+            "TTS segment dropped after %d attempts (persona=%s): %.80r",
+            len(attempts),
+            persona_id,
+            "".join(pieces),
+        )
 
     # -- tools ---------------------------------------------------------------
 
