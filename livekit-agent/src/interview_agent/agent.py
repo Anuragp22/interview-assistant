@@ -484,15 +484,66 @@ def _build_chat_ctx_from_turns(turns: list[Any]) -> ChatContext:
     return ctx
 
 
+def _record_startup_failure(db: Any, session_id: str, exc: BaseException) -> None:
+    """Best-effort breadcrumb explaining why the panel never started.
+
+    A startup crash used to strand the session at ``awaiting-call`` with no
+    record of why: the candidate saw only the browser's generic 10s "agent
+    didn't join" watchdog, and nothing anywhere said whether connect,
+    Firebase init, or the session-doc load had died. Task 12's reconciler
+    sweep is the durable cleanup for the stale session; this is the
+    diagnosis that tells you which of the three to fix.
+
+    ``status`` is deliberately left alone — abandoning the session is the
+    reconciler's call, not ours.
+
+    ``db`` is whatever the failed startup had already managed to build, and
+    that is the whole reason it is a parameter rather than a fresh
+    ``init_firebase()`` call here:
+
+      - ``load_session_data`` raised → the handle is live, so reuse it.
+      - ``ctx.connect()`` raised → the try tripped before init_firebase ever
+        ran, but Firestore may be perfectly healthy, so it is worth building
+        a handle to get the breadcrumb down.
+      - ``init_firebase`` itself raised → ``db`` is None and the retry below
+        raises the same credentials error straight back. Unavoidable: no
+        handle means no breadcrumb, and the log is the only record left.
+
+    Everything is wrapped, because a failure to record a failure must not
+    replace it with a second, more confusing one.
+    """
+    try:
+        handle = db if db is not None else init_firebase()
+        handle.collection("sessions").document(session_id).update(
+            {
+                "agentStartError": str(exc)[:500],
+                "agentStartFailedAt": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("could not write startup breadcrumb for %s", session_id)
+
+
 async def entrypoint(ctx: JobContext) -> None:
     session_id = parse_session_id_from_room(ctx.room.name)
     if session_id is None:
         logger.warning("rejecting foreign room: %s", ctx.room.name)
         return
 
-    await ctx.connect()
-    db = init_firebase()
-    session_data = load_session_data(db, session_id)
+    # Bound before the try so the failure handler can tell "Firestore never
+    # came up" from "it came up and the session doc was the problem".
+    db: Any = None
+    try:
+        await ctx.connect()
+        db = init_firebase()
+        session_data = load_session_data(db, session_id)
+    except Exception as exc:  # noqa: BLE001
+        # Returning cleanly beats crashing the worker: the job is
+        # unrecoverable either way, and an unhandled raise here just buries
+        # the cause in worker logs nobody correlates back to the session.
+        logger.exception("startup failed for session %s", session_id)
+        _record_startup_failure(db, session_id, exc)
+        return
 
     # Make Firestore + session id reachable from the tools so they can
     # persist currentRound. Module-level singletons are fine because each
