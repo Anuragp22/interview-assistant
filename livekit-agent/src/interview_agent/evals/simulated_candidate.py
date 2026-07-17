@@ -109,9 +109,14 @@ def run_simulation(
     to ``2 * max_candidate_turns`` model calls (fewer if the panel ends the
     interview early).
     """
-    system_prompt = _make_system_prompt(intensity)
+    # Index of the round the panel is currently in. Starts at 0 (behavioral,
+    # led by Sarah) and advances on each next_round, mirroring production's
+    # _ACTIVE_ROUND. Clamped to the final round so an over-advancing panel
+    # never indexes past the roster.
+    current_round = 0
+    _FINAL_ROUND = len(LEADERS_IN_ORDER) - 1
     panel_msgs: list[dict] = [
-        {"role": "system", "content": system_prompt},
+        {"role": "system", "content": _make_system_prompt(intensity, current_round=current_round)},
         {"role": "user", "content": "Hi, I'm ready to start."},
     ]
     out = SimTranscript(intensity=intensity, persona_id=persona.id)
@@ -165,6 +170,18 @@ def run_simulation(
                     ),
                 }
             )
+            if tc.function.name == "next_round":
+                # Mirror production: advancing the round MUST re-render the
+                # system prompt so the panel is told it is now in a later round
+                # (technical/Adam, then systemDesign/Bella). Without this the
+                # panel behaves as round 0 for the whole conversation while the
+                # per-round checkers judge later segments against Adam/Bella —
+                # validating rounds the panel was never told it entered.
+                current_round = min(current_round + 1, _FINAL_ROUND)
+                panel_msgs[0] = {
+                    "role": "system",
+                    "content": _make_system_prompt(intensity, current_round=current_round),
+                }
             if tc.function.name == "end_interview":
                 ended = True
         if ended:

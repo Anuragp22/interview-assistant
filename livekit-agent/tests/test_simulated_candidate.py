@@ -10,14 +10,19 @@ checker that only holds when a paid API is reachable is not a unit test.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from interview_agent.evals.simulated_candidate import (
     LEADERS_IN_ORDER,
     PANEL_TAGS,
+    PERSONAS,
     check_interjection_budget,
     check_no_verdict_language,
     check_speaker_tags,
+    run_simulation,
     segment_texts_by_round,
 )
+from interview_agent.security.runner import _make_system_prompt
 
 TAGS = ("SARAH", "ADAM", "BELLA")
 
@@ -133,3 +138,107 @@ def test_segment_texts_ignores_end_interview_calls():
     texts = ["[SARAH] a", "[BELLA] b"]
     tool_calls = [(0, "next_round"), (1, "end_interview")]
     assert segment_texts_by_round(texts, tool_calls) == [["[SARAH] a"], ["[BELLA] b"]]
+
+
+# ── round-advancing re-render (Fix 2) ────────────────────────────────────
+#
+# The sim used to render the panel prompt ONCE at round 0 and never re-render
+# on next_round, so the panel behaved as Sarah/behavioral for the whole
+# conversation while the per-round checkers judged later segments against
+# Adam/Bella. These tests pin that the prompt now reflects the round it has
+# advanced into — the whole cross-round purpose of the eval.
+
+
+def test_make_system_prompt_round_one_names_technical_and_adam():
+    # Round 1 must present the technical round with Adam leading...
+    round1 = _make_system_prompt("grill", current_round=1)
+    assert "CURRENT ROUND: technical" in round1
+    assert "Adam leads" in round1
+    # ...and the default (round 0) must still present behavioral / Sarah, so the
+    # security runner's existing no-arg call is unchanged.
+    round0 = _make_system_prompt("grill")
+    assert "CURRENT ROUND: behavioral" in round0
+    assert "Sarah leads" in round0
+    assert round0 != round1
+
+
+def test_make_system_prompt_round_two_names_system_design_and_bella():
+    round2 = _make_system_prompt("grill", current_round=2)
+    assert "CURRENT ROUND: systemDesign" in round2
+    assert "Bella leads" in round2
+
+
+class _StubToolCall:
+    """Minimal stand-in for an OpenAI/Groq tool_call object."""
+
+    def __init__(self, name: str, call_id: str) -> None:
+        self.id = call_id
+        self.type = "function"
+        self.function = SimpleNamespace(name=name, arguments="{}")
+
+
+class _ScriptedPanelClient:
+    """Duck-typed RotatingGroqClient for driving run_simulation offline.
+
+    Panel turns (the calls that pass ``tools=``) follow ``panel_script`` — a
+    list of ``(spoken_text, tool_name_or_None)`` — and every panel call records
+    the system prompt it was handed, so a test can assert the prompt was
+    re-rendered after ``next_round``. Candidate turns just echo a fixed answer.
+    """
+
+    def __init__(self, panel_script: list[tuple[str, str | None]]) -> None:
+        self._panel_script = panel_script
+        self._panel_turn = 0
+        self.panel_system_prompts: list[str] = []
+
+    def create(self, **kwargs):
+        messages = kwargs["messages"]
+        if "tools" in kwargs:  # panel turn
+            self.panel_system_prompts.append(messages[0]["content"])
+            text, tool_name = self._panel_script[self._panel_turn]
+            self._panel_turn += 1
+            tcs = (
+                [_StubToolCall(tool_name, f"call_{self._panel_turn}")]
+                if tool_name is not None
+                else []
+            )
+            msg = SimpleNamespace(content=text, tool_calls=tcs)
+        else:  # candidate turn
+            msg = SimpleNamespace(content="Sure, here's my answer.", tool_calls=[])
+        return SimpleNamespace(choices=[SimpleNamespace(message=msg)])
+
+
+def test_run_simulation_re_renders_system_prompt_on_next_round():
+    # Panel: round-0 utterance + next_round, then a round-1 utterance +
+    # end_interview to terminate the loop.
+    client = _ScriptedPanelClient(
+        [
+            ("[SARAH] Tell me about a hard incident.", "next_round"),
+            ("[ADAM] Walk me through the data structure.", "end_interview"),
+        ]
+    )
+    transcript = run_simulation(
+        client,  # type: ignore[arg-type]
+        intensity="grill",
+        persona=PERSONAS[0],
+        model="stub-model",
+        max_candidate_turns=4,
+    )
+
+    # Two panel turns fired, each seeing its own system prompt.
+    assert len(client.panel_system_prompts) == 2
+    first, second = client.panel_system_prompts
+
+    # Turn 1 was round 0 (behavioral / Sarah).
+    assert "CURRENT ROUND: behavioral" in first
+    assert "Sarah leads" in first
+
+    # Turn 2 — AFTER next_round — was re-rendered to round 1 (technical / Adam).
+    # This is the bug's crux: previously both turns saw the round-0 prompt.
+    assert "CURRENT ROUND: technical" in second
+    assert "Adam leads" in second
+    assert first != second
+
+    # The next_round boundary was recorded so the checkers segment correctly.
+    assert ("next_round" in [name for _, name in transcript.tool_calls])
+    assert len(transcript.assistant_texts) == 2

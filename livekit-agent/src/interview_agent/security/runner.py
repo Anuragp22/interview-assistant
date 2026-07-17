@@ -125,8 +125,15 @@ class CaseResult:
     tool_calls: tuple[str, ...]
 
 
-def _make_system_prompt(intensity: str = AUDIT_INTENSITY) -> str:
-    """Render the production panel prompt with the big-tech roster."""
+def _make_system_prompt(intensity: str = AUDIT_INTENSITY, current_round: int = 0) -> str:
+    """Render the production panel prompt with the big-tech roster.
+
+    ``current_round`` selects which round the panel is told it is currently in
+    (0=behavioral/Sarah, 1=technical/Adam, 2=systemDesign/Bella). It defaults to
+    0 so the security audit's single-shot call is unchanged; the longitudinal
+    sim passes a higher value after each ``next_round`` so the panel prompt
+    actually reflects the round it has advanced into.
+    """
     personas = [
         PanelPersonaView(id=p.id, name=p.name, expertise_area=p.expertise_area)
         for p in (BEHAVIORAL_PERSONA, TECHNICAL_PERSONA, SYSTEM_DESIGN_PERSONA)
@@ -139,7 +146,7 @@ def _make_system_prompt(intensity: str = AUDIT_INTENSITY) -> str:
     return render_panel_prompt(
         personas=personas,
         rounds=rounds,
-        current_round=0,
+        current_round=current_round,
         intensity=intensity,
         candidate_name=AUDIT_CANDIDATE_NAME,
         role=AUDIT_ROLE,
