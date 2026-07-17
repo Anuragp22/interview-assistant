@@ -438,12 +438,14 @@ score.
 
 ### Session status state machine
 
-`awaiting-call → in-call → awaiting-report → completed`, with `reconnecting` and
-`abandoned` referenced in `types/index.d.ts`. The agent flips `in-call` at start
-and `awaiting-report` at teardown; Next.js flips `completed` when the report is
-written. `load_session_data` accepts `awaiting-call`, `in-call`, and
-`reconnecting` as callable states — `in-call` is exactly the resume case (the
-tab closed mid-interview and the agent re-dispatches).
+`awaiting-call → in-call → awaiting-report → completed`, plus `abandoned`
+(the full closed union lives in `types/index.d.ts`). The agent flips `in-call`
+at start and `awaiting-report` at teardown; Next.js flips `completed` when the
+report is written. `load_session_data` accepts `awaiting-call` and `in-call` as
+callable states — `in-call` is exactly the resume case (the tab closed
+mid-interview and the agent re-dispatches). There is no `reconnecting` session
+status: the `reconnecting` in `SessionRoomClient.tsx` is a LiveKit client
+*connection* state (local React state), not a Firestore session status.
 
 ---
 
