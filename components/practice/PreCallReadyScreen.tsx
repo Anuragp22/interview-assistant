@@ -31,6 +31,12 @@ export default function PreCallReadyScreen({
 }: Props) {
   return (
     <div className="flex flex-col items-center gap-6 max-w-md mx-auto py-6 animate-fadeIn">
+      {/* The route's only heading — without it the interview screen has no
+          heading outline for screen readers. */}
+      <h1 className="font-display text-2xl tracking-tight text-fg-strong text-center">
+        Ready when you are
+      </h1>
+
       <div className="card-border w-full">
         <div className="flex flex-col gap-5 p-6">
           <MicLevelMeter />
