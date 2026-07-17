@@ -97,7 +97,10 @@ type RubricBase = {
 
 type RubricGrounded = RubricBase & {
   // Concrete reference to the candidate's CV (filled at Phase 2 re-grounding).
-  cvReference?: string;
+  // The generation schema emits `null` when nothing in the CV applies (Groq
+  // strict mode forbids absent keys); sessions stored before that change may
+  // omit the key entirely — treat null and undefined identically.
+  cvReference?: string | null;
 };
 
 interface Template {

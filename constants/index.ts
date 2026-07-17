@@ -150,7 +150,11 @@ export const templateGenerationSchema = z.object({
 });
 
 export const rubricGroundedSchema = rubricBaseSchema.extend({
-  cvReference: z.string().optional(),
+  // NULLABLE, not optional — Groq strict json_schema requires every property
+  // to be listed in `required`, so "no CV reference" is expressed as an
+  // explicit null, never an absent key. `.optional()` here made Groq 400
+  // every reground request (see tests/groq-schema-strict.test.ts).
+  cvReference: z.string().nullable(),
 });
 
 export const groundingSchema = z.object({

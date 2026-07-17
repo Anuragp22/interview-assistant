@@ -33,17 +33,22 @@ describe("roundsTemplateSchema", () => {
 describe("roundsGroundingSchema", () => {
   it("keys grounded buckets by round id", () => {
     const schema = roundsGroundingSchema(["behavioral", "fundamentals"]);
+    // cvReference is always present in grounded rubrics — null means
+    // "nothing in the CV applies" (Groq strict mode forbids absent keys).
     const ok = schema.safeParse({
       behavioral: {
         questionsGrounded: ["a", "b"],
         rubricsGrounded: [
           { ...rubric(), cvReference: "the compiler project" },
-          rubric(),
+          { ...rubric(), cvReference: null },
         ],
       },
       fundamentals: {
         questionsGrounded: ["c", "d"],
-        rubricsGrounded: [rubric(), rubric()],
+        rubricsGrounded: [
+          { ...rubric(), cvReference: null },
+          { ...rubric(), cvReference: null },
+        ],
       },
     });
     expect(ok.success).toBe(true);

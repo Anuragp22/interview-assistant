@@ -9,7 +9,9 @@ export interface PartitionedGroundedBucket {
     expectedSpecifics: string[];
     depth: "foundational" | "intermediate" | "advanced";
     priority: 1 | 2 | 3;
-    cvReference?: string;
+    // Always present in fresh pipeline output; null = "no CV reference"
+    // (Groq strict mode forbids optional keys).
+    cvReference: string | null;
   }>;
 }
 

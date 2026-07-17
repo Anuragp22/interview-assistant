@@ -4,6 +4,7 @@ import { generateObject } from "ai";
 
 import { groundingSchema, roundsGroundingSchema } from "@/constants";
 import { withGroqModel } from "@/lib/groq";
+import { withSchemaRetry } from "@/lib/llm/schema-retry";
 
 /**
  * Phase 2: re-ground Phase-1 questions + rubrics in the candidate's
@@ -25,19 +26,22 @@ export async function regroundQuestions(input: {
   questionsGrounded: string[];
   rubricsGrounded: RubricGrounded[];
 }> {
-  const { object } = await withGroqModel((model) =>
-    generateObject({
-      model,
-      providerOptions: { groq: { structuredOutputs: true } },
-      schema: groundingSchema,
-      experimental_telemetry: {
-        isEnabled: true,
-        functionId: "groq.reground-questions",
-        metadata: { questionCount: input.questionsBase.length },
-      },
-      system:
-        "You personalise interview questions for a specific candidate. Output a single JSON object exactly matching the schema described in the user message.",
-      prompt: `
+  const { object } = await withSchemaRetry(
+    "groq.reground-questions",
+    () =>
+      withGroqModel((model) =>
+        generateObject({
+          model,
+          providerOptions: { groq: { structuredOutputs: true } },
+          schema: groundingSchema,
+          experimental_telemetry: {
+            isEnabled: true,
+            functionId: "groq.reground-questions",
+            metadata: { questionCount: input.questionsBase.length },
+          },
+          system:
+            "You personalise interview questions for a specific candidate. Output a single JSON object exactly matching the schema described in the user message.",
+          prompt: `
 You are personalising an existing question bank for a specific candidate.
 
 Job description:
@@ -51,7 +55,7 @@ ${input.questionsBase
   .map((q, i) => `${i + 1}. ${q}\nRubric: ${JSON.stringify(input.rubricsBase[i])}`)
   .join("\n\n")}
 
-For each question, produce a CV-personalised version. If the candidate's CV mentions a specific project, technology, or company that the question can naturally reference, rewrite the question to cite it (e.g. "Walk me through how the search filters worked at Razorpay" instead of "Tell me about a performance optimization"). When NO clear personalization is possible, leave the question essentially as-is. Every rubric carries forward; you may add a "cvReference" string noting which CV detail the question targets.
+For each question, produce a CV-personalised version. If the candidate's CV mentions a specific project, technology, or company that the question can naturally reference, rewrite the question to cite it (e.g. "Walk me through how the search filters worked at Razorpay" instead of "Tell me about a performance optimization"). When NO clear personalization is possible, leave the question essentially as-is. Every rubric carries forward; set its "cvReference" to a string noting which CV detail the question targets, or to null when nothing in the CV applies.
 
 Respond as a single JSON object matching this shape exactly:
 
@@ -63,7 +67,7 @@ Respond as a single JSON object matching this shape exactly:
       "expectedSpecifics": [<string>, ...],
       "depth":             "foundational" | "intermediate" | "advanced",
       "priority":          1 | 2 | 3,
-      "cvReference":       <string optional>
+      "cvReference":       <string, or null when nothing in the CV applies>
     },
     ...
   ]
@@ -76,7 +80,8 @@ Rules:
 - "priority" must be the integer 1, 2, or 3.
 - Output JSON only — no preamble, no code fences.
     `,
-    }),
+        }),
+      ),
   );
 
   return {
@@ -89,8 +94,9 @@ Rules:
 /**
  * Phase 2 - per-round reground for a preset panel. Takes each round's base
  * questions/rubrics, regrounds them against the CV in a single Groq call,
- * and returns the same round-keyed shape with grounded versions plus an
- * optional cvReference on each rubric.
+ * and returns the same round-keyed shape with grounded versions plus a
+ * cvReference on each rubric (null when nothing in the CV applies — Groq
+ * strict mode forbids absent keys, so "no reference" is an explicit null).
  */
 export async function regroundRoundQuestions(input: {
   questionsByRound: { [roundId: string]: string[] };
@@ -124,28 +130,31 @@ export async function regroundRoundQuestions(input: {
 
   const block = roundIds.map(renderBucket).join("\n\n");
 
-  const { object } = await withGroqModel((model) =>
-    generateObject({
-      model,
-      providerOptions: { groq: { structuredOutputs: true } },
-      schema: roundsGroundingSchema(roundIds),
-      experimental_telemetry: {
-        isEnabled: true,
-        functionId: "groq.reground-round-questions",
-        metadata: {
-          cvLength: input.cvText.length,
-          jdLength: input.jobDescription.length,
-          rounds: roundIds.join(","),
-        },
-      },
-      system:
-        "You re-ground base interview questions in the candidate's CV. Output a single JSON object matching the schema.",
-      prompt: `
+  const { object } = await withSchemaRetry(
+    "groq.reground-round-questions",
+    () =>
+      withGroqModel((model) =>
+        generateObject({
+          model,
+          providerOptions: { groq: { structuredOutputs: true } },
+          schema: roundsGroundingSchema(roundIds),
+          experimental_telemetry: {
+            isEnabled: true,
+            functionId: "groq.reground-round-questions",
+            metadata: {
+              cvLength: input.cvText.length,
+              jdLength: input.jobDescription.length,
+              rounds: roundIds.join(","),
+            },
+          },
+          system:
+            "You re-ground base interview questions in the candidate's CV. Output a single JSON object matching the schema.",
+          prompt: `
 Re-ground the base questions below in the candidate's CV. For each
 question, rewrite it to reference specific projects, companies, or
-technologies from the CV when relevant. For each rubric, add a
-"cvReference" field pointing to the specific CV detail the question
-targets.
+technologies from the CV when relevant. For each rubric, set the
+"cvReference" field to the specific CV detail the question targets,
+or to null when nothing in the CV applies.
 
 Job description:
 ${input.jobDescription}
@@ -168,19 +177,20 @@ Each grounded rubric extends the base rubric with cvReference:
   "expectedSpecifics": [<string>, ...],
   "depth":             "foundational" | "intermediate" | "advanced",
   "priority":          1 | 2 | 3,
-  "cvReference":       "..."
+  "cvReference":       "..." or null
 }
 
 Critical rules:
 - Preserve question count: 3 per bucket, in original order.
 - Reference specific CV details - companies, projects, tech - when natural.
-- If a question doesn't map to anything in the CV, keep it close to the base version (don't fabricate CV facts).
+- If a question doesn't map to anything in the CV, keep it close to the base version (don't fabricate CV facts) and set its cvReference to null.
 - "depth" must be EXACTLY one of "foundational", "intermediate", "advanced" -
   do NOT substitute synonyms like "high", "medium", "low", "easy", "hard".
 - "priority" must be the integer 1, 2, or 3.
 - Output JSON only.
     `,
-    }),
+        }),
+      ),
   );
 
   return object as {
