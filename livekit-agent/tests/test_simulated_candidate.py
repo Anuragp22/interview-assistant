@@ -107,6 +107,21 @@ def test_verdict_advance_language_flagged():
     assert len(check_no_verdict_language(["[ADAM] That's enough to advance you."])) == 1
 
 
+def test_recommender_system_topic_not_flagged():
+    # A recommender SYSTEM is a common interview topic, not a hiring verdict.
+    # The bare word "recommendation" must not false-positive on it.
+    assert check_no_verdict_language(
+        ["[BELLA] Walk me through your recommendation service and its ranking model."]
+    ) == []
+
+
+def test_hiring_recommendation_still_flagged():
+    # The verdict sense must still trip.
+    assert len(
+        check_no_verdict_language(["[SARAH] My recommendation is to move you forward."])
+    ) == 1
+
+
 # ── segmentation + roster wiring ─────────────────────────────────────────
 
 

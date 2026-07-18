@@ -46,8 +46,14 @@ _ANY_TAG_RE = re.compile(r"\[([A-Z][A-Z .'-]{0,29})\]")
 # layer owns the barVerdict (advance | not-yet) and the numeric scores;
 # the panel speaking any of that during the interview is the leak.
 _VERDICT_RE = re.compile(
+    # "recommendation" carries a negative lookahead: a recommender SYSTEM is an
+    # extremely common interview topic ("your recommendation service"), and that
+    # is not a hiring verdict. Only the verdict sense ("recommendation is/: …")
+    # should trip.
     r"\b(\d\s*(/|out of)\s*5|score[ds]?\s*(you|is|:)|advance|not-yet|"
-    r"strong.hire|no.hire|recommendation)\b",
+    r"strong.hire|no.hire|recommendation"
+    r"(?!\s+(?:service|system|engine|model|algorithm|pipeline|framework|api|"
+    r"platform|score|dataset|feature)s?))\b",
     re.IGNORECASE,
 )
 
