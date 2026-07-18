@@ -1,66 +1,60 @@
 {
-  "model": "llama-3.3-70b-versatile",
-  "recordedAt": "2026-06-09T23:05:35.481Z",
+  "model": "openai/gpt-oss-120b",
+  "recordedAt": "2026-07-18T07:51:51.623Z",
   "fixtures": {
     "backend-sre-senior": {
       "cvGroundingRate": 1,
-      "partitionOverall": 0.5555555555555555,
+      "partitionOverall": 0.3333333333333333,
       "hallucinationGuard": 1,
-      "aggregate": 0.8666666666666666
+      "aggregate": 0.7999999999999999
     },
     "ml-recsys-mid": {
-      "cvGroundingRate": 1,
+      "cvGroundingRate": 0.8571428571428571,
       "partitionOverall": 0.4444444444444444,
       "hallucinationGuard": 1,
-      "aggregate": 0.8333333333333334
+      "aggregate": 0.7833333333333333
     },
     "frontend-lead-staff": {
-      "cvGroundingRate": 1,
-      "partitionOverall": 0.5555555555555555,
-      "hallucinationGuard": 1,
-      "aggregate": 0.8666666666666666
-    },
-    "ios-mobile-mid": {
-      "cvGroundingRate": 1,
-      "partitionOverall": 0.7777777777777777,
-      "hallucinationGuard": 1,
-      "aggregate": 0.9333333333333332
-    },
-    "security-engineer-senior": {
-      "cvGroundingRate": 1,
-      "partitionOverall": 0.5555555555555555,
-      "hallucinationGuard": 1,
-      "aggregate": 0.8666666666666666
-    },
-    "platform-engineer-senior": {
-      "cvGroundingRate": 0.8888888888888888,
-      "partitionOverall": 0.6666666666666666,
-      "hallucinationGuard": 1,
-      "aggregate": 0.861111111111111
-    },
-    "data-engineer-mid": {
-      "cvGroundingRate": 0.7777777777777778,
-      "partitionOverall": 0.8888888888888888,
-      "hallucinationGuard": 1,
-      "aggregate": 0.888888888888889
-    },
-    "junior-fullstack": {
       "cvGroundingRate": 0.6666666666666666,
       "partitionOverall": 0.5555555555555555,
       "hallucinationGuard": 1,
       "aggregate": 0.7499999999999999
     },
-    "staff-payments-architect": {
-      "cvGroundingRate": 1,
-      "partitionOverall": 0.8888888888888888,
-      "hallucinationGuard": 1,
-      "aggregate": 0.9666666666666667
-    },
-    "devrel-solutions-senior": {
-      "cvGroundingRate": 0.8888888888888888,
+    "ios-mobile-mid": {
+      "cvGroundingRate": 0.875,
       "partitionOverall": 0.6666666666666666,
       "hallucinationGuard": 1,
-      "aggregate": 0.861111111111111
+      "aggregate": 0.8562500000000001
+    },
+    "security-engineer-senior": {
+      "cvGroundingRate": 1,
+      "partitionOverall": 0.1111111111111111,
+      "hallucinationGuard": 1,
+      "aggregate": 0.7333333333333333
+    },
+    "platform-engineer-senior": {
+      "cvGroundingRate": 1,
+      "partitionOverall": 0.4444444444444444,
+      "hallucinationGuard": 1,
+      "aggregate": 0.8333333333333334
+    },
+    "data-engineer-mid": {
+      "cvGroundingRate": 0.875,
+      "partitionOverall": 0.1111111111111111,
+      "hallucinationGuard": 1,
+      "aggregate": 0.6895833333333333
+    },
+    "staff-payments-architect": {
+      "cvGroundingRate": 0.75,
+      "partitionOverall": 0.3333333333333333,
+      "hallucinationGuard": 1,
+      "aggregate": 0.7125
+    },
+    "devrel-solutions-senior": {
+      "cvGroundingRate": 0.8,
+      "partitionOverall": 0.8888888888888888,
+      "hallucinationGuard": 1,
+      "aggregate": 0.8966666666666666
     }
   }
 }
