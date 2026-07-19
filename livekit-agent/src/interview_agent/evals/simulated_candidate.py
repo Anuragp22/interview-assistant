@@ -116,9 +116,11 @@ class SimTranscript:
     # boundary and is deliberately kept out of here so segment_texts_by_round
     # still aligns segments with actual round changes.
     tool_calls: list[tuple[int, str]] = field(default_factory=list)  # (assistant_turn_idx, tool)
-    # next_round calls the guard refused: (assistant_turn_idx, refusal_text).
-    # Mirrors production returning TransferGuard's refusal without advancing,
-    # and lets the checker see an early-skip attempt the guard blocked.
+    # Hand-off tool calls the guard refused: (assistant_turn_idx, refusal_text)
+    # — an early next_round (before MIN_USER_TURNS_BEFORE_TRANSFER) or an early
+    # end_interview (before MIN_USER_TURNS_BEFORE_END). Mirrors production
+    # returning TransferGuard's refusal without acting, and lets the checker see
+    # an early-skip / early-end attempt the guard blocked.
     guard_refusals: list[tuple[int, str]] = field(default_factory=list)
 
 
@@ -245,11 +247,20 @@ def run_simulation(
                         }
                         out.tool_calls.append((next_round_boundary, "next_round"))
                         tool_content = "Round advanced."
-            else:  # end_interview — unguarded in the sim; production's
-                # end_interview guard is out of scope for this eval.
-                out.tool_calls.append((turn_idx, "end_interview"))
-                tool_content = "Interview ended."
-                ended = True
+            else:  # end_interview — mirror PanelAgent.end_interview's guard.
+                # TransferGuard.may_end_interview() refuses an early end (before
+                # MIN_USER_TURNS_BEFORE_END total candidate turns); production
+                # returns that refusal without ending, so the sim does too —
+                # feed it back, record it, and keep going. Only an allowed end
+                # terminates the run.
+                allowed, refusal = guard.may_end_interview()
+                if not allowed:
+                    tool_content = refusal or "Not yet."
+                    out.guard_refusals.append((turn_idx, tool_content))
+                else:
+                    out.tool_calls.append((turn_idx, "end_interview"))
+                    tool_content = "Interview ended."
+                    ended = True
             panel_msgs.append(
                 {"role": "tool", "tool_call_id": tc.id, "content": tool_content}
             )

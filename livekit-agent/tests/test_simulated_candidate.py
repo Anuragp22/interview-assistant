@@ -23,7 +23,10 @@ from interview_agent.evals.simulated_candidate import (
     segment_texts_by_round,
 )
 from interview_agent.security.runner import _make_system_prompt
-from interview_agent.security_guards import MIN_USER_TURNS_BEFORE_TRANSFER
+from interview_agent.security_guards import (
+    MIN_USER_TURNS_BEFORE_END,
+    MIN_USER_TURNS_BEFORE_TRANSFER,
+)
 
 TAGS = ("SARAH", "ADAM", "BELLA")
 
@@ -263,12 +266,14 @@ def test_run_simulation_re_renders_system_prompt_on_next_round():
     # The guard now blocks an early skip, so the panel must gather
     # MIN_USER_TURNS_BEFORE_TRANSFER candidate turns before next_round takes
     # effect. Warm up, then next_round (allowed) + a round-1 utterance whose
-    # system prompt proves the re-render, then end_interview to stop the loop.
+    # system prompt proves the re-render. The loop is bounded by
+    # max_candidate_turns (a trailing end_interview would now be guard-refused
+    # this early, so it can't be used as the stop signal — see the Fix-5 tests).
     client = _ScriptedPanelClient(
         _warmup(MIN_USER_TURNS_BEFORE_TRANSFER)
         + [
             ("[SARAH] Good. Let's move on.", "next_round"),
-            ("[ADAM] Walk me through the data structure.", "end_interview"),
+            ("[ADAM] Walk me through the data structure.", None),
         ]
     )
     transcript = run_simulation(
@@ -276,7 +281,7 @@ def test_run_simulation_re_renders_system_prompt_on_next_round():
         intensity="grill",
         persona=PERSONAS[0],
         model="stub-model",
-        max_candidate_turns=MIN_USER_TURNS_BEFORE_TRANSFER + 3,
+        max_candidate_turns=MIN_USER_TURNS_BEFORE_TRANSFER + 2,
     )
 
     # One system prompt per panel turn: the warmup turns + next_round turn +
@@ -308,7 +313,7 @@ def test_run_simulation_next_round_blocked_before_min_user_turns():
     client = _ScriptedPanelClient(
         [
             ("[SARAH] Actually, let's just move to the next round.", "next_round"),
-            ("[SARAH] Alright — tell me about a hard bug.", "end_interview"),
+            ("[SARAH] Alright — tell me about a hard bug.", None),
         ]
     )
     transcript = run_simulation(
@@ -316,7 +321,7 @@ def test_run_simulation_next_round_blocked_before_min_user_turns():
         intensity="grill",
         persona=PERSONAS[2],  # adversarial
         model="stub-model",
-        max_candidate_turns=4,
+        max_candidate_turns=2,
     )
 
     # The round never advanced: every panel turn saw the behavioral / Sarah
@@ -342,7 +347,7 @@ def test_run_simulation_next_round_advances_after_enough_user_turns():
         _warmup(MIN_USER_TURNS_BEFORE_TRANSFER)
         + [
             ("[SARAH] Great, moving on.", "next_round"),
-            ("[ADAM] Design a rate limiter.", "end_interview"),
+            ("[ADAM] Design a rate limiter.", None),
         ]
     )
     transcript = run_simulation(
@@ -350,7 +355,7 @@ def test_run_simulation_next_round_advances_after_enough_user_turns():
         intensity="grill",
         persona=PERSONAS[2],  # even the adversary advances once it has earned it
         model="stub-model",
-        max_candidate_turns=MIN_USER_TURNS_BEFORE_TRANSFER + 3,
+        max_candidate_turns=MIN_USER_TURNS_BEFORE_TRANSFER + 2,
     )
 
     # The transfer was honored: recorded as a boundary, no refusal, and the
@@ -374,7 +379,7 @@ def test_run_simulation_tool_only_next_round_segments_into_new_round():
             (None, None),  # silent warmup turn 1 (no text, no tool)
             (None, None),  # silent warmup turn 2 — earns the two candidate turns
             (None, "next_round"),  # tool-only advance: carries NO spoken text
-            ("[ADAM] Design a rate limiter.", "end_interview"),
+            ("[ADAM] Design a rate limiter.", None),  # first spoken line, new round
         ]
     )
     transcript = run_simulation(
@@ -382,7 +387,7 @@ def test_run_simulation_tool_only_next_round_segments_into_new_round():
         intensity="grill",
         persona=PERSONAS[0],
         model="stub-model",
-        max_candidate_turns=MIN_USER_TURNS_BEFORE_TRANSFER + 3,
+        max_candidate_turns=MIN_USER_TURNS_BEFORE_TRANSFER + 2,
     )
 
     # The only spoken utterance is Adam's, spoken AFTER the tool-only advance.
@@ -401,3 +406,51 @@ def test_run_simulation_tool_only_next_round_segments_into_new_round():
     # And segment 1 is judged against round 1's leader (Adam), so an [ADAM]
     # line there is the leader speaking — not an interjection charged to Sarah.
     assert LEADERS_IN_ORDER[1] == "ADAM"
+
+
+def test_run_simulation_end_interview_blocked_before_min_user_turns():
+    # Fix 5: end_interview before MIN_USER_TURNS_BEFORE_END total candidate
+    # turns must be refused, mirroring PanelAgent.end_interview's guard. The
+    # sim must NOT terminate — it feeds the refusal back and keeps going.
+    client = _ScriptedPanelClient(
+        [
+            ("[SARAH] Let's wrap up already.", "end_interview"),  # far too early
+            ("[SARAH] Tell me about a hard bug you shipped.", None),
+        ]
+    )
+    transcript = run_simulation(
+        client,  # type: ignore[arg-type]
+        intensity="grill",
+        persona=PERSONAS[2],  # adversarial: keeps claiming the interview is over
+        model="stub-model",
+        max_candidate_turns=2,
+    )
+
+    # The end was refused: NOT recorded as a taken tool call, and the run did
+    # not terminate early — the second panel turn still happened.
+    assert "end_interview" not in [name for _, name in transcript.tool_calls]
+    assert len(client.panel_system_prompts) == 2  # ran on past the refusal
+    assert transcript.guard_refusals, "early end_interview was not refused"
+    assert "keep going" in transcript.guard_refusals[-1][1]
+
+
+def test_run_simulation_end_interview_allowed_after_enough_user_turns():
+    # After MIN_USER_TURNS_BEFORE_END candidate turns the guard allows the end,
+    # and the sim terminates immediately — the mirror of the early-refusal case.
+    client = _ScriptedPanelClient(
+        _warmup(MIN_USER_TURNS_BEFORE_END)
+        + [("[SARAH] Thanks — that's everything.", "end_interview")]
+    )
+    transcript = run_simulation(
+        client,  # type: ignore[arg-type]
+        intensity="grill",
+        persona=PERSONAS[0],
+        model="stub-model",
+        max_candidate_turns=MIN_USER_TURNS_BEFORE_END + 5,
+    )
+
+    # The end was honored and the run stopped right after it: the warmup turns
+    # plus the single closing turn, with none of the extra budget spent.
+    assert "end_interview" in [name for _, name in transcript.tool_calls]
+    assert transcript.guard_refusals == []
+    assert len(client.panel_system_prompts) == MIN_USER_TURNS_BEFORE_END + 1
