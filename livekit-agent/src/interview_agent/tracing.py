@@ -47,7 +47,7 @@ from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
     OTLPSpanExporter as HTTPSpanExporter,
 )
 from opentelemetry.sdk.resources import Resource
-from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
+from opentelemetry.sdk.trace import Event, ReadableSpan, TracerProvider
 from opentelemetry.sdk.trace.export import (
     BatchSpanProcessor,
     ConsoleSpanExporter,
@@ -55,6 +55,7 @@ from opentelemetry.sdk.trace.export import (
     SpanExporter,
     SpanExportResult,
 )
+from opentelemetry.util.types import Attributes
 
 logger = logging.getLogger("interview-agent.tracing")
 
@@ -121,6 +122,148 @@ def _resolve_otlp_config() -> tuple[str, dict[str, str]] | None:
     return None
 
 
+# ---------------------------------------------------------------------------
+# PII redaction for the EXTERNAL OTLP export path
+# ---------------------------------------------------------------------------
+#
+# LiveKit Agents 1.6 auto-instruments its own LLM spans and attaches the raw
+# conversation to them: the system message embeds the candidate's CV + JD, and
+# every later user/assistant/tool message is the interview transcript. It
+# exposes NO flag to disable content capture at the source — verified against
+# livekit-agents 1.6.5's telemetry module (`livekit/agents/telemetry/traces.py`
+# `_chat_ctx_to_otel_events` + `llm/llm.py`, both add the events/attributes
+# unconditionally). So omitting `gen_ai.prompt` from OUR spans is not enough;
+# LiveKit's spans carry the PII. We strip it here, before it leaves the process
+# for a third-party sink.
+#
+# The keys below are copied from `livekit/agents/telemetry/trace_types.py`, not
+# guessed. Two surfaces carry content:
+#
+#   * span EVENTS whose entire payload is a message body — each an OTel GenAI
+#     event carrying a `content` (or `tool_calls`) attribute.
+#   * span ATTRIBUTES holding prompt / response / transcript text.
+#
+# Everything else survives (model id, token counts, latency, cost, our own
+# agent.* attributes): redaction is a targeted DENY on content keys, not an
+# allow-list that would also drop the telemetry this whole module exists for.
+
+# gen_ai.* span events LiveKit emits (trace_types.EVENT_GEN_AI_*). Each carries
+# a message body, so the whole event is dropped.
+_REDACTED_EVENT_NAMES = frozenset(
+    {
+        "gen_ai.system.message",  # embeds the CV + JD
+        "gen_ai.user.message",  # candidate transcript
+        "gen_ai.assistant.message",  # panel replies + tool_calls
+        "gen_ai.tool.message",  # tool output
+        "gen_ai.choice",  # LLM completion body
+    }
+)
+
+# lk.* span attributes LiveKit sets that hold prompt/response/transcript TEXT
+# (trace_types.ATTR_*). Exact-key deny — the sibling lk.* timing/metric
+# attributes (lk.response.ttft, lk.llm_metrics, lk.e2e_latency, ...) are kept.
+_REDACTED_ATTR_KEYS = frozenset(
+    {
+        "lk.chat_ctx",  # JSON of the entire chat context (CV + JD + transcript)
+        "lk.user_transcript",  # candidate's transcribed speech
+        "lk.user_input",  # candidate input text
+        "lk.instructions",  # agent instructions (embed CV/JD)
+        "lk.response.text",  # LLM response text
+        "lk.input_text",  # TTS input — what the panel says aloud
+        "lk.function_tool.arguments",  # tool-call arguments
+        "lk.function_tool.output",  # tool-call output
+        "lk.amd.transcript",  # answering-machine-detection transcript
+    }
+)
+
+# Defensive prefixes for content conventions LiveKit 1.6 does not currently
+# emit but a differently configured OTLP LLM instrumentation commonly does (and
+# which Langfuse renders as prompt/completion). Belt-and-suspenders so a future
+# key can't leak past the exact-key deny above.
+_REDACTED_ATTR_PREFIXES = (
+    "gen_ai.prompt",
+    "gen_ai.completion",
+    "traceloop.entity.input",
+    "traceloop.entity.output",
+)
+
+
+def _is_content_attr(key: str) -> bool:
+    return key in _REDACTED_ATTR_KEYS or key.startswith(_REDACTED_ATTR_PREFIXES)
+
+
+def _redact_attributes(attributes: Attributes) -> Attributes:
+    """Drop content-bearing keys; return the same object when nothing matched
+    so unaffected spans aren't needlessly copied."""
+    if not attributes:
+        return attributes
+    kept = {k: v for k, v in attributes.items() if not _is_content_attr(k)}
+    return attributes if len(kept) == len(attributes) else kept
+
+
+def _redact_events(events: Sequence[Event]) -> list[Event]:
+    kept: list[Event] = []
+    for ev in events or ():
+        if ev.name in _REDACTED_EVENT_NAMES:
+            continue  # whole event is a message body — drop it
+        # A retained event could still carry a content attribute; scrub it too.
+        redacted = _redact_attributes(ev.attributes)
+        if redacted is ev.attributes:
+            kept.append(ev)
+        else:
+            kept.append(Event(name=ev.name, attributes=redacted, timestamp=ev.timestamp))
+    return kept
+
+
+def _redact_span(span: ReadableSpan) -> ReadableSpan:
+    """Return a COPY of ``span`` with message content stripped.
+
+    Never mutates the original: the local console / JSONL exporters share the
+    same span object and are allowed to keep content (a dev machine is not a
+    third party). Resource and instrumentation scope are passed through by
+    reference so the OTLP encoder still groups the span correctly.
+    """
+    return ReadableSpan(
+        name=span.name,
+        context=span.context,
+        parent=span.parent,
+        resource=span.resource,
+        attributes=_redact_attributes(span.attributes),
+        events=_redact_events(span.events),
+        links=span.links,
+        kind=span.kind,
+        status=span.status,
+        start_time=span.start_time,
+        end_time=span.end_time,
+        # instrumentation_scope (not the deprecated instrumentation_info) is
+        # what the OTLP encoder groups spans by — pass it through unchanged.
+        instrumentation_scope=span.instrumentation_scope,
+    )
+
+
+class RedactingSpanExporter(SpanExporter):
+    """Wraps a delegate exporter and strips message CONTENT from every span
+    before handing it on.
+
+    Sits on the EXTERNAL OTLP export path only, so the CV / JD / transcript
+    LiveKit attaches to its auto-instrumented spans never reaches
+    Langfuse / Honeycomb / any OTLP backend — while the non-content telemetry
+    (model, tokens, latency, cost) still does. See the deny-lists above.
+    """
+
+    def __init__(self, exporter: SpanExporter) -> None:
+        self._exporter = exporter
+
+    def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
+        return self._exporter.export([_redact_span(s) for s in spans])
+
+    def force_flush(self, timeout_millis: int = 30000) -> bool:
+        return self._exporter.force_flush(timeout_millis)
+
+    def shutdown(self) -> None:
+        self._exporter.shutdown()
+
+
 def install_tracer_provider() -> None:
     """Configure the global :class:`TracerProvider`.
 
@@ -144,9 +287,13 @@ def install_tracer_provider() -> None:
     config = _resolve_otlp_config()
     if config is not None:
         endpoint, headers = config
-        exporter = HTTPSpanExporter(endpoint=endpoint, headers=headers or None)
+        # Redact message content before it leaves the process: LiveKit's own
+        # spans carry the CV/JD/transcript and this is a THIRD-PARTY sink.
+        exporter = RedactingSpanExporter(
+            HTTPSpanExporter(endpoint=endpoint, headers=headers or None)
+        )
         provider.add_span_processor(BatchSpanProcessor(exporter))
-        logger.info("OTel: shipping spans to %s", endpoint)
+        logger.info("OTel: shipping redacted spans to %s", endpoint)
     else:
         # SimpleSpanProcessor so spans appear in stdout as they end
         # (no buffer). BatchSpanProcessor + console would delay the

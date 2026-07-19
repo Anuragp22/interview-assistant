@@ -81,6 +81,25 @@ prompts embed the candidate's CV and job description — so every
 `gen_ai.request.model` telemetry (model, token counts, latency); only the
 input/output **content** is suppressed, so nothing personal reaches Langfuse.
 
+The agent side keeps the same property but has to work harder for it. LiveKit
+Agents 1.6 auto-instruments its own LLM spans and attaches the raw
+system/user/assistant messages — the CV + JD live in the system message, the
+transcript in the later ones — as `gen_ai.*` span **events**
+(`gen_ai.system.message`, `gen_ai.user.message`, `gen_ai.assistant.message`,
+`gen_ai.tool.message`, `gen_ai.choice`, each carrying a `content` attribute)
+plus `lk.*` content **attributes** (`lk.chat_ctx`, `lk.user_transcript`,
+`lk.user_input`, `lk.instructions`, `lk.response.text`, `lk.input_text`,
+`lk.function_tool.arguments/output`, `lk.amd.transcript`). LiveKit 1.6 exposes
+no flag to disable this at the source, so `tracing.py` wraps the **external**
+OTLP exporter in a `RedactingSpanExporter` that drops those content events and
+strips those attribute keys before export — a targeted deny-list keyed off the
+exact names in `livekit/agents/telemetry/trace_types.py`, keeping the model /
+token / latency / cost telemetry intact. The local dev exporters (console,
+JSONL) are left untouched: they stay on the dev machine, never a third party.
+`test_tracing.py` plants a CV secret in both a content event and a content
+attribute and asserts it does not survive export while the model id and token
+counts do.
+
 The agent supports one extra sink, independent of the primary exporter:
 `OTEL_TRACES_FILE` adds a `JSONLSpanExporter` (`tracing.py`) that appends one
 compact JSON object per span. Set it *alongside* Honeycomb to get live tracing
