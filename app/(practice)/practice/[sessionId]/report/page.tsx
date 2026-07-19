@@ -78,6 +78,27 @@ export default async function PracticeReportPage({
       },
   );
 
+  // Session self-measurement, written by the agent at teardown. Every field is
+  // independently optional: `qualityTelemetry` and `estimatedCost` are two
+  // separate best-effort writes, and both are absent on sessions that pre-date
+  // them or that crashed first. Undefined is passed through as undefined so the
+  // strip can omit the row — a fabricated 0 would read as a measurement.
+  //
+  // Caveat inherited from the writers: telemetry accounting is per agent
+  // PROCESS, so a resumed session (tab closed and reopened) reports only its
+  // final leg. Wall-clock duration, by contrast, spans the whole session — the
+  // two can legitimately disagree, and neither is wrong.
+  const byRound = session.qualityTelemetry?.byRound;
+  const stats = {
+    startedAt: session.startedAt,
+    endedAt: session.endedAt,
+    totalUsd: session.estimatedCost?.totalUsd,
+    interjections: session.qualityTelemetry?.interjections,
+    turns: byRound
+      ? Object.values(byRound).reduce((sum, r) => sum + r.turns, 0)
+      : undefined,
+  };
+
   return (
     <div className="flex flex-col gap-6 max-w-3xl mx-auto w-full">
       <Link
@@ -87,7 +108,12 @@ export default async function PracticeReportPage({
         <ArrowLeft className="size-3.5" />
         Back to dashboard
       </Link>
-      <ReportView report={report} level={level} transcript={transcript} />
+      <ReportView
+        report={report}
+        level={level}
+        transcript={transcript}
+        stats={stats}
+      />
     </div>
   );
 }

@@ -7,6 +7,9 @@ import {
 } from "lucide-react";
 
 import { cn } from "@/lib/utils";
+import SessionStatsStrip, {
+  type SessionStatsInput,
+} from "@/components/practice/SessionStatsStrip";
 
 const RECOMMENDATION_STYLES: Record<
   Recommendation,
@@ -111,6 +114,7 @@ export default function ReportView({
   report,
   level,
   transcript,
+  stats,
 }: {
   report: Report;
   /** Interview level, for the bar-verdict headline ("…at Senior level"). */
@@ -121,6 +125,12 @@ export default function ReportView({
     index: number;
     metadata?: { personaId?: string };
   }>;
+  /**
+   * What the session measured about itself — duration, turns, interjections,
+   * cost. Absent, or partly absent, on sessions that pre-date the telemetry
+   * or crashed before writing it; the strip renders only what it has.
+   */
+  stats?: SessionStatsInput;
 }) {
   // A judge that disagrees with itself by >1 point across permutations of the
   // same rubric is not measuring reliably. Say so, rather than presenting a
@@ -130,6 +140,11 @@ export default function ReportView({
 
   return (
     <div className="flex flex-col gap-6">
+      {/* The panel-pressure claim, measured. The intensity setting promises
+          other interviewers will interject; this is the only place the
+          candidate can see whether they actually did. */}
+      {stats ? <SessionStatsStrip {...stats} /> : null}
+
       <div className="card-border">
         <div className="flex flex-col md:flex-row gap-6 p-6 items-start">
           <div className="flex flex-col gap-1">

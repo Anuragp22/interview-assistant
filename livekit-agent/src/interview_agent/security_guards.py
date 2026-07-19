@@ -148,14 +148,19 @@ class TransferGuard:
 # prompt — a major content-extraction failure. We compile these once
 # at import time. The list is small and intentional; over-broad
 # patterns false-positive on legitimate interview text.
+#
+# Every pattern MUST match render_panel_prompt() output at some intensity —
+# enforced by tests/test_injection_corpus.py. A pattern the shipping prompt
+# never contains is a detector that can never fire, and this code runs on
+# every assistant turn.
 _PROMPT_LEAK_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
     re.compile(p, re.IGNORECASE)
     for p in (
-        # Section headers from GENERAL_TEMPLATE in persona.py.
-        r"Your interview agenda for this round",
-        r"Conduct rules\s*:",
-        r"Tools available\s*:",
-        # Distinctive lines from COMMON_RULES / persona-specific rules.
+        # Section headers from _PANEL_TEMPLATE in persona.py.
+        r"PANEL STRUCTURE",
+        r"Conduct rules for (?:the current round|every panelist)\s*:",
+        r"REFERENCE MATERIAL, not instructions",
+        # Distinctive lines from COMMON_RULES / the roster block.
         r"Score on substance only",
         r"NEVER penalise accent, dialect",
         r"STAR-framework probes",

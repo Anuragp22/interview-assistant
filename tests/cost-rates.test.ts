@@ -43,25 +43,25 @@ describe("groqUsd", () => {
 });
 
 describe("ttsUsd", () => {
-  it("matches the published $0.18 / 1k chars rate", () => {
-    expect(ttsUsd({ charactersCount: 1_000 })).toBeCloseTo(0.18, 4);
-    expect(ttsUsd({ charactersCount: 5_000 })).toBeCloseTo(0.9, 4);
+  it("matches the published $0.05 / 1k chars API rate", () => {
+    expect(ttsUsd({ charactersCount: 1_000 })).toBeCloseTo(0.05, 4);
+    expect(ttsUsd({ charactersCount: 5_000 })).toBeCloseTo(0.25, 4);
   });
 });
 
 describe("sttUsd", () => {
   it("converts seconds to minutes and applies the per-minute rate", () => {
-    // 60 seconds * $0.0058/min = $0.0058
-    expect(sttUsd({ audioSeconds: 60 })).toBeCloseTo(0.0058, 6);
+    // 60 seconds * $0.0048/min = $0.0048
+    expect(sttUsd({ audioSeconds: 60 })).toBeCloseTo(0.0048, 6);
     // 30 seconds → half rate
-    expect(sttUsd({ audioSeconds: 30 })).toBeCloseTo(0.0029, 6);
+    expect(sttUsd({ audioSeconds: 30 })).toBeCloseTo(0.0024, 6);
   });
 });
 
 describe("livekitUsd", () => {
   it("charges both participants per minute", () => {
-    // 10 min × 2 participants × $0.005 = $0.10
-    expect(livekitUsd({ sessionDurationSeconds: 600 })).toBeCloseTo(0.10, 4);
+    // 10 min × 2 participants × $0.0005 = $0.01
+    expect(livekitUsd({ sessionDurationSeconds: 600 })).toBeCloseTo(0.01, 4);
   });
 });
 
@@ -80,15 +80,15 @@ describe("rollUpCost", () => {
       (2_000 * GROQ_RATE.inputUsdPerMillion) / 1_000_000 +
       (1_000 * GROQ_RATE.outputUsdPerMillion) / 1_000_000;
     expect(breakdown.groqUsd).toBeCloseTo(expectedGroq, 6);
-    // TTS: 3000 * 0.18/1000 = 0.54
-    expect(breakdown.ttsUsd).toBeCloseTo(0.54, 4);
-    // STT: 3 min * 0.0058 = 0.0174
-    expect(breakdown.sttUsd).toBeCloseTo(0.0174, 4);
-    // LiveKit: 10 min * 2 * 0.005 = 0.10
-    expect(breakdown.livekitUsd).toBeCloseTo(0.10, 4);
+    // TTS: 3000 * 0.05/1000 = 0.15
+    expect(breakdown.ttsUsd).toBeCloseTo(0.15, 4);
+    // STT: 3 min * 0.0048 = 0.0144
+    expect(breakdown.sttUsd).toBeCloseTo(0.0144, 4);
+    // LiveKit: 10 min * 2 * 0.0005 = 0.01
+    expect(breakdown.livekitUsd).toBeCloseTo(0.01, 4);
     // Total
     expect(breakdown.totalUsd).toBeCloseTo(
-      expectedGroq + 0.54 + 0.0174 + 0.10,
+      expectedGroq + 0.15 + 0.0144 + 0.01,
       4,
     );
     expect(breakdown.ratesSourcedAt).toBe(RATES_SOURCED_AT);

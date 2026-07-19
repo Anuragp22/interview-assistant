@@ -8,8 +8,9 @@
  *  - Centralised `traced(...)` wrapper records exceptions + sets span
  *    status without every call-site repeating the try/finally boilerplate.
  *  - `currentTraceparent()` returns the W3C traceparent string for the
- *    active span; we stuff this into LiveKit room metadata so the
- *    Python agent can extract it and continue the same trace.
+ *    active span; it is written onto the Firestore session doc
+ *    (`sessions/{id}.traceparent`) and the agent reads it from there to
+ *    continue the same trace.
  */
 
 import { trace, context, SpanStatusCode, type Span } from "@opentelemetry/api";
@@ -54,8 +55,14 @@ export async function traced<T>(
 
 /**
  * Return the W3C `traceparent` string for the currently active span,
- * or null if no span is active. Used to inject the trace context into
- * LiveKit room metadata so the Python agent can join the same trace.
+ * or null if no span is active.
+ *
+ * The caller (`createPracticeSession` in lib/actions/practice.action.ts)
+ * writes the result onto the Firestore session doc as
+ * `sessions/{id}.traceparent`; the Python agent reads it from there on
+ * dispatch and joins the same trace. NOT the LiveKit JWT — that token's
+ * metadata carries only `{ sessionId }` (lib/livekit.ts) — and NOT room
+ * metadata, which this app never writes.
  *
  * traceparent format: 00-{trace_id}-{span_id}-{trace_flags}
  *   - version (00)

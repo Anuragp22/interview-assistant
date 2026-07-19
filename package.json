@@ -11,6 +11,7 @@
     "test:watch": "vitest",
     "eval": "tsx eval/run.ts",
     "eval:baseline": "tsx eval/run.ts --baseline",
+    "eval:judge": "tsx eval/judge/run.ts",
     "latency-report": "tsx eval/latency-report.ts"
   },
   "dependencies": {

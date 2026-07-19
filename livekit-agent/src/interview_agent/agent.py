@@ -25,6 +25,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
+from collections.abc import AsyncIterator
+from contextlib import aclosing, suppress
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -165,6 +168,57 @@ async def drain_pending_tasks(tasks: set[asyncio.Task[Any]]) -> None:
         raise first_exc
 
 
+async def _aclose_quietly(stream: Any) -> None:
+    """Close a TTS stream without letting the close mask the real failure.
+
+    Called from the ``finally`` of a synthesis attempt, which is often
+    already unwinding an ElevenLabs error. An aclose() that raised there
+    would replace the diagnosis with its own noise, and — worse — turn a
+    fully-spoken segment into a failed one.
+    """
+    if stream is None:
+        return
+    try:
+        await stream.aclose()
+    except Exception:  # noqa: BLE001
+        logger.debug("TTS stream aclose failed", exc_info=True)
+
+
+async def _pump_frames(stream: Any, frame_q: "asyncio.Queue[Any]") -> None:
+    """Drain a live TTS stream into ``frame_q`` as frames are produced.
+
+    Runs as a background task so ``tts_node`` can keep pushing later text
+    to the same stream while audio for the earlier text is already flowing
+    — the difference between "first audio during generation" and "first
+    audio after the whole completion". The stream yields frames as each
+    sentence is synthesized (ElevenLabs auto_mode flushes per sentence),
+    so a multi-sentence run starts speaking sentence 1 while sentence 2 is
+    still being generated.
+
+    On the stream's own end (StopAsyncIteration) the task returns normally;
+    on a stream error the exception surfaces via ``task.exception()``. Either
+    outcome is read by ``tts_node`` when it finalizes the run — the queue
+    carries only frames, never sentinels.
+    """
+    async for ev in stream:
+        frame_q.put_nowait(ev.frame)
+
+
+async def _stop_pump(task: "asyncio.Task[None] | None") -> None:
+    """Cancel and await a frame-pump task, swallowing its cancellation.
+
+    Called on the barge-in / push-failure paths where the primed stream is
+    being torn down. ``gather(return_exceptions=True)`` collects the task's
+    CancelledError (or any cleanup error) as a result rather than
+    re-raising, so a GeneratorExit already in flight is never masked.
+    """
+    if task is None:
+        return
+    task.cancel()
+    with suppress(Exception):
+        await asyncio.gather(task, return_exceptions=True)
+
+
 def _build_tts_for_spec(spec: PanelPersonaSpec) -> elevenlabs.TTS:
     """One prewarmed ElevenLabs TTS per panelist.
 
@@ -292,31 +346,226 @@ class PanelAgent(Agent):
     # -- multi-voice synthesis ---------------------------------------------
 
     async def tts_node(self, text, model_settings):
-        """Route contiguous speaker runs to per-panelist TTS streams.
+        """Route contiguous speaker runs to per-panelist TTS streams,
+        streaming each run's audio out WHILE the LLM is still generating it.
 
-        Sequential drain on speaker change is deliberate: audio must play
-        in order anyway, and LLM text arrives far ahead of speech.
+        Per speaker run a stream is opened, each text piece is pushed to it as
+        it arrives from the LLM, and a background pump drains the resulting
+        audio frames into a queue this generator yields from. So a
+        single-speaker reply — every calm turn, most standard turns — starts
+        speaking sentence 1 while sentence 2 is still being generated, instead
+        of buffering the whole completion before the first frame (which added
+        the entire generation time to time-to-first-audio). ElevenLabs
+        ``auto_mode`` flushes per sentence, so audio for an earlier sentence is
+        available before the run's later text has even been pushed.
+
+        Retry resilience is kept without paying that latency. Alongside the
+        incremental push we keep a replay copy of the run's pieces. If the
+        primed stream fails BEFORE any frame is yielded, ``_finish_run`` opens
+        a fresh stream and replays them — same voice, then the round leader.
+        Once a frame has been yielded the candidate is already hearing the
+        line, so a mid-stream failure just drops the remainder (a replay would
+        speak the opening twice).
+
+        In-order playback holds because a speaker change finalizes the current
+        run — end_input, drain the rest, close — before opening the next. And
+        every stream + pump is torn down in ``finally`` / ``_finalize`` so a
+        barge-in that closes tts_node mid-run promptly closes the live
+        ElevenLabs websocket rather than leaking it to the GC.
         """
-        pieces = split_speaker_segments(
-            text, self._tag_to_persona, self.current_leader.id
-        )
         current: str | None = None
-        stream = None
-        async for speaker, piece in pieces:
-            if speaker != current:
+        pieces: list[str] = []          # replay buffer for the current run
+        stream: Any = None              # primed stream, or None once unusable
+        pump: asyncio.Task[None] | None = None
+        frame_q: asyncio.Queue[Any] | None = None
+        primed_yielded = False          # has the primed stream yielded a frame
+
+        async def _drain_ready() -> AsyncIterator[Any]:
+            """Yield every frame the pump has already produced (non-blocking).
+
+            Never waits on a frame that needs more text, so the loop stays free
+            to push the next piece — this is what makes the streaming
+            incremental rather than one burst at the end.
+            """
+            nonlocal primed_yielded
+            if frame_q is None:
+                return
+            while not frame_q.empty():
+                primed_yielded = True
+                yield frame_q.get_nowait()
+
+        async def _finalize(
+            persona_id: str, run_pieces: list[str]
+        ) -> AsyncIterator[Any]:
+            """Finish the current run: drain the primed stream to completion
+            (or fall back to a fresh stream), then release its pump + stream.
+            Yields audio frames.
+            """
+            nonlocal stream, pump, frame_q, primed_yielded
+            live, pump_task, q = stream, pump, frame_q
+            # Take ownership so the outer ``finally`` won't also touch these.
+            stream = pump = frame_q = None
+            try:
+                if live is not None:
+                    # Signal end-of-run so the primed stream completes, wait for
+                    # the pump to finish producing, then drain what it made.
+                    with suppress(Exception):
+                        live.end_input()
+                    if pump_task is not None:
+                        await asyncio.gather(pump_task, return_exceptions=True)
+                    while q is not None and not q.empty():
+                        primed_yielded = True
+                        yield q.get_nowait()
+                    failed = (
+                        pump_task is not None
+                        and not pump_task.cancelled()
+                        and pump_task.exception() is not None
+                    )
+                    await _aclose_quietly(live)
+                    live = None
+                    if failed and not primed_yielded:
+                        async with aclosing(
+                            self._finish_run(persona_id, run_pieces)
+                        ) as frames:
+                            async for f in frames:
+                                yield f
+                elif not primed_yielded:
+                    # Primed stream never opened / a push failed: full fallback.
+                    async with aclosing(
+                        self._finish_run(persona_id, run_pieces)
+                    ) as frames:
+                        async for f in frames:
+                            yield f
+            finally:
+                # Runs on success, on the fallback path, and on the
+                # GeneratorExit a barge-in throws in at a yield above — the one
+                # place that always closes this run's live stream + pump.
+                await _stop_pump(pump_task)
+                await _aclose_quietly(live)
+                primed_yielded = False
+
+        try:
+            async for speaker, piece in split_speaker_segments(
+                text, self._tag_to_persona, self.current_leader.id
+            ):
+                if speaker != current:
+                    if current is not None:
+                        async with aclosing(_finalize(current, pieces)) as frames:
+                            async for f in frames:
+                                yield f
+                    current = speaker
+                    pieces = []
+                    primed_yielded = False
+                    stream = self._open_stream(speaker)
+                    if stream is not None:
+                        frame_q = asyncio.Queue()
+                        pump = asyncio.create_task(_pump_frames(stream, frame_q))
+                    else:
+                        frame_q = None
+                        pump = None
+                pieces.append(piece)
                 if stream is not None:
-                    stream.end_input()
-                    async for ev in stream:
-                        yield ev.frame
-                    await stream.aclose()
-                current = speaker
-                stream = self._tts_by_persona[speaker].stream()
-            stream.push_text(piece)
-        if stream is not None:
-            stream.end_input()
-            async for ev in stream:
-                yield ev.frame
-            await stream.aclose()
+                    try:
+                        stream.push_text(piece)
+                    except Exception:  # noqa: BLE001
+                        logger.warning(
+                            "TTS push_text failed (persona=%s); will replay on a "
+                            "fresh stream",
+                            current,
+                            exc_info=True,
+                        )
+                        await _stop_pump(pump)
+                        await _aclose_quietly(stream)
+                        stream = None
+                        pump = None
+                        frame_q = None
+                # Emit whatever the pump has produced so far.
+                async for f in _drain_ready():
+                    yield f
+
+            if current is not None:
+                async with aclosing(_finalize(current, pieces)) as frames:
+                    async for f in frames:
+                        yield f
+        finally:
+            # Barge-in or cancellation before a run reached _finalize: stop the
+            # pump and close the live stream so no ElevenLabs websocket leaks.
+            # A run handed to _finalize has nulled these out, so no double-close.
+            await _stop_pump(pump)
+            await _aclose_quietly(stream)
+
+    def _open_stream(self, persona_id: str) -> Any:
+        """Open a persona's TTS stream, or return None if opening fails.
+
+        A failed open is attempt 1 spent: ``_finish_run`` sees ``primed=None``
+        and moves straight to a fresh-stream retry rather than opening twice.
+        """
+        try:
+            return self._tts_by_persona[persona_id].stream()
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "TTS stream open failed (persona=%s)", persona_id, exc_info=True
+            )
+            return None
+
+    async def _finish_run(
+        self, persona_id: str, pieces: list[str]
+    ) -> AsyncIterator[Any]:
+        """Fresh-stream fallback for a run whose primed stream produced no
+        audio: retry the same voice once, then re-speak on the round leader.
+
+        Reached only after the primed stream failed BEFORE any frame reached
+        the candidate — a failed open, a failed push, or a stream error with no
+        audio yet. ``pieces`` is the run's full text, replayed from the start on
+        each attempt.
+
+        A TTS error must degrade one run, never the session — worst case the
+        run is silent and the interview carries on. The attempt order (persona,
+        then leader) reflects what goes wrong: a transient ElevenLabs error
+        usually clears on a retry, and if that voice is genuinely down, the
+        leader re-speaking the line is still a coherent panel. Silence is not.
+
+        The ``yielded`` guard is the subtle part. Once a frame has been handed
+        downstream the candidate is already hearing the line, so replaying it
+        would speak the opening twice — worse than the failure. Past that point
+        the only safe degradation is to drop the rest of the run.
+        """
+        leader_id = self.current_leader.id
+        plan = (persona_id, leader_id)
+        for attempt_no, pid in enumerate(plan, start=1):
+            yielded = False
+            stream: Any = None
+            try:
+                stream = self._tts_by_persona[pid].stream()
+                for piece in pieces:
+                    stream.push_text(piece)
+                stream.end_input()
+                async for ev in stream:
+                    yielded = True
+                    yield ev.frame
+                return
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "TTS run failed (persona=%s attempt=%d/%d yielded=%s)",
+                    pid,
+                    attempt_no,
+                    len(plan),
+                    yielded,
+                    exc_info=True,
+                )
+                if yielded:
+                    return
+            finally:
+                # Runs on success, failure, and on the GeneratorExit that
+                # barge-in throws in at the yield above — the only place that
+                # closes every stream this attempt opened.
+                await _aclose_quietly(stream)
+        logger.error(
+            "TTS run dropped after %d attempts (persona=%s): %.80r",
+            len(plan),
+            persona_id,
+            "".join(pieces),
+        )
 
     # -- tools ---------------------------------------------------------------
 
@@ -395,15 +644,66 @@ def _build_chat_ctx_from_turns(turns: list[Any]) -> ChatContext:
     return ctx
 
 
+def _record_startup_failure(db: Any, session_id: str, exc: BaseException) -> None:
+    """Best-effort breadcrumb explaining why the panel never started.
+
+    A startup crash used to strand the session at ``awaiting-call`` with no
+    record of why: the candidate saw only the browser's generic 10s "agent
+    didn't join" watchdog, and nothing anywhere said whether connect,
+    Firebase init, or the session-doc load had died. Task 12's reconciler
+    sweep is the durable cleanup for the stale session; this is the
+    diagnosis that tells you which of the three to fix.
+
+    ``status`` is deliberately left alone — abandoning the session is the
+    reconciler's call, not ours.
+
+    ``db`` is whatever the failed startup had already managed to build, and
+    that is the whole reason it is a parameter rather than a fresh
+    ``init_firebase()`` call here:
+
+      - ``load_session_data`` raised → the handle is live, so reuse it.
+      - ``ctx.connect()`` raised → the try tripped before init_firebase ever
+        ran, but Firestore may be perfectly healthy, so it is worth building
+        a handle to get the breadcrumb down.
+      - ``init_firebase`` itself raised → ``db`` is None and the retry below
+        raises the same credentials error straight back. Unavoidable: no
+        handle means no breadcrumb, and the log is the only record left.
+
+    Everything is wrapped, because a failure to record a failure must not
+    replace it with a second, more confusing one.
+    """
+    try:
+        handle = db if db is not None else init_firebase()
+        handle.collection("sessions").document(session_id).update(
+            {
+                "agentStartError": str(exc)[:500],
+                "agentStartFailedAt": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("could not write startup breadcrumb for %s", session_id)
+
+
 async def entrypoint(ctx: JobContext) -> None:
     session_id = parse_session_id_from_room(ctx.room.name)
     if session_id is None:
         logger.warning("rejecting foreign room: %s", ctx.room.name)
         return
 
-    await ctx.connect()
-    db = init_firebase()
-    session_data = load_session_data(db, session_id)
+    # Bound before the try so the failure handler can tell "Firestore never
+    # came up" from "it came up and the session doc was the problem".
+    db: Any = None
+    try:
+        await ctx.connect()
+        db = init_firebase()
+        session_data = load_session_data(db, session_id)
+    except Exception as exc:  # noqa: BLE001
+        # Returning cleanly beats crashing the worker: the job is
+        # unrecoverable either way, and an unhandled raise here just buries
+        # the cause in worker logs nobody correlates back to the session.
+        logger.exception("startup failed for session %s", session_id)
+        _record_startup_failure(db, session_id, exc)
+        return
 
     # Make Firestore + session id reachable from the tools so they can
     # persist currentRound. Module-level singletons are fine because each
@@ -481,6 +781,52 @@ async def entrypoint(ctx: JobContext) -> None:
     def _on_usage(event: Any) -> None:
         cost_aggregator.handle_usage_event(event)
 
+    # Per-session quality telemetry. The panel's whole promise is that
+    # other interviewers cut in, as often as the chosen intensity allows
+    # (calm=0, standard≤1, grill≤3 per round) — a promise the prompt makes
+    # and, until this, nothing checked. Counting interjections and timing
+    # rounds is what turns it from a claim into a measurement.
+    #
+    # Per-process, like cost_aggregator above: a resumed session's write
+    # covers only the leg this process saw, not the turns replayed into its
+    # chat context.
+    quality: dict[str, Any] = {"interjections": 0, "byRound": {}}
+
+    def _round_stats(round_id: str) -> dict[str, Any]:
+        return quality["byRound"].setdefault(
+            round_id,
+            {"turns": 0, "interjections": 0, "firstTurnAt": time.monotonic()},
+        )
+
+    def _close_round(round_id: str) -> None:
+        """Freeze a round's duration at the moment the panel left it.
+
+        Called at every round boundary, and once more per still-open round
+        at teardown. Measuring instead at teardown alone — one
+        ``now - firstTurnAt`` per round — reads correctly only for the
+        final round and silently adds the whole rest of the interview to
+        every earlier one. Idempotent, so the boundary's answer always
+        wins over teardown's.
+        """
+        stats = quality["byRound"].get(round_id)
+        if stats is not None and "durationSeconds" not in stats:
+            stats["durationSeconds"] = round(time.monotonic() - stats["firstTurnAt"])
+
+    def _leader_tag(leader_persona_id: str) -> str | None:
+        """The round leader's speaker tag, or None if unresolvable.
+
+        ``naturalize_tags`` reports speakers as the TAG it matched
+        ("SARAH"), not the display name, so this is what a speakers entry
+        has to be compared against to decide lead-vs-interjection.
+        """
+        panel = _PANEL[0]
+        if panel is None:
+            return None
+        return next(
+            (p.name.upper() for p in panel.personas if p.id == leader_persona_id),
+            None,
+        )
+
     pending_hook_tasks: set[asyncio.Task[Any]] = set()
 
     def _track_task(coro: Any) -> None:
@@ -493,13 +839,17 @@ async def entrypoint(ctx: JobContext) -> None:
     # and the report generator depend on.
     turn_index = len(existing_turns)
 
+    # The round the previous turn belonged to — the only way to notice a
+    # round boundary from in here, since next_round is the tools' business.
+    last_round_id: str | None = None
+
     def _current_round_spec():
         panel = _PANEL[0]
         return panel.rounds[_ACTIVE_ROUND[0]] if panel else None
 
     @voice_session.on("conversation_item_added")
     def _on_item(event: ConversationItemAddedEvent) -> None:
-        nonlocal turn_index
+        nonlocal turn_index, last_round_id
         item = event.item
         if not isinstance(item, ChatMessage):
             return
@@ -511,6 +861,15 @@ async def entrypoint(ctx: JobContext) -> None:
         leader_persona_id = (
             round_spec.lead_persona_id if round_spec else "behavioral"
         )
+        round_id = round_spec.round_id if round_spec else "behavioral"
+
+        # Quality telemetry, part 1: turn accounting. A boundary closes the
+        # round we just left before the new one opens its own clock.
+        if last_round_id is not None and round_id != last_round_id:
+            _close_round(last_round_id)
+        last_round_id = round_id
+        stats = _round_stats(round_id)
+        stats["turns"] += 1
 
         # Per-turn latency telemetry + post-hoc leak detection on
         # assistant turns; guard accounting on user turns.
@@ -537,6 +896,17 @@ async def entrypoint(ctx: JobContext) -> None:
                 content, speakers = naturalize_tags(
                     content, {p.name.upper(): p.name for p in panel.personas}
                 )
+                # Quality telemetry, part 2: every speaker in this turn who
+                # isn't leading the round cut in — that IS an interjection.
+                # An unresolvable leader counts nothing rather than counting
+                # everyone: we can't tell lead from interjection, and a zero
+                # is a smaller lie than "the whole panel interrupted".
+                leader_tag = _leader_tag(leader_persona_id)
+                if leader_tag is not None:
+                    interjections = sum(1 for s in speakers if s != leader_tag)
+                    if interjections:
+                        stats["interjections"] += interjections
+                        quality["interjections"] += interjections
         elif item.role == "user":
             if _GUARD is not None and round_spec is not None:
                 _GUARD.record_user_turn(round_spec.round_id)
@@ -544,7 +914,7 @@ async def entrypoint(ctx: JobContext) -> None:
         now = datetime.now(timezone.utc)
         metadata: dict[str, Any] = {
             "personaId": leader_persona_id,
-            "roundId": round_spec.round_id if round_spec else "behavioral",
+            "roundId": round_id,
             "modelId": llm_model_id(),
         }
         if speakers:
@@ -607,6 +977,34 @@ async def entrypoint(ctx: JobContext) -> None:
             except Exception:  # noqa: BLE001
                 logger.exception(
                     "failed to write session.estimatedCost for %s", session_id
+                )
+
+            # Final quality rollup, same best-effort contract as the cost
+            # write above: a crashed session still gets the interjection
+            # counts for the rounds it did reach, and a failure here never
+            # costs us the report handoff below.
+            try:
+                by_round: dict[str, Any] = {}
+                for rid, s in quality["byRound"].items():
+                    # No-op for rounds already closed at their boundary; this
+                    # only stamps the round the session ended in.
+                    _close_round(rid)
+                    by_round[rid] = {
+                        "turns": s["turns"],
+                        "interjections": s["interjections"],
+                        "durationSeconds": s["durationSeconds"],
+                    }
+                db.collection("sessions").document(session_id).update(
+                    {
+                        "qualityTelemetry": {
+                            "interjections": quality["interjections"],
+                            "byRound": by_round,
+                        }
+                    }
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "failed to write session.qualityTelemetry for %s", session_id
                 )
 
             # Hand off to scoring. The durable marker goes down FIRST, so

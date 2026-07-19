@@ -185,8 +185,12 @@ def load_session_data(db: Any, session_id: str) -> SessionData:
     # on the resume path: the user closed the tab mid-interview, the
     # session doc still says "in-call", and the agent re-dispatches to
     # continue. The rehydration step in agent.entrypoint() picks up
-    # the existing turns and restores the chat context.
-    if session.get("status") not in ("awaiting-call", "in-call", "reconnecting"):
+    # the existing turns and restores the chat context. (There is no
+    # "reconnecting" session status — nothing writes it and the TS
+    # Session["status"] union in types/index.d.ts excludes it; the
+    # resume case is "in-call". The LiveKit RoomEvent.Reconnecting in
+    # SessionRoomClient.tsx is a client connection state, not this.)
+    if session.get("status") not in ("awaiting-call", "in-call"):
         raise RuntimeError(
             f"Session {session_id} is not in a callable state: {session.get('status')}"
         )

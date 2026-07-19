@@ -14,6 +14,8 @@ import {
   type PresetId,
   PRESETS,
 } from "@/lib/presets";
+import { consumePracticeQuota } from "@/lib/quota";
+import { buildJdOnlyGroundedBuckets } from "@/lib/grounding-passthrough";
 import { traced, currentTraceparent } from "@/lib/tracing";
 
 const SESSION_COOKIE = "session";
@@ -166,6 +168,29 @@ export async function createPracticeSession(input: {
         }
         rootSpan.setAttribute("cv.length", cv.extractedText.length);
 
+        // Bound the spend before incurring any. Everything below this line
+        // costs money — two Groq calls here, then TTS/STT/judge dollars once
+        // the session runs — and Groq's free tier is a per-DAY token cap
+        // shared across keys, so an unthrottled loop here drains the whole
+        // day's budget for everyone.
+        //
+        // Charged only AFTER the CV is confirmed valid (replaceCv above can
+        // fail on a corrupt/unsupported upload, and getSavedCv can come back
+        // empty). Burning a daily slot for a session that was never created
+        // would let a user lock themselves out while fixing an upload problem.
+        const quota = await consumePracticeQuota(uid);
+        rootSpan.setAttribute("quota.outcome", quota.outcome);
+        rootSpan.setAttribute("quota.limit", quota.limit);
+        if (quota.outcome !== "allowed") {
+          return {
+            success: false,
+            message:
+              quota.outcome === "unavailable"
+                ? "Could not verify your daily session quota — please try again."
+                : `Daily limit reached (${quota.limit} practice sessions per day). Resets at midnight UTC.`,
+          };
+        }
+
         // 2. Phase 1 — questions/rubrics per preset round.
         //    AI SDK experimental_telemetry emits the actual gen_ai.* span
         //    inside generateRoundQuestions — this wrapper just gives us
@@ -223,15 +248,10 @@ export async function createPracticeSession(input: {
         rootSpan.setAttribute("cv.thin", cvIsThin);
 
         const phase2 = cvIsThin
-          ? Object.fromEntries(
-              roundIds.map((rid) => [
-                rid,
-                {
-                  questionsGrounded: phase1[rid].questions,
-                  rubricsGrounded: phase1[rid].rubrics as RubricGrounded[],
-                },
-              ]),
-            )
+          ? // Phase-1 template rubrics carry no cvReference; the grounding
+            // contract requires it as an explicit null (Groq strict mode).
+            // Attach it here rather than persisting schema-violating rubrics.
+            buildJdOnlyGroundedBuckets(roundIds, phase1)
           : await traced(
               "phase2.reground-against-cv",
               {},

@@ -8,20 +8,23 @@ build_agent() and the prompts.py module were removed when agent.py
 switched to constructing GeneralInterviewer directly with persona-
 rendered instructions (v0.1 Task 18).
 
-Session-level TTS was removed when the multi-agent panel landed —
-each Agent subclass now owns its own TTS provider so the candidate
-hears different voices per round.
+Session-level TTS was removed when the roleplay panel landed —
+PanelAgent.tts_node now owns synthesis and routes each speaker-tagged
+run to that panelist's voice, so the candidate hears the whole panel.
 """
 
 import pytest
 from livekit.agents.inference import TurnDetector
+from livekit.agents.llm import FallbackAdapter
+from livekit.agents.types import DEFAULT_API_CONNECT_OPTIONS
 from livekit.agents.voice import AgentSession
 from livekit.plugins import deepgram, openai, silero
 
-from interview_agent.models import DEFAULT_LLM_MODEL, STT_MODEL
+from interview_agent.models import DEFAULT_LLM_MODEL, STT_MODEL, llm_model_id
 from interview_agent.pipeline import (
     GROQ_BASE_URL,
     _INTERVIEW_TURN_HANDLING,
+    _build_groq_llm,
     build_session,
 )
 
@@ -33,15 +36,14 @@ def _provider_env(monkeypatch):
     Each plugin raises ValueError at construction if its API key env var
     is unset. We're not making live calls — construction is what we're
     verifying — so dummy values are sufficient.
+
+    Only GROQ_API_KEY is set, so these tests see exactly one Groq account and
+    build_session() returns a plain LLM. conftest's _no_real_credentials
+    fixture guarantees the numbered keys are absent.
     """
     monkeypatch.setenv("DEEPGRAM_API_KEY", "test-deepgram-key")
     monkeypatch.setenv("GROQ_API_KEY", "test-groq-key")
     monkeypatch.setenv("ELEVEN_API_KEY", "test-eleven-key")
-    # Multi-account keys may be present from .env.local (loaded by
-    # agent._load_env at import). Clear them so these construction tests
-    # are deterministic on the single GROQ_API_KEY set above.
-    for _name in ("GROQ_API_KEY1", "GROQ_API_KEY2", "GROQ_API_KEY3"):
-        monkeypatch.delenv(_name, raising=False)
 
 
 def test_build_session_returns_agent_session():
@@ -52,7 +54,7 @@ def test_build_session_returns_agent_session():
 def test_build_session_wires_expected_providers():
     session = build_session()
     assert isinstance(session.stt, deepgram.STT)
-    # session-level TTS is intentionally None — each Agent supplies its own
+    # session-level TTS is intentionally None — PanelAgent.tts_node supplies it
     assert session.tts is None
     # The LLM is still openai.LLM-typed because the OpenAI plugin's client
     # is OpenAI-compatible; we just point its base_url at Groq.
@@ -169,3 +171,77 @@ def test_build_session_propagates_interrupt_thresholds_to_session_options():
     opts = session.options.interruption
     assert opts["min_duration"] == _INTERVIEW_TURN_HANDLING["interruption"]["min_duration"]
     assert opts["min_words"] == _INTERVIEW_TURN_HANDLING["interruption"]["min_words"]
+
+
+# ---------------------------------------------------------------------------
+# Multi-key Groq failover
+# ---------------------------------------------------------------------------
+
+def test_build_groq_llm_single_key_plain(monkeypatch):
+    """One account configured — no failover to wrap, so stay a plain LLM.
+
+    Wrapping a single instance in a FallbackAdapter would buy nothing and
+    add a layer to every turn's error path.
+    """
+    monkeypatch.setenv("GROQ_API_KEY", "gsk_only")
+
+    built = _build_groq_llm()
+    assert isinstance(built, openai.LLM)
+
+
+def test_build_groq_llm_multi_key_fallback(monkeypatch):
+    """Two+ accounts — a mid-interview 429 must fail over, not kill the turn."""
+    monkeypatch.setenv("GROQ_API_KEY1", "gsk_a")
+    monkeypatch.setenv("GROQ_API_KEY2", "gsk_b")
+    # Undoes _provider_env above, which sets the legacy key for the
+    # construction tests; without this the list would be three accounts long.
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+
+    built = _build_groq_llm()
+    assert isinstance(built, FallbackAdapter)
+
+
+def test_build_groq_llm_fallback_spreads_distinct_keys(monkeypatch):
+    """Each wrapped instance must carry a DIFFERENT account's key.
+
+    The failure this pins: building every instance from keys[0] still
+    yields a FallbackAdapter and still passes an isinstance check, but
+    fails over from a rate-limited key onto the same rate-limited key —
+    i.e. buys nothing, silently. Also asserts the model id, because
+    test_cost's pricing check pins a single-key session and so cannot see
+    the model the multi-key shape actually runs.
+    """
+    monkeypatch.setenv("GROQ_API_KEY1", "gsk_a")
+    monkeypatch.setenv("GROQ_API_KEY2", "gsk_b")
+    # Undoes _provider_env above; the assertion below pins the exact key list.
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+
+    built = _build_groq_llm()
+    instances = built._llm_instances
+    assert [i._client.api_key for i in instances] == ["gsk_a", "gsk_b"]
+    for inst in instances:
+        assert isinstance(inst, openai.LLM)
+        assert inst.model == llm_model_id()
+        assert str(inst._client.base_url).rstrip("/") == GROQ_BASE_URL
+
+
+def test_build_groq_llm_fallback_per_attempt_timeout_matches_single_key(monkeypatch):
+    """Each failover attempt must tolerate a slow-but-healthy first token.
+
+    FallbackAdapter defaults attempt_timeout to 5.0s and applies it as the
+    per-attempt connection timeout, which the OpenAI plugin passes straight
+    into httpx.Timeout(...) — so it caps time-to-FIRST-token, not just TCP
+    connect. A bare single-key openai.LLM runs on DEFAULT_API_CONNECT_OPTIONS
+    (10.0s). Left at 5s, a healthy gpt-oss-120b whose first chunk lands after
+    5s would trip every key and fail the turn on latency alone. Pin that the
+    multi-key path is no more eager to fail over than the single-key path is
+    to time out.
+    """
+    monkeypatch.setenv("GROQ_API_KEY1", "gsk_a")
+    monkeypatch.setenv("GROQ_API_KEY2", "gsk_b")
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+
+    built = _build_groq_llm()
+    assert isinstance(built, FallbackAdapter)
+    assert built._attempt_timeout == DEFAULT_API_CONNECT_OPTIONS.timeout
+    assert built._attempt_timeout >= 10.0

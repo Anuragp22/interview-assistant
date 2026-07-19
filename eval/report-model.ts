@@ -1,0 +1,168 @@
+/**
+ * Pure report-shaping logic for the eval harness: what goes into the
+ * baseline, what counts as a regression, what the headline aggregate is.
+ *
+ * Extracted from run.ts because run.ts is a script with top-level side
+ * effects (loadEnv, a key check that exits the process, module-level Groq
+ * client construction) — importing it from a test would try to run the
+ * whole pipeline. Everything in here is pure: no env, no I/O, no clock
+ * except the caller-supplied `recordedAt`.
+ */
+
+import type { FixtureScore } from "./types";
+
+export type BaselineFile = {
+  model: string;
+  recordedAt: string;
+  fixtures: Record<
+    string,
+    Pick<FixtureScore, "cvGroundingRate" | "hallucinationGuard" | "aggregate"> & {
+      partitionOverall: number;
+    }
+  >;
+};
+
+export type Regression = {
+  fixtureId: string;
+  metric: string;
+  baseline: number;
+  current: number;
+};
+
+// 10 percentage points absolute. Lower thresholds (e.g. 5pp) fire false-
+// positive regressions because LLM output is non-deterministic and a
+// single question misclassification on a 9-question fixture swings the
+// partition-correctness score by ~11pp. The honest fix is to set
+// temperature=0 in production, but creative variation in interview
+// questions is desirable — so we tolerate the noise here instead.
+export const REGRESSION_THRESHOLD = 0.1;
+
+/**
+ * An errored fixture is a NON-measurement, not a zero: it never reaches the
+ * baseline, the regression gate, or the aggregate. A failed measurement must
+ * never masquerade as a measurement of failure.
+ */
+export function isErrored(score: FixtureScore): boolean {
+  return score.errored !== undefined;
+}
+
+export function erroredOf(scores: FixtureScore[]): FixtureScore[] {
+  return scores.filter(isErrored);
+}
+
+export function buildBaselinePayload(
+  scores: FixtureScore[],
+  model: string,
+  recordedAt: string = new Date().toISOString(),
+  previous: BaselineFile | null = null,
+): BaselineFile {
+  const fixtures: BaselineFile["fixtures"] = {};
+  for (const s of scores) {
+    if (isErrored(s)) {
+      // An errored fixture produced no measurement this run. Dropping it
+      // outright would silently delete its regression coverage until someone
+      // regenerates, so carry forward its PRIOR baseline entry instead — but
+      // only when that entry was recorded on the SAME model. Carrying an
+      // entry from a different model would smuggle a cross-model number into
+      // a same-model baseline (the exact lie the model-mismatch gate
+      // forbids), so a stale-model entry is omitted, not carried. A fixture
+      // with no prior entry (first-ever run) is omitted too. Either way, a
+      // future healthy run records it naturally, and a zero is never written.
+      const prior = previous?.fixtures[s.fixtureId];
+      if (prior && previous.model === model) {
+        fixtures[s.fixtureId] = prior;
+      }
+      continue;
+    }
+    fixtures[s.fixtureId] = {
+      cvGroundingRate: s.cvGroundingRate,
+      partitionOverall: s.partitionCorrectness.overall,
+      hallucinationGuard: s.hallucinationGuard,
+      aggregate: s.aggregate,
+    };
+  }
+  return {
+    model,
+    recordedAt,
+    fixtures,
+  };
+}
+
+export function compareToBaselines(
+  scores: FixtureScore[],
+  baselines: BaselineFile,
+): Regression[] {
+  const regressions: Regression[] = [];
+
+  for (const s of scores) {
+    // You cannot compare a non-measurement. An errored fixture against a
+    // healthy baseline reads as a full-height drop and fails the gate for a
+    // reason unrelated to question quality — the false alarm that gets a
+    // gate ignored, which is worse than having no gate.
+    if (isErrored(s)) continue;
+
+    const b = baselines.fixtures[s.fixtureId];
+    if (!b) continue; // new fixture — first run records its baseline next time
+
+    const checks: Array<[string, number, number]> = [
+      ["cvGroundingRate", b.cvGroundingRate, s.cvGroundingRate],
+      ["partitionOverall", b.partitionOverall, s.partitionCorrectness.overall],
+      ["hallucinationGuard", b.hallucinationGuard, s.hallucinationGuard],
+      ["aggregate", b.aggregate, s.aggregate],
+    ];
+
+    for (const [metric, baseline, current] of checks) {
+      if (baseline - current > REGRESSION_THRESHOLD) {
+        regressions.push({ fixtureId: s.fixtureId, metric, baseline, current });
+      }
+    }
+  }
+
+  return regressions;
+}
+
+/**
+ * Headline aggregate over the fixtures that actually produced a score.
+ * Averaging a fake 0 for an errored fixture is the same lie one level up.
+ * Returns 0 when nothing scored — callers must treat that as "no
+ * measurement" (run.ts exits 2), never as a quality result.
+ */
+export function aggregateOf(scores: FixtureScore[]): number {
+  const scored = scores.filter((s) => !isErrored(s));
+  if (scored.length === 0) return 0;
+  return scored.reduce((sum, s) => sum + s.aggregate, 0) / scored.length;
+}
+
+export type CompareOutcome =
+  | { kind: "ok" }
+  | { kind: "regressed"; regressions: Regression[] }
+  | { kind: "unmeasured"; unmeasured: string[] };
+
+/**
+ * The COMPARE-mode exit decision, as a pure function of the run's scores and
+ * the regressions found among the fixtures that actually scored.
+ *
+ * Precedence — unmeasured beats regressed beats ok:
+ *   1. ANY errored fixture → "unmeasured" (run.ts exits 2, "couldn't run").
+ *      compareToBaselines() and aggregateOf() both EXCLUDE errored fixtures,
+ *      so a partially-errored run whose scored fixtures happen not to regress
+ *      would otherwise exit 0 with passedRegression: true — silently dropping
+ *      regression coverage for exactly the provider/schema failures this gate
+ *      exists to catch. A run that didn't fully execute cannot certify "no
+ *      regression", so it must not pass.
+ *   2. Regressions among scored fixtures → "regressed" (exit 1).
+ *   3. Otherwise → "ok" (exit 0).
+ *
+ * Baseline (--baseline) mode does NOT use this: it carries errored fixtures
+ * forward from the prior baseline and never treats them as fatal (see
+ * buildBaselinePayload).
+ */
+export function decideCompareOutcome(
+  scores: FixtureScore[],
+  regressions: Regression[],
+): CompareOutcome {
+  const unmeasured = erroredOf(scores).map((s) => s.fixtureId);
+  if (unmeasured.length > 0) return { kind: "unmeasured", unmeasured };
+  if (regressions.length > 0) return { kind: "regressed", regressions };
+  return { kind: "ok" };
+}

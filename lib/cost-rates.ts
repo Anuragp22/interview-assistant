@@ -8,54 +8,77 @@
  * dashboard cost numbers go silently wrong until someone updates this
  * file; the date stamp is the signal that they need refreshing.
  *
- * Sourcing notes:
- *  - Groq: https://groq.com/pricing/
- *      openai/gpt-oss-120b: $0.15 / 1M input tokens, $0.75 / 1M output
- *      (llama-3.3-70b-versatile is decommissioned 2026-08-16; gpt-oss-120b
- *       is both cheaper and the only Groq tier with strict json_schema)
- *  - ElevenLabs (Creator tier): https://elevenlabs.io/pricing
- *      Flash v2.5: ~$0.18 / 1k characters synthesized (Creator $22 plan
- *      for 100k chars; cost-per-char on lower plans is higher). Turbo is
- *      deprecated — ElevenLabs recommends Flash over Turbo in all cases.
+ * Sourcing notes (verified 2026-07-17 against each provider's own page):
+ *  - Groq: https://groq.com/pricing
+ *      openai/gpt-oss-120b: $0.15 / 1M input tokens, $0.60 / 1M output.
+ *      WAS $0.75 output — that figure was stale; Groq's published output
+ *      rate is $0.60. (llama-3.3-70b-versatile is decommissioned 2026-08-16;
+ *      gpt-oss-120b is both cheaper and the only Groq tier with strict
+ *      json_schema.)
+ *  - ElevenLabs Flash v2.5: $0.05 / 1k characters synthesized.
+ *      https://elevenlabs.io/pricing/api — "API usage is billed in US
+ *      dollars, not credits ... Text to Speech $0.10 per 1,000 characters
+ *      (Multilingual v2/v3) or $0.05 (Flash/Turbo)."
+ *      We express the PUBLISHED PER-CHARACTER API RATE, not a subscription
+ *      blended rate, because this pipeline calls the ElevenLabs API and API
+ *      usage is billed directly in USD — subscription credits do not apply.
+ *      WAS $0.18, derived from a broken blended-subscription calc. That calc
+ *      was wrong twice over: (1) it used "100k chars" for the Creator plan,
+ *      but Creator is $22 for 121k *credits*, and (2) Flash/Turbo consumes
+ *      only 0.5 credits per character (Multilingual v2 is 1.0). Even done
+ *      correctly the blended rate is $22 / (121k / 0.5) = $22 / 242k chars
+ *      ≈ $0.09/1k — and it is moot here anyway, since API calls bill in USD
+ *      at $0.05/1k, not against the subscription bucket. Turbo is deprecated;
+ *      ElevenLabs recommends Flash over Turbo in all cases.
  *  - Deepgram Nova-3: https://deepgram.com/pricing
- *      ~$0.0058 / minute streaming transcription
- *  - LiveKit Cloud Build (current plan): $0.005 / participant-minute,
- *      free tier 5k minutes/mo. Two participants per session (agent +
- *      user), so cost-per-session-minute = 2 * 0.005 = $0.01.
- *      https://livekit.io/pricing
+ *      $0.0048 / minute streaming, MONOLINGUAL. The pipeline pins
+ *      language="en-US" (pipeline.py), so it runs Nova-3 monolingual, priced
+ *      at $0.0048/min streaming (Pay As You Go). WAS $0.0058 — that is the
+ *      Nova-3 *multilingual* streaming rate, the wrong variant for an en-US
+ *      pipeline. Same class of bug as the nova-2/nova-3 mixup (see models.py).
+ *  - LiveKit Cloud: https://livekit.com/pricing
+ *      $0.0005 / participant ("WebRTC") minute. Build tier includes 5k
+ *      minutes/mo free; the marginal WebRTC-minute rate beyond the free
+ *      tier is $0.0005 (Ship) / $0.0004 (Scale). WAS $0.005 — a 10x
+ *      decimal error. Two participants per session (agent + user), so
+ *      cost-per-session-minute = 2 * 0.0005 = $0.001.
  *
  * All numbers expressed in USD. The Python mirror in
  * livekit-agent/src/interview_agent/cost_rates.py uses the same values
  * — if you change one, change both, and bump RATES_SOURCED_AT in both.
  */
 
-export const RATES_SOURCED_AT = "2026-07-14" as const;
+export const RATES_SOURCED_AT = "2026-07-17" as const;
 
 export const RATES = {
   groq: {
     "openai/gpt-oss-120b": {
       inputUsdPerMillion: 0.15,
-      outputUsdPerMillion: 0.75,
+      outputUsdPerMillion: 0.6,
     },
   },
   elevenlabs: {
     "eleven_flash_v2_5": {
-      // Creator tier blended rate. Subscription plans bill in pre-paid
-      // character buckets, so per-char cost varies by plan. Flash and Turbo
-      // are the same price; Flash is simply faster, and Turbo is deprecated.
-      usdPerThousandChars: 0.18,
+      // Published per-character API rate. ElevenLabs bills API usage in USD
+      // (not subscription credits) at $0.05/1k chars for Flash/Turbo. Flash
+      // and Turbo are the same price; Flash is simply faster, and Turbo is
+      // deprecated. See the header note for why this replaced the old
+      // blended-subscription figure (which double-counted and didn't apply
+      // to API billing anyway).
+      usdPerThousandChars: 0.05,
     },
   },
   deepgram: {
     "nova-3": {
-      usdPerAudioMinute: 0.0058,
+      // Monolingual streaming (Pay As You Go). The pipeline pins en-US.
+      usdPerAudioMinute: 0.0048,
     },
   },
   livekit: {
-    // Build plan, two participants (agent + user). Charged per minute
-    // of *each* participant's presence, so a 10-minute session costs
-    // 2 * 10 * 0.005 = $0.10.
-    usdPerParticipantMinute: 0.005,
+    // Two participants (agent + user). Charged per WebRTC minute of *each*
+    // participant's presence, so a 10-minute session costs
+    // 2 * 10 * 0.0005 = $0.01. Build tier includes 5k min/mo free.
+    usdPerParticipantMinute: 0.0005,
     participantsPerSession: 2,
   },
 } as const;

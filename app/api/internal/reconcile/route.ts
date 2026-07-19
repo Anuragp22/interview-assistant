@@ -2,6 +2,7 @@ import { NextRequest } from "next/server";
 
 import { db } from "@/firebase/admin";
 import { generateReport } from "@/lib/actions/reports.action";
+import { isStaleAwaitingCall } from "@/lib/reconcile-staleness";
 
 export const runtime = "nodejs";
 // 60 is the HARD ceiling on the Hobby plan — exporting more fails the whole
@@ -25,6 +26,17 @@ const IN_CALL_STALE_MS = 30 * 60 * 1000;
  * deeper backlog drains across subsequent cron ticks.
  */
 const MAX_PER_RUN = 2;
+
+/**
+ * How many awaiting-call rows to READ per tick before filtering for staleness
+ * in memory. Firestore returns docs name-ordered (there is no composite index
+ * to orderBy createdAt — see the caveat on the judge sweeps below), so a bare
+ * limit(MAX_PER_RUN) could fetch only fresh rows and starve stale ones forever.
+ * This sweep does NO judge work, so a wide bounded read is cheap: we scan up to
+ * this many rows, then cap the WRITES at MAX_PER_RUN to keep function time
+ * bounded.
+ */
+const AWAITING_CALL_SCAN_LIMIT = 200;
 
 /**
  * Report-generation reconciler. Runs on a cron (see vercel.json).
@@ -59,6 +71,11 @@ export async function GET(req: NextRequest) {
   const results: Array<{ sessionId: string; from: string; ok: boolean; note?: string }> = [];
 
   // 1. The agent finished the call but the report never landed.
+  // Ordering caveat (known limitation): no orderBy("endedAt") — that needs a
+  // composite index this project provisions manually, and none exists — so a
+  // deep backlog drains in name order, not oldest-first. Acceptable because
+  // this sweep calls the judge and limit(MAX_PER_RUN) bounds function time; the
+  // index-free widen-in-memory trick used by sweep 3 cannot apply here.
   const awaiting = await db
     .collection("sessions")
     .where("status", "==", "awaiting-report")
@@ -77,6 +94,10 @@ export async function GET(req: NextRequest) {
   }
 
   // 2. The worker died mid-call and never even reached awaiting-report.
+  // Same ordering caveat as sweep 1: no orderBy("startedAt") without a manual
+  // composite index, so a deep backlog drains name-ordered rather than
+  // oldest-first. Acceptable for the same reason — this sweep calls the judge
+  // and limit(MAX_PER_RUN) bounds function time.
   const inCall = await db
     .collection("sessions")
     .where("status", "==", "in-call")
@@ -99,6 +120,50 @@ export async function GET(req: NextRequest) {
 
     const r = await generateReport(doc.id);
     results.push({ sessionId: doc.id, from: "in-call-stale", ok: r.success, note: r.success ? undefined : r.message });
+  }
+
+  // 3. The call never started at all (pre-call bail or agent startup crash).
+  //
+  // This runs last, after both scoring sweeps have already spent most of the
+  // 60s budget. It is safe there because it is abandon-only: no judge call,
+  // just a bounded read and at most MAX_PER_RUN Firestore writes. By definition
+  // a never-started session has no turns, so there is nothing to score and no
+  // report to generate — this pass costs tens of milliseconds, not tens of
+  // seconds. If the budget does run out mid-sweep, the only cost is that these
+  // rows wait for the next cron tick.
+  //
+  // Because a bare limit(MAX_PER_RUN) with no ordering would fetch arbitrary
+  // (name-ordered) rows and could starve stale rows elsewhere forever, we read
+  // a wider page and filter for staleness in memory, then cap the WRITES at
+  // MAX_PER_RUN. See AWAITING_CALL_SCAN_LIMIT. No judge work here, so the wider
+  // read is cheap and the write cap keeps function time bounded.
+  const awaitingCall = await db
+    .collection("sessions")
+    .where("status", "==", "awaiting-call")
+    .limit(AWAITING_CALL_SCAN_LIMIT)
+    .get();
+
+  let abandonedCount = 0;
+  for (const doc of awaitingCall.docs) {
+    if (abandonedCount >= MAX_PER_RUN) break; // cap WRITES, not reads — bounds function time
+    const s = doc.data() as Session;
+    if (!isStaleAwaitingCall(s.createdAt, now)) continue;
+
+    // Guarded abandon: only write if the row is STILL awaiting-call. A user can
+    // click Start in the window between the read above and this write, moving
+    // the row awaiting-call → in-call; a blind update would clobber a live
+    // call. The transaction re-reads inside the write and no-ops on that race.
+    const abandoned = await db.runTransaction(async (tx) => {
+      const fresh = await tx.get(doc.ref);
+      if (fresh.data()?.status !== "awaiting-call") return false;
+      // No turns exist — nothing to score, so no report is manufactured.
+      tx.update(doc.ref, { status: "abandoned" });
+      return true;
+    });
+    if (!abandoned) continue;
+
+    abandonedCount++;
+    results.push({ sessionId: doc.id, from: "awaiting-call", ok: true, note: "abandoned (never started)" });
   }
 
   return Response.json({ success: true, reconciled: results.length, results });

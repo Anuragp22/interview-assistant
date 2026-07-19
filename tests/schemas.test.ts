@@ -105,12 +105,14 @@ describe("roundsGroundingSchema (three-round panel)", () => {
         expectedSpecifics: ["s1"],
         depth: "intermediate" as const,
         priority: 2 as const,
+        cvReference: null,
       },
       {
         expectedConcepts: ["c1", "c2"],
         expectedSpecifics: ["s1"],
         depth: "intermediate" as const,
         priority: 2 as const,
+        cvReference: null,
       },
     ],
   };
@@ -124,7 +126,27 @@ describe("roundsGroundingSchema (three-round panel)", () => {
     expect(result.success).toBe(true);
   });
 
-  it("treats cvReference as optional on grounded rubrics", () => {
+  it("accepts cvReference: null — the 'no CV reference' convention", () => {
+    const bucketNullCv = {
+      ...validGroundedBucket,
+      rubricsGrounded: validGroundedBucket.rubricsGrounded.map((r) => ({
+        ...r,
+        cvReference: null,
+      })),
+    };
+    const result = partitionedGroundingSchema.safeParse({
+      behavioral: bucketNullCv,
+      technical: bucketNullCv,
+      systemDesign: bucketNullCv,
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects rubrics that OMIT cvReference — strict mode needs the key present", () => {
+    // Groq strict json_schema lists every property in `required`, so the
+    // model always emits the key (string or null). An absent key in output
+    // we accept would mean the request schema drifted back to `.optional()`
+    // — the exact bug that once 400'd every reground call.
     const bucketNoCv = {
       ...validGroundedBucket,
       rubricsGrounded: validGroundedBucket.rubricsGrounded.map(
@@ -136,7 +158,7 @@ describe("roundsGroundingSchema (three-round panel)", () => {
       technical: bucketNoCv,
       systemDesign: bucketNoCv,
     });
-    expect(result.success).toBe(true);
+    expect(result.success).toBe(false);
   });
 });
 

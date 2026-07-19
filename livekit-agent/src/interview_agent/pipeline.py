@@ -5,10 +5,11 @@
     runs the loop.
   - Agent: carries the system prompt + tools + TTS.
 
-Multi-agent panel: TTS lives ON each Agent subclass, not on the session.
-When the active Agent swaps via a transfer_to_<next> tool, its TTS takes
-over so the candidate hears the new voice. The session therefore has no
-default TTS — each persona owns its own.
+Roleplay panel: the session carries NO default TTS. One PanelAgent
+roleplays every interviewer, and its overridden ``tts_node`` routes each
+speaker-tagged run of LLM text ("[SARAH] …") to that panelist's own
+ElevenLabs stream — see agent.py. Synthesis is therefore entirely the
+Agent's business; the session owns only STT, LLM, VAD and turn detection.
 
 Wires (model ids all come from interview_agent.models — see that module for
 why they are not written down twice):
@@ -20,6 +21,8 @@ why they are not written down twice):
 from __future__ import annotations
 
 from livekit.agents.inference import TurnDetector
+from livekit.agents.llm import FallbackAdapter
+from livekit.agents.types import DEFAULT_API_CONNECT_OPTIONS
 from livekit.agents.voice import AgentSession
 from livekit.plugins import deepgram, openai, silero
 
@@ -35,18 +38,20 @@ GROQ_BASE_URL = "https://api.groq.com/openai/v1"
 
 
 
-def _build_groq_llm() -> openai.LLM:
+def _build_groq_llm() -> openai.LLM | FallbackAdapter:
     """Construct a Groq-backed LLM via the OpenAI-compatible client.
 
     Reads the Groq key(s) at construction time. Raising here (rather than
     at first chat call) means a misconfigured worker fails fast on
     dispatch, not in the middle of a live call.
 
-    The live voice pipeline builds one LLM per session and uses the first
-    available account (GROQ_API_KEY1/2/3, else legacy GROQ_API_KEY). A
-    single interview's token use is well under one account's daily budget,
-    so per-call rotation isn't needed here -- the multi-account failover
-    lives in the audit runner, which fires 150 rapid calls.
+    One LLM is built per session, over every configured account
+    (GROQ_API_KEY1/2/3, else legacy GROQ_API_KEY). A single interview's
+    token use sits well under one account's daily budget, so this is not
+    about capacity — it is about the turn surviving a bad minute. Groq's
+    free tier meters per account, so a 429 or a timeout on the active key
+    would otherwise take the turn down with it, live, mid-answer. With two
+    or more accounts the SDK just moves to the next one.
     """
     keys = groq_api_keys()
     if not keys:
@@ -54,18 +59,37 @@ def _build_groq_llm() -> openai.LLM:
             "GROQ_API_KEY env var is not set. Get a key at https://console.groq.com/keys "
             "and add it to livekit-agent/.env (GROQ_API_KEY1/2/3 or GROQ_API_KEY)."
         )
-    return openai.LLM(
-        api_key=keys[0],
-        base_url=GROQ_BASE_URL,
-        model=llm_model_id(),
+    instances = [
+        openai.LLM(api_key=key, base_url=GROQ_BASE_URL, model=llm_model_id())
+        for key in keys
+    ]
+    # One account — nothing to fail over TO, so skip the wrapper rather
+    # than add a layer to every turn's error path for no benefit.
+    if len(instances) == 1:
+        return instances[0]
+    # Mirrors the audit runner's RotatingGroqClient, but at the SDK layer
+    # so the voice loop benefits too.
+    #
+    # attempt_timeout is pinned to the single-key path's effective timeout.
+    # FallbackAdapter defaults it to 5.0s, but a bare openai.LLM runs on
+    # DEFAULT_API_CONNECT_OPTIONS.timeout (10.0s) — and that value becomes the
+    # httpx read timeout on the streaming completion (inference/llm.py:
+    # `timeout=httpx.Timeout(conn_options.timeout)`), so it gates TIME-TO-FIRST-
+    # TOKEN, not just TCP connect. Left at 5s, a healthy gpt-oss-120b whose
+    # first chunk lands after 5s (plausible as the CV + transcript context
+    # grows) would time out on EVERY key, cycle through all of them, and fail
+    # the turn — failover firing on latency, not on a real 429/error. Matching
+    # 10s makes multi-key deploys degrade no more eagerly than single-key ones.
+    return FallbackAdapter(
+        instances, attempt_timeout=DEFAULT_API_CONNECT_OPTIONS.timeout
     )
 
 
 def build_session(*, vad: silero.VAD | None = None) -> AgentSession:
     """Construct the provider-bound AgentSession.
 
-    No TTS at session level — each Agent subclass provides its own via
-    persona-specific voice_settings (see agent.py:_build_tts_for).
+    No TTS at session level — PanelAgent.tts_node owns synthesis and picks
+    a per-panelist voice per speaker tag (see agent.py:_build_tts_for_spec).
 
     `vad` is an optional pre-loaded Silero VAD. The worker's prewarm
     function should load the VAD once and pass it here on each dispatch
@@ -75,7 +99,7 @@ def build_session(*, vad: silero.VAD | None = None) -> AgentSession:
         vad=vad if vad is not None else silero.VAD.load(),
         stt=deepgram.STT(model=STT_MODEL, language="en-US"),
         llm=_build_groq_llm(),
-        # tts intentionally omitted — each Agent supplies its own.
+        # tts intentionally omitted — PanelAgent.tts_node supplies it.
         turn_detection=_build_turn_detector(),
         turn_handling=_INTERVIEW_TURN_HANDLING,
     )

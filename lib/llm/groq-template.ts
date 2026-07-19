@@ -4,6 +4,7 @@ import { generateObject } from "ai";
 
 import { roundsTemplateSchema, templateGenerationSchema } from "@/constants";
 import { withGroqModel } from "@/lib/groq";
+import { withSchemaRetry } from "@/lib/llm/schema-retry";
 
 /**
  * Phase 1 generation: from role + level + JD only, produce N questions
@@ -11,10 +12,12 @@ import { withGroqModel } from "@/lib/groq";
  * (groq-grounding.ts) when the candidate uploads their resume.
  *
  * Uses strict json_schema decoding (structuredOutputs:true). gpt-oss-120b is
- * one of only two Groq models that support it; the schema is enforced during
- * decoding, so the model cannot emit a shape that fails the Zod parse. The
- * inline shape descriptions the old json_object mode needed are no longer
- * load-bearing — the grammar is.
+ * one of only two Groq models that support it. CAVEAT: on gpt-oss models
+ * Groq validates AFTER generation instead of grammar-constraining it, so the
+ * model can still emit invalid JSON and the call 400s with
+ * `json_validate_failed` — hence the withSchemaRetry wrapper (bounded,
+ * schema-failure-only retries). The inline shape descriptions in the prompt
+ * remain load-bearing for the same reason.
  *
  * The Groq call is wrapped in withGroqModel for multi-account failover
  * (GROQ_API_KEY1/2/3) on a daily-quota 429.
@@ -27,19 +30,22 @@ export async function generateQuestionsAndRubrics(input: {
 }): Promise<{ questions: string[]; rubrics: RubricBase[] }> {
   const count = input.count ?? 8;
 
-  const { object } = await withGroqModel((model) =>
-    generateObject({
-      model,
-      providerOptions: { groq: { structuredOutputs: true } },
-      schema: templateGenerationSchema,
-      experimental_telemetry: {
-        isEnabled: true,
-        functionId: "groq.generate-questions-and-rubrics",
-        metadata: { role: input.role, level: input.level, count },
-      },
-      system:
-        "You are a senior technical interviewer designing a structured interview rubric. Output a single JSON object exactly matching the schema described in the user message.",
-      prompt: `
+  const { object } = await withSchemaRetry(
+    "groq.generate-questions-and-rubrics",
+    () =>
+      withGroqModel((model) =>
+        generateObject({
+          model,
+          providerOptions: { groq: { structuredOutputs: true } },
+          schema: templateGenerationSchema,
+          experimental_telemetry: {
+            isEnabled: true,
+            functionId: "groq.generate-questions-and-rubrics",
+            metadata: { role: input.role, level: input.level, count },
+          },
+          system:
+            "You are a senior technical interviewer designing a structured interview rubric. Output a single JSON object exactly matching the schema described in the user message.",
+          prompt: `
 You are designing the question bank + scoring rubric for an interview at the role/level/JD below.
 
 Generate ${count} questions appropriate for ${input.level} ${input.role}, grounded in the job description. Each question gets a per-question rubric.
@@ -68,7 +74,8 @@ Rules:
 - Specifics should be concrete (e.g. "mentions retain cycles" not "mentions memory issues").
 - Output JSON only — no preamble, no code fences, no trailing prose.
     `,
-    }),
+        }),
+      ),
   );
 
   return {
@@ -97,23 +104,26 @@ export async function generateRoundQuestions(input: {
     .map((r, i) => `${i + 1}. ${r.roundId} — ${r.generationFocus}`)
     .join("\n");
 
-  const { object } = await withGroqModel((model) =>
-    generateObject({
-      model,
-      providerOptions: { groq: { structuredOutputs: true } },
-      schema: roundsTemplateSchema(roundIds),
-      experimental_telemetry: {
-        isEnabled: true,
-        functionId: "groq.generate-round-questions",
-        metadata: {
-          role: input.role,
-          level: input.level,
-          rounds: roundIds.join(","),
-        },
-      },
-      system:
-        "You are an expert interviewer designing a multi-round panel.",
-      prompt: `
+  const { object } = await withSchemaRetry(
+    "groq.generate-round-questions",
+    () =>
+      withGroqModel((model) =>
+        generateObject({
+          model,
+          providerOptions: { groq: { structuredOutputs: true } },
+          schema: roundsTemplateSchema(roundIds),
+          experimental_telemetry: {
+            isEnabled: true,
+            functionId: "groq.generate-round-questions",
+            metadata: {
+              role: input.role,
+              level: input.level,
+              rounds: roundIds.join(","),
+            },
+          },
+          system:
+            "You are an expert interviewer designing a multi-round panel.",
+          prompt: `
 Design an interview panel for a ${input.role} (${input.level}) role. The
 panel has ${input.rounds.length} rounds, each conducted by a different
 interviewer:
@@ -146,7 +156,8 @@ Critical rules:
 - Avoid "tell me about X" generics; probe specific tech, decisions, and outcomes.
 - Output JSON only - no preamble, no code fences.
     `,
-    }),
+        }),
+      ),
   );
 
   return object as {

@@ -97,7 +97,10 @@ type RubricBase = {
 
 type RubricGrounded = RubricBase & {
   // Concrete reference to the candidate's CV (filled at Phase 2 re-grounding).
-  cvReference?: string;
+  // The generation schema emits `null` when nothing in the CV applies (Groq
+  // strict mode forbids absent keys); sessions stored before that change may
+  // omit the key entirely — treat null and undefined identically.
+  cvReference?: string | null;
 };
 
 interface Template {
@@ -207,6 +210,16 @@ interface Session {
   startedAt?: string;
   /** Set by the agent when the call ends, alongside status: awaiting-report. */
   endedAt?: string;
+  /**
+   * Breadcrumbs written by the Python agent when its startup crashes (bad CV
+   * text, LiveKit unreachable, Firebase init failure). The status stays
+   * "awaiting-call" — the session was created but no call ever began — so
+   * these are the only record of WHY it is stranded. Truncated to 500 chars
+   * at the writer. The cron reconciler sweeps such sessions to "abandoned"
+   * once they are an hour stale; see lib/reconcile-staleness.ts.
+   */
+  agentStartError?: string;
+  agentStartFailedAt?: string;
   completedAt?: string;
   createdAt: string;
   // W3C `traceparent` value (e.g. "00-{trace_id}-{span_id}-01"). Written
@@ -235,6 +248,27 @@ interface Session {
     livekitUsd: number;
     totalUsd: number;
     ratesSourcedAt: string;
+  };
+  /**
+   * What the panel actually did, written by the Python agent at teardown.
+   * An interjection is one non-lead panelist speaking inside an assistant
+   * turn — i.e. the behaviour the intensity setting claims to control
+   * (calm=0, standard≤1, grill≤3 per round), which nothing else measures.
+   * `durationSeconds` is closed at the round boundary, so per-round times
+   * sum to roughly the interview rather than over-counting.
+   *
+   * Absent on sessions before this field shipped or that crashed
+   * pre-finalize; `byRound` is `{}` for a session that ended before its
+   * first turn. A resumed session (tab closed, reopened) reports only the
+   * leg the last agent process saw — same limitation as estimatedCost,
+   * which likewise restarts its accounting per process.
+   */
+  qualityTelemetry?: {
+    interjections: number;
+    byRound: Record<
+      string,
+      { turns: number; interjections: number; durationSeconds: number }
+    >;
   };
 }
 

@@ -1,15 +1,21 @@
 """Per-stage latency budgets for the voice pipeline.
 
 A "turn" is one back-and-forth: candidate stops speaking → bot speaks
-back. We measure four legs of that round trip:
+back. Three legs are MEASURED by the SDK and read off the assistant's
+MetricsReport (see metrics_bridge.py); the fourth is derived.
 
-  end_of_utterance_delay   STT decides the turn ended (delay from last
-                           speech to commit). Field on EOUMetrics.
-  llm_ttft                 LLM time-to-first-token. Field on LLMMetrics.
-  tts_ttfb                 TTS time-to-first-byte of audio. Field on
-                           TTSMetrics.
-  e2e                      end_of_utterance_delay + llm_ttft + tts_ttfb,
-                           approximating user-perceived turn latency.
+  llm_ttft                 LLM time-to-first-token. MetricsReport
+                           field `llm_node_ttft`.
+  tts_ttfb                 TTS time-to-first-byte of audio.
+                           MetricsReport field `tts_node_ttfb`.
+  e2e                      User-finished-speaking → agent-started-
+                           responding. MetricsReport field `e2e_latency`,
+                           computed by the SDK — NOT a sum we take.
+  eou_delay                DERIVED: max(0, e2e - llm_ttft - tts_ttfb).
+                           The assistant report carries no EOU field, so
+                           this is the residual — everything in the turn
+                           the other two legs don't account for. Only
+                           computable when all three are present.
 
 Budgets are p95 wall-clock targets, NOT averages. Tail latency drives
 the perceived feel of a voice interview far more than mean — a single
@@ -22,8 +28,9 @@ Groq's TTFT publications) and tightened to what we can realistically hit
 given the stack in interview_agent.models:
 
   STT:  Deepgram Nova-3 (best-class on-prem WS).
-  LLM:  Groq gpt-oss-120b (~500 tok/s; faster than the llama-3.3-70b this
-        budget was originally calibrated against).
+  LLM:  Groq gpt-oss-120b (~500 tok/s; faster than the 70B predecessor this
+        budget was originally calibrated against — see models.py for the
+        migration and its date).
   TTS:  ElevenLabs Flash v2.5 over multi-stream WebSocket, streaming_latency=3
         (max optimization without disabling text normalization). Flash
         replaced the deprecated Turbo line and is materially faster.
@@ -60,9 +67,13 @@ EOU_DELAY = LatencyBudget(
     name="eou_delay",
     p95_ms=300.0,
     reasoning=(
-        "End-of-utterance commit delay. With endpointing min_delay=0.8s "
-        "and Silero VAD, the SDK waits ~800ms post-speech but EOU delay "
-        "measures only the additional commit overhead. 300ms is generous."
+        "End-of-utterance delay, DERIVED residually in metrics_bridge.py as "
+        "e2e - llm_ttft - tts_ttfb — no leg of the assistant MetricsReport "
+        "measures it directly, so it also absorbs network and SDK overhead. "
+        "The audio TurnDetector, not a stopwatch, decides the turn is over; "
+        "endpointing min_delay=0.4 (pipeline.py:151) is only a floor beneath "
+        "it, not the primary endpointing signal. 300ms is generous for what "
+        "is left over once the two measured legs are subtracted."
     ),
 )
 

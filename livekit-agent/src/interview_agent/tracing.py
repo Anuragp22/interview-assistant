@@ -3,14 +3,30 @@
 The Next.js server action that creates the session writes a W3C
 `traceparent` value to the session doc. When the agent boots into a
 room, it loads the session, extracts that traceparent, and continues
-the same trace — every span emitted by the agent (per-persona on_enter,
-panel hand-off, verify_cv_claim tool calls, RAG queries, Groq/ElevenLabs/
-Deepgram HTTP calls) becomes a descendant of the originating root span
-in Honeycomb / Tempo / Jaeger.
+the same trace — the spans this worker emits become descendants of the
+originating root span in Honeycomb / Tempo / Jaeger:
 
-Exporter selection mirrors the Next side:
+    agent.panel-session   the whole call (agent.py::entrypoint)
+    agent.on-enter        the greeting (skipped on the resume path)
+    agent.turn-latency    one per assistant turn (metrics_bridge.py)
+    agent.next-round      round advance (agent.py::PanelAgent.next_round)
+    agent.end-interview   the end tool (agent.py::PanelAgent.end_interview)
+    session.cost          final $$$ rollup (cost_aggregator.py::finalize)
+
+Because we install the GLOBAL TracerProvider below, livekit-agents' own
+telemetry tracer resolves through it too — so its spans (job_entrypoint,
+agent_session, agent_turn, llm_node, tts_node, eou_detection,
+function_tool, ...) export alongside ours with no extra wiring. The raw
+HTTP calls to Groq / ElevenLabs / Deepgram are NOT separately
+instrumented: that needs opentelemetry-instrumentation-httpx, which this
+worker does not ship (see pyproject.toml).
+
+Exporter selection mirrors the Next side (see ``_resolve_otlp_config``):
   - If OTEL_EXPORTER_OTLP_ENDPOINT is set we ship to that OTLP/HTTP+
     protobuf endpoint with optional Honeycomb auth headers.
+  - Else, if LANGFUSE_PUBLIC_KEY + LANGFUSE_SECRET_KEY are set, we ship
+    to Langfuse's OTLP endpoint. Two keys and nothing else — the
+    zero-config path.
   - Otherwise we fall back to ConsoleSpanExporter so local
     ``python -m interview_agent`` dumps spans to stdout without any
     backend signup.
@@ -18,6 +34,7 @@ Exporter selection mirrors the Next side:
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
@@ -44,6 +61,65 @@ logger = logging.getLogger("interview-agent.tracing")
 _INSTRUMENTATION_NAME = "interview-agent"
 _PROVIDER_INSTALLED = False
 
+# Langfuse Cloud EU. LANGFUSE_HOST switches region (us./jp./hipaa.
+# cloud.langfuse.com) or points at a self-hosted instance.
+_LANGFUSE_DEFAULT_HOST = "https://cloud.langfuse.com"
+
+
+def _resolve_otlp_config() -> tuple[str, dict[str, str]] | None:
+    """Where do spans go?
+
+    Priority, and why it is this order:
+
+    1. ``OTEL_EXPORTER_OTLP_ENDPOINT`` — an explicit endpoint is a
+       deliberate operator decision (Honeycomb, Tempo, a collector) and
+       outranks any convenience default. Langfuse keys sitting in the
+       same env must not hijack it.
+    2. ``LANGFUSE_PUBLIC_KEY`` + ``LANGFUSE_SECRET_KEY`` — the
+       zero-config path: paste two keys, get traces. BOTH are required;
+       half a credential would build an endpoint that 401s on every
+       export for the life of the process, which is worse than the
+       console fallback because it fails silently in a batch exporter.
+    3. ``None`` — console exporter. No signup, no config, spans on stdout.
+
+    Returns ``(endpoint, headers)`` or ``None``. Pure env-reader: no I/O,
+    no side effects, so it is cheap to unit-test exhaustively.
+    """
+    endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
+    if endpoint:
+        headers: dict[str, str] = {}
+        api_key = os.environ.get("HONEYCOMB_API_KEY")
+        if api_key:
+            headers["x-honeycomb-team"] = api_key
+            headers["x-honeycomb-dataset"] = os.environ.get(
+                "HONEYCOMB_DATASET", "interview-assistant"
+            )
+        return endpoint, headers
+
+    pk = os.environ.get("LANGFUSE_PUBLIC_KEY")
+    sk = os.environ.get("LANGFUSE_SECRET_KEY")
+    if pk and sk:
+        # `or`, not a get() default: `LANGFUSE_HOST=` in a .env file loads
+        # as an empty string, and an empty host would build a relative
+        # `/api/...` URL that only fails once spans start exporting.
+        host = (os.environ.get("LANGFUSE_HOST") or _LANGFUSE_DEFAULT_HOST).rstrip("/")
+        # Langfuse authenticates OTLP with HTTP Basic over the key pair.
+        auth = base64.b64encode(f"{pk}:{sk}".encode()).decode()
+        return (
+            f"{host}/api/public/otel/v1/traces",
+            {
+                "Authorization": f"Basic {auth}",
+                # Opts this exporter into Langfuse Cloud's real-time
+                # "Fast Preview" ingestion. Optional per their docs —
+                # spans ingest either way — but without it a trace can
+                # take a while to appear, which defeats the point of
+                # watching a session happen.
+                "x-langfuse-ingestion-version": "4",
+            },
+        )
+
+    return None
+
 
 def install_tracer_provider() -> None:
     """Configure the global :class:`TracerProvider`.
@@ -65,14 +141,9 @@ def install_tracer_provider() -> None:
     )
     provider = TracerProvider(resource=resource)
 
-    endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
-    if endpoint:
-        headers: dict[str, str] = {}
-        api_key = os.environ.get("HONEYCOMB_API_KEY")
-        dataset = os.environ.get("HONEYCOMB_DATASET", "interview-assistant")
-        if api_key:
-            headers["x-honeycomb-team"] = api_key
-            headers["x-honeycomb-dataset"] = dataset
+    config = _resolve_otlp_config()
+    if config is not None:
+        endpoint, headers = config
         exporter = HTTPSpanExporter(endpoint=endpoint, headers=headers or None)
         provider.add_span_processor(BatchSpanProcessor(exporter))
         logger.info("OTel: shipping spans to %s", endpoint)
@@ -82,8 +153,8 @@ def install_tracer_provider() -> None:
         # output by up to 5s — annoying in interactive testing.
         provider.add_span_processor(SimpleSpanProcessor(ConsoleSpanExporter()))
         logger.info(
-            "OTel: OTEL_EXPORTER_OTLP_ENDPOINT not set, falling back to "
-            "stdout console exporter"
+            "OTel: no OTEL_EXPORTER_OTLP_ENDPOINT and no Langfuse keys, "
+            "falling back to stdout console exporter"
         )
 
     # Optional JSONL capture for offline analysis (eval/latency-report.ts).

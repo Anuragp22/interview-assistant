@@ -7,6 +7,7 @@ import {
   RoomEvent,
   Track,
   type DisconnectReason,
+  type Participant,
   type RemoteParticipant,
   type RemoteTrack,
   type RemoteTrackPublication,
@@ -14,6 +15,7 @@ import {
 import { Bot, Mic, MicOff, PhoneOff, Users } from "lucide-react";
 
 import { cn } from "@/lib/utils";
+import PreCallReadyScreen from "./PreCallReadyScreen";
 
 const AGENT_JOIN_TIMEOUT_MS = 10_000;
 
@@ -24,6 +26,15 @@ type ConnectionState =
   | "reconnecting"
   | "ended"
   | "error";
+
+// Shape of POST /api/sessions/[id]/livekit-token. Every field is optional
+// because the body is untrusted until parsed and checked — an error page or a
+// non-2xx JSON body carries none of them.
+type TokenResponse = {
+  success?: boolean;
+  error?: string;
+  connection?: { token: string; wsUrl: string; roomName: string };
+};
 
 export default function SessionRoomClient({
   sessionId,
@@ -44,7 +55,8 @@ export default function SessionRoomClient({
 
   const [connectionState, setConnectionState] = useState<ConnectionState>("idle");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [agentSpeaking] = useState(false);
+  const [agentSpeaking, setAgentSpeaking] = useState(false);
+  const [userSpeaking, setUserSpeaking] = useState(false);
   const [micEnabled, setMicEnabled] = useState(true);
 
   useEffect(() => {
@@ -54,17 +66,52 @@ export default function SessionRoomClient({
     };
   }, []);
 
+  function clearSpeaking() {
+    setAgentSpeaking(false);
+    setUserSpeaking(false);
+  }
+
   async function startCall() {
     setConnectionState("connecting");
     setErrorMessage(null);
 
-    const tokenRes = await fetch(`/api/sessions/${sessionId}/livekit-token`, {
-      method: "POST",
-    });
-    const tokenJson = await tokenRes.json();
-    if (!tokenRes.ok || !tokenJson.success) {
+    // Nothing awaits startCall (it is a click handler), so a throw here is
+    // swallowed and the UI sits on "Connecting…" forever with no error and no
+    // way back. Every failure below has to land on connectionState "error",
+    // which is what makes the "Try again" button reachable.
+    let tokenRes: Response;
+    try {
+      tokenRes = await fetch(`/api/sessions/${sessionId}/livekit-token`, {
+        method: "POST",
+      });
+    } catch (err) {
       setConnectionState("error");
-      setErrorMessage(tokenJson.error ?? "Token mint failed");
+      setErrorMessage(
+        `Couldn't reach the server to start your session${
+          err instanceof Error ? ` (${err.message})` : ""
+        }. Check your connection and try again.`,
+      );
+      return;
+    }
+
+    // A proxy 502, a Vercel error page or an empty body is not JSON. Name the
+    // status so the failure is diagnosable rather than a bare parse error.
+    let tokenJson: TokenResponse;
+    try {
+      tokenJson = (await tokenRes.json()) as TokenResponse;
+    } catch {
+      setConnectionState("error");
+      setErrorMessage(
+        `The server returned an unreadable response (HTTP ${tokenRes.status}) when starting your session. Please try again.`,
+      );
+      return;
+    }
+
+    if (!tokenRes.ok || !tokenJson.success || !tokenJson.connection) {
+      setConnectionState("error");
+      setErrorMessage(
+        tokenJson.error ?? `Token mint failed (HTTP ${tokenRes.status})`,
+      );
       return;
     }
 
@@ -87,12 +134,21 @@ export default function SessionRoomClient({
         watchdogRef.current = null;
       }
     });
-    room.on(RoomEvent.Reconnecting, () => setConnectionState("reconnecting"));
+    room.on(RoomEvent.Reconnecting, () => {
+      setConnectionState("reconnecting");
+      // ActiveSpeakersChanged is the only writer of the speaking state, and it
+      // goes quiet the moment the transport drops. Without this, an agent that
+      // was mid-sentence keeps its ring lit for the whole reconnect — and
+      // "reconnecting" keeps isLive true, so the tile stays on screen to show
+      // it. Clear it and let the next event re-light it.
+      clearSpeaking();
+    });
     room.on(RoomEvent.Reconnected, () => setConnectionState("connected"));
     room.on(RoomEvent.Disconnected, (_reason?: DisconnectReason) => {
       setConnectionState((s) =>
         s === "error" || s === "ended" ? s : "ended",
       );
+      clearSpeaking();
       if (endAttemptedRef.current) return;
       endAttemptedRef.current = true;
       // Navigate only. The agent triggers scoring from its own teardown, so
@@ -109,6 +165,15 @@ export default function SessionRoomClient({
         }
       },
     );
+
+    room.on(RoomEvent.ActiveSpeakersChanged, (speakers: Participant[]) => {
+      // The payload carries every active speaker, local participant included,
+      // so both rings are driven from the same source of truth. The agent is
+      // the only remote participant, so "not us" means the panel is talking.
+      const localIdentity = room.localParticipant.identity;
+      setAgentSpeaking(speakers.some((p) => p.identity !== localIdentity));
+      setUserSpeaking(speakers.some((p) => p.identity === localIdentity));
+    });
 
     try {
       await room.connect(tokenJson.connection.wsUrl, tokenJson.connection.token);
@@ -149,33 +214,13 @@ export default function SessionRoomClient({
 
   if (!isLive) {
     return (
-      <div className="min-h-screen flex flex-col items-center justify-center gap-6 px-6">
-        <div className="card-border max-w-md w-full">
-          <div className="flex flex-col gap-4 p-8 text-center">
-            <h1 className="text-xl font-semibold text-fg-strong">
-              Ready when you are
-            </h1>
-            <p className="text-sm text-fg-muted">
-              Make sure your microphone is working. The AI will speak first.
-            </p>
-            <button
-              type="button"
-              onClick={startCall}
-              disabled={isLoading}
-              className={cn(
-                "inline-flex items-center justify-center gap-2 px-8 py-4",
-                "rounded-full bg-accent text-accent-fg text-sm font-semibold",
-                "hover:bg-accent-hover active:scale-[0.98] transition-all",
-              )}
-            >
-              <Mic className="size-4" />
-              Start interview
-            </button>
-            {errorMessage && (
-              <p className="text-sm text-destructive-100">{errorMessage}</p>
-            )}
-          </div>
-        </div>
+      <div className="min-h-screen flex flex-col items-center justify-center px-6">
+        <PreCallReadyScreen
+          errorMessage={errorMessage}
+          starting={isLoading}
+          retry={connectionState === "error" || connectionState === "ended"}
+          onStart={startCall}
+        />
         <audio ref={audioElRef} autoPlay playsInline className="hidden" />
       </div>
     );
@@ -185,10 +230,14 @@ export default function SessionRoomClient({
     <div className="fixed inset-0 z-40 bg-black">
       <audio ref={audioElRef} autoPlay playsInline className="hidden" />
       <div className="absolute inset-0 grid grid-cols-1 md:grid-cols-2 gap-2 p-2 pb-24 md:p-3 md:pb-28">
-        <Tile name="AI Interviewer" speaking={agentSpeaking && isLive} icon="bot" />
+        {/* Both tiles render only while isLive, so neither ring needs to
+            re-check it. A muted mic publishes nothing, so the user cannot be
+            an active speaker — the guard keeps the ring dark if the last event
+            landed just before the mute. */}
+        <Tile name="AI Interviewer" speaking={agentSpeaking} icon="bot" />
         <Tile
           name="You"
-          speaking={!agentSpeaking && isLive && micEnabled}
+          speaking={userSpeaking && micEnabled}
           muted={!micEnabled}
         />
       </div>

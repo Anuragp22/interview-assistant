@@ -12,7 +12,13 @@
  *   3. Score with the deterministic scorers in eval/scorers.ts.
  *   4. Print a colorized table to stdout, write eval/report.json.
  *   5. If baselines exist and we are not in --baseline mode, fail the
- *      process when any per-fixture metric drops >5% absolute vs baseline.
+ *      process when any per-fixture metric drops more than
+ *      REGRESSION_THRESHOLD (10pp) absolute vs baseline.
+ *
+ * A fixture that throws is retried once, then recorded as `errored` — a
+ * non-measurement, distinct from a zero score. Errored fixtures are kept
+ * out of the baseline, the regression gate, and the aggregate; see
+ * eval/report-model.ts. Exit codes: 1 = regressed, 2 = couldn't run.
  *
  * The runner intentionally has zero external deps beyond what the app
  * already ships (Groq via @ai-sdk/groq, zod). No new packages, no
@@ -38,6 +44,17 @@ if (!hasGroqKey()) {
 // Must come AFTER loadEnv so env vars are visible.
 import { FIXTURES } from "./fixtures";
 import { scoreFixture } from "./scorers";
+import { checkBaselineModel } from "./baseline-check";
+import {
+  aggregateOf,
+  buildBaselinePayload,
+  compareToBaselines,
+  decideCompareOutcome,
+  erroredOf,
+  isErrored,
+  type BaselineFile,
+  type Regression,
+} from "./report-model";
 import type { FixtureScore, PartitionedGrounded, RunReport } from "./types";
 
 import { generateRoundQuestions } from "@/lib/llm/groq-template";
@@ -50,13 +67,7 @@ import { PRESETS } from "@/lib/presets";
 
 const args = new Set(process.argv.slice(2));
 const WRITE_BASELINE = args.has("--baseline");
-// 10 percentage points absolute. Lower thresholds (e.g. 5pp) fire false-
-// positive regressions because LLM output is non-deterministic and a
-// single question misclassification on a 9-question fixture swings the
-// partition-correctness score by ~11pp. The honest fix is to set
-// temperature=0 in production, but creative variation in interview
-// questions is desirable — so we tolerate the noise here instead.
-const REGRESSION_THRESHOLD = 0.1;
+const ALLOW_MODEL_MISMATCH = args.has("--allow-model-mismatch");
 
 const REPO_ROOT = process.cwd();
 const REPORT_PATH = join(REPO_ROOT, "eval", "report.json");
@@ -138,18 +149,6 @@ async function runFixture(
 // Regression comparison
 // ---------------------------------------------------------------------------
 
-type BaselineFile = {
-  model: string;
-  recordedAt: string;
-  fixtures: Record<
-    string,
-    Pick<
-      FixtureScore,
-      "cvGroundingRate" | "hallucinationGuard" | "aggregate"
-    > & { partitionOverall: number }
-  >;
-};
-
 function loadBaselines(): BaselineFile | null {
   if (!existsSync(BASELINES_PATH)) return null;
   try {
@@ -158,82 +157,6 @@ function loadBaselines(): BaselineFile | null {
     console.error(`Failed to parse ${BASELINES_PATH}:`, err);
     return null;
   }
-}
-
-/**
- * Decide what to do when the baseline was recorded on a different model than
- * the one we just ran (e.g. after the llama-3.3 → gpt-oss-120b migration).
- *
- * This matters because the regression gate subtracts baseline from current and
- * fails on a >10pp drop. If the baseline came from a *different model*, that
- * delta measures a model swap, not a regression — so the gate is either
- * crying wolf or, worse, silently rubber-stamping a real regression that the
- * model change happened to mask.
- *
- * Return `true` to proceed with the comparison, `false` to skip the gate.
- * Throw to hard-fail the run.
- *
- * TODO(you): implement the policy. Trade-offs to weigh:
- *   - Hard fail ("regenerate baselines with --baseline"): safest, but blocks
- *     CI the moment anyone experiments with GROQ_MODEL locally.
- *   - Skip the gate with a loud warning: keeps CI green through a migration,
- *     but a stale baseline then silently protects nothing until someone
- *     remembers to regenerate.
- *   - Compare anyway with a warning: preserves the signal, accepts the noise.
- * Consider: this runs on a weekly schedule + manual dispatch, not per-push.
- */
-function checkBaselineModel(baseline: BaselineFile, currentModel: string): boolean {
-  // TODO(you): implement
-  return true;
-}
-
-function buildBaselinePayload(scores: FixtureScore[]): BaselineFile {
-  const fixtures: BaselineFile["fixtures"] = {};
-  for (const s of scores) {
-    fixtures[s.fixtureId] = {
-      cvGroundingRate: s.cvGroundingRate,
-      partitionOverall: s.partitionCorrectness.overall,
-      hallucinationGuard: s.hallucinationGuard,
-      aggregate: s.aggregate,
-    };
-  }
-  return {
-    model: MODEL,
-    recordedAt: new Date().toISOString(),
-    fixtures,
-  };
-}
-
-function compareToBaselines(
-  scores: FixtureScore[],
-  baselines: BaselineFile,
-): Array<{ fixtureId: string; metric: string; baseline: number; current: number }> {
-  const regressions: Array<{
-    fixtureId: string;
-    metric: string;
-    baseline: number;
-    current: number;
-  }> = [];
-
-  for (const s of scores) {
-    const b = baselines.fixtures[s.fixtureId];
-    if (!b) continue; // new fixture — first run records its baseline next time
-
-    const checks: Array<[string, number, number]> = [
-      ["cvGroundingRate", b.cvGroundingRate, s.cvGroundingRate],
-      ["partitionOverall", b.partitionOverall, s.partitionCorrectness.overall],
-      ["hallucinationGuard", b.hallucinationGuard, s.hallucinationGuard],
-      ["aggregate", b.aggregate, s.aggregate],
-    ];
-
-    for (const [metric, baseline, current] of checks) {
-      if (baseline - current > REGRESSION_THRESHOLD) {
-        regressions.push({ fixtureId: s.fixtureId, metric, baseline, current });
-      }
-    }
-  }
-
-  return regressions;
 }
 
 // ---------------------------------------------------------------------------
@@ -257,6 +180,19 @@ function printTable(scores: FixtureScore[]): void {
 
   for (const s of scores) {
     const idCell = s.fixtureId.padEnd(28);
+
+    // An errored fixture has no scores — only zeros standing in for them.
+    // Rendering those as "0%" would show a reader a number that was never
+    // measured, so the row reads as ERR across the board instead.
+    if (s.errored) {
+      const dash = color("   — ", "gray");
+      console.log(
+        ` ${idCell} | ${dash} | ${dash} | ${dash} | ${color("  ERR ", "red")} | ` +
+          `${color(" ERR", "red")} | ${color(s.errored.message, "red")}`,
+      );
+      continue;
+    }
+
     const cv = color(pct(s.cvGroundingRate), scoreColor(s.cvGroundingRate));
     const part = color(
       pct(s.partitionCorrectness.overall),
@@ -287,6 +223,11 @@ function printTable(scores: FixtureScore[]): void {
 }
 
 function printDetails(scores: FixtureScore[]): void {
+  // Errored fixtures are reported by printErrored, not here: their
+  // details.schemaError carries whatever the provider threw, and filing a
+  // rate-limit under "[schema]" is the same conflation this section avoids.
+  scores = scores.filter((s) => !isErrored(s));
+
   const haveAny =
     scores.some(
       (s) =>
@@ -329,9 +270,29 @@ function printDetails(scores: FixtureScore[]): void {
   }
 }
 
-function printRegressions(
-  regressions: Array<{ fixtureId: string; metric: string; baseline: number; current: number }>,
-): void {
+/**
+ * Errored fixtures are excluded from every number this run reports, so the
+ * exclusion has to be impossible to miss — otherwise a green table quietly
+ * covering 7 of 10 fixtures reads as a clean sweep.
+ */
+function printErrored(errored: FixtureScore[]): void {
+  if (errored.length === 0) return;
+  console.log(
+    color(
+      `\n⚠ ${errored.length} fixture(s) errored and were excluded ` +
+        `(not scored, not baselined):`,
+      "yellow",
+    ),
+  );
+  for (const s of errored) {
+    console.log(
+      color(`    ${s.fixtureId}`, "yellow") +
+        color(` — ${s.errored?.message ?? "unknown error"}`, "gray"),
+    );
+  }
+}
+
+function printRegressions(regressions: Regression[]): void {
   if (regressions.length === 0) return;
   console.log(color("\nRegressions vs baseline (threshold > 10pp):", "bold"));
   for (const r of regressions) {
@@ -370,29 +331,49 @@ async function main(): Promise<void> {
       const score = await runFixture(fixture);
       scores.push(score);
       console.log(color(pct(score.aggregate), scoreColor(score.aggregate)));
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.log(color("FAIL", "red"));
-      // Push a zero-score row so the table is complete and CI fails loud.
-      scores.push({
-        fixtureId: fixture.id,
-        cvGroundingRate: 0,
-        partitionCorrectness: {
-          behavioral: 0,
-          technical: 0,
-          systemDesign: 0,
-          overall: 0,
-        },
-        hallucinationGuard: 0,
-        schemaPass: false,
-        aggregate: 0,
-        details: {
-          cvUnmatched: [],
-          placeholderHits: [],
-          partitionMisses: [],
-          schemaError: msg,
-        },
-      });
+    } catch (firstErr) {
+      // One whole-fixture retry before giving up. The dominant failure —
+      // Groq's json_validate_failed on gpt-oss-120b — is transient and
+      // independent per attempt, so a single cheap retry converts most
+      // errors into real scores. withSchemaRetry already retries INSIDE a
+      // call; this also covers phase-2 and scorer failures.
+      const firstMsg =
+        firstErr instanceof Error ? firstErr.message : String(firstErr);
+      console.log(color("FAIL — retrying once", "gray"));
+      try {
+        const score = await runFixture(fixture);
+        scores.push(score);
+        console.log(
+          color(`      retry ok: `, "gray") +
+            color(pct(score.aggregate), scoreColor(score.aggregate)),
+        );
+      } catch (retryErr) {
+        const msg = retryErr instanceof Error ? retryErr.message : String(retryErr);
+        console.log(color(`      retry failed: ${msg}`, "red"));
+        // NOT a zero score — a non-measurement. The numeric fields stay 0
+        // so render code doesn't crash, but `errored` is what every
+        // consumer branches on: excluded from baseline, gate, aggregate.
+        scores.push({
+          fixtureId: fixture.id,
+          cvGroundingRate: 0,
+          partitionCorrectness: {
+            behavioral: 0,
+            technical: 0,
+            systemDesign: 0,
+            overall: 0,
+          },
+          hallucinationGuard: 0,
+          schemaPass: false,
+          aggregate: 0,
+          errored: { message: msg },
+          details: {
+            cvUnmatched: [],
+            placeholderHits: [],
+            partitionMisses: [],
+            schemaError: `attempt 1: ${firstMsg}; attempt 2: ${msg}`,
+          },
+        });
+      }
     }
   }
 
@@ -402,17 +383,48 @@ async function main(): Promise<void> {
   printTable(scores);
   printDetails(scores);
 
-  const aggregateScore =
-    scores.reduce((sum, s) => sum + s.aggregate, 0) / scores.length;
+  const errored = erroredOf(scores);
+  printErrored(errored);
+
+  // Every fixture errored: we measured nothing. That's an infrastructure
+  // failure, not a 0% quality result — exit 2 ("couldn't run"), never 1
+  // ("regressed"), and write no report claiming an aggregate.
+  if (errored.length === scores.length && scores.length > 0) {
+    console.error(
+      color(
+        `\nFATAL — all ${scores.length} fixture(s) errored; nothing was measured. ` +
+          `This is an infrastructure/provider failure, not a quality regression.`,
+        "red",
+      ),
+    );
+    process.exit(2);
+  }
+
+  const aggregateScore = aggregateOf(scores);
+  const scoredCount = scores.length - errored.length;
   console.log(
     color("\nAggregate:", "bold") +
-      ` ${color(pct(aggregateScore), scoreColor(aggregateScore))}`,
+      ` ${color(pct(aggregateScore), scoreColor(aggregateScore))}` +
+      color(` (over ${scoredCount}/${scores.length} scored fixtures)`, "gray"),
   );
 
-  // Baseline comparison. Skipped when the baseline was recorded on a different
-  // model — comparing across models measures the swap, not a regression.
+  // Baseline comparison. Hard-fails when the baseline was recorded on a
+  // different model — comparing across models measures the swap, not a
+  // regression. --allow-model-mismatch downgrades to a loud skip.
   const baselines = WRITE_BASELINE ? null : loadBaselines();
-  const comparable = baselines ? checkBaselineModel(baselines, MODEL) : false;
+  let comparable = false;
+  if (baselines) {
+    const check = checkBaselineModel(baselines.model, MODEL, {
+      allowMismatch: ALLOW_MODEL_MISMATCH,
+    });
+    if (check.message) console.error(color(`\n${check.message}`, "yellow"));
+    // A cross-model baseline is a config/"couldn't run" condition, not a
+    // quality regression — exit 2, matching the header contract (1 = regressed,
+    // 2 = couldn't run). Exiting 1 here would misfile a model swap as a
+    // regression, the exact infra-vs-quality conflation this gate prevents.
+    if (check.fatal) process.exit(2);
+    comparable = check.comparable;
+  }
   const regressions =
     baselines && comparable ? compareToBaselines(scores, baselines) : [];
   printRegressions(regressions);
@@ -423,6 +435,7 @@ async function main(): Promise<void> {
     model: MODEL,
     fixtures: scores,
     aggregateScore,
+    erroredCount: errored.length,
     passedRegression: regressions.length === 0,
     regressions,
   };
@@ -430,12 +443,79 @@ async function main(): Promise<void> {
   console.log(color(`\nReport: ${REPORT_PATH}`, "gray"));
 
   if (WRITE_BASELINE) {
-    writeFileSync(BASELINES_PATH, JSON.stringify(buildBaselinePayload(scores), null, 2));
+    // Carry forward the existing baseline entry for any fixture that errored
+    // this run, so a transient provider failure doesn't silently delete a
+    // fixture's regression coverage. buildBaselinePayload only carries an
+    // entry recorded on the SAME model; a stale-model entry (or none) is
+    // dropped, and a later healthy run re-records it.
+    const previous = loadBaselines();
+    const payload = buildBaselinePayload(scores, MODEL, undefined, previous);
+    writeFileSync(BASELINES_PATH, JSON.stringify(payload, null, 2));
     console.log(color(`Baselines written: ${BASELINES_PATH}`, "green"));
+
+    if (errored.length > 0) {
+      const carried: string[] = [];
+      const droppedStaleModel: string[] = [];
+      const droppedNoEntry: string[] = [];
+      for (const e of errored) {
+        if (payload.fixtures[e.fixtureId]) carried.push(e.fixtureId);
+        else if (previous?.fixtures[e.fixtureId]) droppedStaleModel.push(e.fixtureId);
+        else droppedNoEntry.push(e.fixtureId);
+      }
+      if (carried.length > 0) {
+        console.log(
+          color(
+            `  Carried forward ${carried.length} errored fixture(s) from the ` +
+              `existing baseline (same model): ${carried.join(", ")}.`,
+            "gray",
+          ),
+        );
+      }
+      if (droppedStaleModel.length > 0) {
+        console.log(
+          color(
+            `  ${droppedStaleModel.length} errored fixture(s) NOT carried — ` +
+              `existing baseline is a different model (${previous?.model} ≠ ${MODEL}): ` +
+              `${droppedStaleModel.join(", ")}. A healthy run re-records them.`,
+            "yellow",
+          ),
+        );
+      }
+      if (droppedNoEntry.length > 0) {
+        console.log(
+          color(
+            `  ${droppedNoEntry.length} errored fixture(s) got NO baseline entry ` +
+              `(no prior entry) — a later healthy run will record them: ` +
+              `${droppedNoEntry.join(", ")}.`,
+            "gray",
+          ),
+        );
+      }
+    }
     return;
   }
 
-  if (regressions.length > 0) {
+  // Compare-mode exit gate (baseline mode returned above). A partially-errored
+  // run measured SOME fixtures but not all — the unmeasured ones carry no
+  // regression coverage this run, and both compareToBaselines() and
+  // aggregateOf() dropped them. Exiting 0 here would certify "no regression"
+  // over a suite that didn't fully run, hiding the exact provider/schema
+  // failures this gate exists to catch. Exit 2 ("couldn't run"), listing what
+  // went unmeasured. (The all-errored case already exited 2 above.)
+  const outcome = decideCompareOutcome(scores, regressions);
+  if (outcome.kind === "unmeasured") {
+    console.error(
+      color(
+        `\nINCOMPLETE — ${outcome.unmeasured.length} fixture(s) went ` +
+          `unmeasured (errored): ${outcome.unmeasured.join(", ")}. Cannot ` +
+          `certify no regression when part of the suite didn't run — exiting 2 ` +
+          `("couldn't run"), not 0.`,
+        "red",
+      ),
+    );
+    process.exit(2);
+  }
+  if (outcome.kind === "regressed") {
     console.log(color(`\nFAILED — ${regressions.length} regression(s)`, "red"));
     process.exit(1);
   }

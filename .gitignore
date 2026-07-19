@@ -43,6 +43,9 @@ next-env.d.ts
 
 # eval — the latest report regenerates on every run; baselines.json is committed
 /eval/report.json
+# Same for the judge-quality run: fixtures + runner are committed, the live
+# per-run numbers are not (they cost ~48 Gemini calls to reproduce on demand).
+/eval/judge/report.json
 # Captured OTel span dumps from voice sessions (input to latency-report).
 # Sample dumps for the README go in docs/observability-samples/ instead.
 /eval/sessions/
@@ -59,3 +62,9 @@ next-env.d.ts
 /cv.pdf
 /cv.tex
 /cv.txt
+
+# SDD execution scratch (progress ledger, task briefs)
+/.superpowers/
+
+# Owner's personal interview-prep material — kept locally, never published.
+/docs/interview-prep-archive/

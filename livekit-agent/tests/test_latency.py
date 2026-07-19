@@ -23,6 +23,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
 
 from interview_agent.latency_budget import BUDGETS, violated
 from interview_agent.metrics_bridge import emit_turn_latency_span
+from interview_agent.models import llm_model_id
 from interview_agent.tracing import install_tracer_provider
 
 
@@ -204,3 +205,7 @@ def test_emit_attaches_persona_and_session_attributes() -> None:
     span = matching[0]
     assert span.attributes["session.id"] == "session-XYZ"
     assert span.attributes["persona.id"] == "system-design"
+    # GenAI semantic convention alias, so an LLM-aware backend (Langfuse)
+    # can group turn latency by model. Read from llm_model_id() rather than
+    # hardcoded — a GROQ_MODEL override must not make this test lie.
+    assert span.attributes["gen_ai.request.model"] == llm_model_id()
