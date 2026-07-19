@@ -73,6 +73,14 @@ carried candidate content, and that is a property to keep on purpose rather
 than lose by accident. (`practice.create-session` carries `cv.length` and
 `cv.thin` — the size and a boolean, never the text.)
 
+The web AI SDK backs this property up explicitly. `generateObject` records
+its prompt inputs and outputs onto the gen_ai span **by default**, and those
+prompts embed the candidate's CV and job description — so every
+`experimental_telemetry` config in `lib/llm/` sets `recordInputs: false` and
+`recordOutputs: false`. The span keeps its `gen_ai.usage.*` /
+`gen_ai.request.model` telemetry (model, token counts, latency); only the
+input/output **content** is suppressed, so nothing personal reaches Langfuse.
+
 The agent supports one extra sink, independent of the primary exporter:
 `OTEL_TRACES_FILE` adds a `JSONLSpanExporter` (`tracing.py`) that appends one
 compact JSON object per span. Set it *alongside* Honeycomb to get live tracing
