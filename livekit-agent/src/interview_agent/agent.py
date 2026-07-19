@@ -27,7 +27,7 @@ import logging
 import os
 import time
 from collections.abc import AsyncIterator
-from contextlib import aclosing
+from contextlib import aclosing, suppress
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -184,6 +184,41 @@ async def _aclose_quietly(stream: Any) -> None:
         logger.debug("TTS stream aclose failed", exc_info=True)
 
 
+async def _pump_frames(stream: Any, frame_q: "asyncio.Queue[Any]") -> None:
+    """Drain a live TTS stream into ``frame_q`` as frames are produced.
+
+    Runs as a background task so ``tts_node`` can keep pushing later text
+    to the same stream while audio for the earlier text is already flowing
+    — the difference between "first audio during generation" and "first
+    audio after the whole completion". The stream yields frames as each
+    sentence is synthesized (ElevenLabs auto_mode flushes per sentence),
+    so a multi-sentence run starts speaking sentence 1 while sentence 2 is
+    still being generated.
+
+    On the stream's own end (StopAsyncIteration) the task returns normally;
+    on a stream error the exception surfaces via ``task.exception()``. Either
+    outcome is read by ``tts_node`` when it finalizes the run — the queue
+    carries only frames, never sentinels.
+    """
+    async for ev in stream:
+        frame_q.put_nowait(ev.frame)
+
+
+async def _stop_pump(task: "asyncio.Task[None] | None") -> None:
+    """Cancel and await a frame-pump task, swallowing its cancellation.
+
+    Called on the barge-in / push-failure paths where the primed stream is
+    being torn down. ``gather(return_exceptions=True)`` collects the task's
+    CancelledError (or any cleanup error) as a result rather than
+    re-raising, so a GeneratorExit already in flight is never masked.
+    """
+    if task is None:
+        return
+    task.cancel()
+    with suppress(Exception):
+        await asyncio.gather(task, return_exceptions=True)
+
+
 def _build_tts_for_spec(spec: PanelPersonaSpec) -> elevenlabs.TTS:
     """One prewarmed ElevenLabs TTS per panelist.
 
@@ -312,32 +347,102 @@ class PanelAgent(Agent):
 
     async def tts_node(self, text, model_settings):
         """Route contiguous speaker runs to per-panelist TTS streams,
-        streaming each piece to ElevenLabs the moment it arrives.
+        streaming each run's audio out WHILE the LLM is still generating it.
 
-        Each text piece is pushed to the current speaker's stream AS IT
-        ARRIVES from the LLM, so synthesis starts while the model is still
-        generating — the first audio does not wait for the full completion.
-        A single-speaker reply (every calm turn, most standard turns) is the
-        common case, and buffering the whole run before pushing would add the
-        entire generation time to time-to-first-audio.
+        Per speaker run a stream is opened, each text piece is pushed to it as
+        it arrives from the LLM, and a background pump drains the resulting
+        audio frames into a queue this generator yields from. So a
+        single-speaker reply — every calm turn, most standard turns — starts
+        speaking sentence 1 while sentence 2 is still being generated, instead
+        of buffering the whole completion before the first frame (which added
+        the entire generation time to time-to-first-audio). ElevenLabs
+        ``auto_mode`` flushes per sentence, so audio for an earlier sentence is
+        available before the run's later text has even been pushed.
 
-        Retry resilience is kept without paying that latency: alongside the
-        incremental push we keep a replay copy of the pieces sent so far
-        (``pieces``). If the primed stream fails BEFORE any frame is yielded,
-        ``_finish_run`` opens a fresh stream and replays the buffer — first on
-        the same voice, then on the round leader's — exactly the Task-10
-        fallback. A failure AFTER a frame is yielded drops the remainder (a
-        replay would double-speak the opening).
+        Retry resilience is kept without paying that latency. Alongside the
+        incremental push we keep a replay copy of the run's pieces. If the
+        primed stream fails BEFORE any frame is yielded, ``_finish_run`` opens
+        a fresh stream and replays them — same voice, then the round leader.
+        Once a frame has been yielded the candidate is already hearing the
+        line, so a mid-stream failure just drops the remainder (a replay would
+        speak the opening twice).
 
-        Streams are drained one run at a time (audio plays in order anyway),
-        and each drain is wrapped in ``aclosing`` so a barge-in that closes
-        tts_node mid-run promptly closes the active ElevenLabs stream rather
-        than leaking the websocket to the GC.
+        In-order playback holds because a speaker change finalizes the current
+        run — end_input, drain the rest, close — before opening the next. And
+        every stream + pump is torn down in ``finally`` / ``_finalize`` so a
+        barge-in that closes tts_node mid-run promptly closes the live
+        ElevenLabs websocket rather than leaking it to the GC.
         """
         current: str | None = None
         pieces: list[str] = []          # replay buffer for the current run
-        stream: Any = None              # attempt-1 stream, primed as text arrives
-        primed_ok = False               # True while the primed stream is healthy
+        stream: Any = None              # primed stream, or None once unusable
+        pump: asyncio.Task[None] | None = None
+        frame_q: asyncio.Queue[Any] | None = None
+        primed_yielded = False          # has the primed stream yielded a frame
+
+        async def _drain_ready() -> AsyncIterator[Any]:
+            """Yield every frame the pump has already produced (non-blocking).
+
+            Never waits on a frame that needs more text, so the loop stays free
+            to push the next piece — this is what makes the streaming
+            incremental rather than one burst at the end.
+            """
+            nonlocal primed_yielded
+            if frame_q is None:
+                return
+            while not frame_q.empty():
+                primed_yielded = True
+                yield frame_q.get_nowait()
+
+        async def _finalize(
+            persona_id: str, run_pieces: list[str]
+        ) -> AsyncIterator[Any]:
+            """Finish the current run: drain the primed stream to completion
+            (or fall back to a fresh stream), then release its pump + stream.
+            Yields audio frames.
+            """
+            nonlocal stream, pump, frame_q, primed_yielded
+            live, pump_task, q = stream, pump, frame_q
+            # Take ownership so the outer ``finally`` won't also touch these.
+            stream = pump = frame_q = None
+            try:
+                if live is not None:
+                    # Signal end-of-run so the primed stream completes, wait for
+                    # the pump to finish producing, then drain what it made.
+                    with suppress(Exception):
+                        live.end_input()
+                    if pump_task is not None:
+                        await asyncio.gather(pump_task, return_exceptions=True)
+                    while q is not None and not q.empty():
+                        primed_yielded = True
+                        yield q.get_nowait()
+                    failed = (
+                        pump_task is not None
+                        and not pump_task.cancelled()
+                        and pump_task.exception() is not None
+                    )
+                    await _aclose_quietly(live)
+                    live = None
+                    if failed and not primed_yielded:
+                        async with aclosing(
+                            self._finish_run(persona_id, run_pieces)
+                        ) as frames:
+                            async for f in frames:
+                                yield f
+                elif not primed_yielded:
+                    # Primed stream never opened / a push failed: full fallback.
+                    async with aclosing(
+                        self._finish_run(persona_id, run_pieces)
+                    ) as frames:
+                        async for f in frames:
+                            yield f
+            finally:
+                # Runs on success, on the fallback path, and on the
+                # GeneratorExit a barge-in throws in at a yield above — the one
+                # place that always closes this run's live stream + pump.
+                await _stop_pump(pump_task)
+                await _aclose_quietly(live)
+                primed_yielded = False
 
         try:
             async for speaker, piece in split_speaker_segments(
@@ -345,24 +450,21 @@ class PanelAgent(Agent):
             ):
                 if speaker != current:
                     if current is not None:
-                        primed = stream if primed_ok else None
-                        stream = None  # ownership handed to _finish_run
-                        # aclosing(): on barge-in the framework closes tts_node
-                        # at the `yield frame` below, and only an explicit
-                        # aclose runs _finish_run's cleanup promptly (closing
-                        # the live ElevenLabs stream). Left to the GC, that
-                        # stream outlives the run.
-                        async with aclosing(
-                            self._finish_run(current, pieces, primed)
-                        ) as frames:
-                            async for frame in frames:
-                                yield frame
+                        async with aclosing(_finalize(current, pieces)) as frames:
+                            async for f in frames:
+                                yield f
                     current = speaker
                     pieces = []
+                    primed_yielded = False
                     stream = self._open_stream(speaker)
-                    primed_ok = stream is not None
+                    if stream is not None:
+                        frame_q = asyncio.Queue()
+                        pump = asyncio.create_task(_pump_frames(stream, frame_q))
+                    else:
+                        frame_q = None
+                        pump = None
                 pieces.append(piece)
-                if primed_ok and stream is not None:
+                if stream is not None:
                     try:
                         stream.push_text(piece)
                     except Exception:  # noqa: BLE001
@@ -372,25 +474,25 @@ class PanelAgent(Agent):
                             current,
                             exc_info=True,
                         )
+                        await _stop_pump(pump)
                         await _aclose_quietly(stream)
                         stream = None
-                        primed_ok = False
+                        pump = None
+                        frame_q = None
+                # Emit whatever the pump has produced so far.
+                async for f in _drain_ready():
+                    yield f
 
             if current is not None:
-                primed = stream if primed_ok else None
-                stream = None
-                async with aclosing(
-                    self._finish_run(current, pieces, primed)
-                ) as frames:
-                    async for frame in frames:
-                        yield frame
+                async with aclosing(_finalize(current, pieces)) as frames:
+                    async for f in frames:
+                        yield f
         finally:
-            # A barge-in or cancellation between opening a run's stream and
-            # handing it to _finish_run leaves it dangling — close it here.
-            # A stream already given to _finish_run has been nulled out above,
-            # so this never double-closes.
-            if stream is not None:
-                await _aclose_quietly(stream)
+            # Barge-in or cancellation before a run reached _finalize: stop the
+            # pump and close the live stream so no ElevenLabs websocket leaks.
+            # A run handed to _finalize has nulled these out, so no double-close.
+            await _stop_pump(pump)
+            await _aclose_quietly(stream)
 
     def _open_stream(self, persona_id: str) -> Any:
         """Open a persona's TTS stream, or return None if opening fails.
@@ -407,44 +509,36 @@ class PanelAgent(Agent):
             return None
 
     async def _finish_run(
-        self, persona_id: str, pieces: list[str], primed: Any
+        self, persona_id: str, pieces: list[str]
     ) -> AsyncIterator[Any]:
-        """Drain one speaker run's audio, retrying the voice then the leader.
+        """Fresh-stream fallback for a run whose primed stream produced no
+        audio: retry the same voice once, then re-speak on the round leader.
 
-        ``primed`` is attempt 1 — the stream opened at run start and fed each
-        piece as it arrived. When it survived priming we drain it directly;
-        when opening or a push already failed it is None, and attempt 1 is
-        already spent, so we fall straight through to a fresh stream that
-        replays ``pieces`` from the start.
+        Reached only after the primed stream failed BEFORE any frame reached
+        the candidate — a failed open, a failed push, or a stream error with no
+        audio yet. ``pieces`` is the run's full text, replayed from the start on
+        each attempt.
 
         A TTS error must degrade one run, never the session — worst case the
-        run is silent and the interview carries on. The attempt order
-        (persona, persona again, leader) reflects what goes wrong: a transient
-        ElevenLabs error usually clears on a retry, and if that voice is
-        genuinely down, the leader re-speaking the line is still a coherent
-        panel. Silence is not.
+        run is silent and the interview carries on. The attempt order (persona,
+        then leader) reflects what goes wrong: a transient ElevenLabs error
+        usually clears on a retry, and if that voice is genuinely down, the
+        leader re-speaking the line is still a coherent panel. Silence is not.
 
         The ``yielded`` guard is the subtle part. Once a frame has been handed
         downstream the candidate is already hearing the line, so replaying it
-        would speak the opening twice — worse than the failure. Past that
-        point the only safe degradation is to drop the rest of the run.
+        would speak the opening twice — worse than the failure. Past that point
+        the only safe degradation is to drop the rest of the run.
         """
         leader_id = self.current_leader.id
-        if primed is not None:
-            # (ready_stream_or_None, persona_for_this_attempt)
-            plan = ((primed, persona_id), (None, persona_id), (None, leader_id))
-        else:
-            # Eager open/priming already burned attempt 1 on the persona.
-            plan = ((None, persona_id), (None, leader_id))
-
-        for attempt_no, (ready, pid) in enumerate(plan, start=1):
+        plan = (persona_id, leader_id)
+        for attempt_no, pid in enumerate(plan, start=1):
             yielded = False
-            stream = ready
+            stream: Any = None
             try:
-                if stream is None:
-                    stream = self._tts_by_persona[pid].stream()
-                    for piece in pieces:
-                        stream.push_text(piece)
+                stream = self._tts_by_persona[pid].stream()
+                for piece in pieces:
+                    stream.push_text(piece)
                 stream.end_input()
                 async for ev in stream:
                     yielded = True

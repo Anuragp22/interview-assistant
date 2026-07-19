@@ -338,6 +338,92 @@ async def test_tts_node_streams_pieces_before_upstream_is_exhausted(panel_agent)
     )
 
 
+class _PerPushSynthStream:
+    """A stream that emits exactly one audio frame per pushed piece.
+
+    Unlike ``_ScriptedSynthStream`` (a fixed frame count independent of
+    input), this models the property that makes streaming observable: a
+    frame becomes available shortly AFTER each ``push_text`` and BEFORE
+    ``end_input``. ``__anext__`` blocks on an internal queue, so the pump
+    only produces a frame once one has actually been pushed — exactly how
+    a real websocket TTS behaves mid-generation.
+    """
+
+    _END = object()
+
+    def __init__(self, voice: str, closed: list[str]) -> None:
+        self._voice = voice
+        self._q: asyncio.Queue = asyncio.Queue()
+        self._closed = closed
+
+    def push_text(self, t: str) -> None:
+        self._q.put_nowait(_FakeEvent(_FakeFrame(self._voice, 0)))
+
+    def end_input(self) -> None:
+        self._q.put_nowait(self._END)
+
+    async def aclose(self) -> None:
+        await asyncio.sleep(0)
+        self._closed.append(self._voice)
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        item = await self._q.get()
+        if item is self._END:
+            raise StopAsyncIteration
+        return item
+
+
+class _PerPushTTS:
+    def __init__(self, voice: str) -> None:
+        self._voice = voice
+        self.closed: list[str] = []
+
+    def stream(self):
+        return _PerPushSynthStream(self._voice, self.closed)
+
+
+@pytest.mark.asyncio
+async def test_tts_node_yields_a_frame_before_upstream_is_exhausted(panel_agent):
+    """The CRITICAL streaming guarantee: a single-speaker reply (every calm
+    turn, most standard turns) must yield an audio FRAME while the upstream
+    LLM stream is still producing — not buffer the whole run and only start
+    draining audio once the completion is exhausted.
+
+    The earlier fix pushed text incrementally but still drained frames only
+    after the loop, so time-to-first-audio was the whole generation time.
+    This asserts a frame reaches the caller BEFORE the upstream generator
+    runs to exhaustion — impossible under the buffered design.
+    """
+    exhausted = asyncio.Event()
+    panel_agent._tts_by_persona = {
+        "behavioral": _PerPushTTS("sarah-voice"),
+        "technical": _PerPushTTS("adam-voice"),
+    }
+
+    async def _slow_upstream():
+        # One speaker throughout: the speaker never changes, so a buffered
+        # tts_node would not finalize (and thus not drain) until the very end.
+        for chunk in ["[SARAH] one. ", "two. ", "three. ", "four. "]:
+            yield chunk
+            await asyncio.sleep(0)  # let the pump surface the pushed frame
+        exhausted.set()
+
+    yielded_before_exhaustion = False
+    async for _frame in panel_agent.tts_node(_slow_upstream(), model_settings=None):
+        if not exhausted.is_set():
+            yielded_before_exhaustion = True
+            break
+
+    assert yielded_before_exhaustion, (
+        "no audio frame was yielded before the upstream LLM stream was "
+        "exhausted — tts_node buffered the whole single-speaker run instead "
+        "of streaming audio during generation"
+    )
+
+
 @pytest.mark.asyncio
 async def test_tts_node_happy_path_unchanged(panel_agent):
     """Multi-speaker text still yields frames in speaker order, one stream
