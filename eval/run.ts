@@ -49,6 +49,7 @@ import {
   aggregateOf,
   buildBaselinePayload,
   compareToBaselines,
+  decideCompareOutcome,
   erroredOf,
   isErrored,
   type BaselineFile,
@@ -494,7 +495,27 @@ async function main(): Promise<void> {
     return;
   }
 
-  if (regressions.length > 0) {
+  // Compare-mode exit gate (baseline mode returned above). A partially-errored
+  // run measured SOME fixtures but not all — the unmeasured ones carry no
+  // regression coverage this run, and both compareToBaselines() and
+  // aggregateOf() dropped them. Exiting 0 here would certify "no regression"
+  // over a suite that didn't fully run, hiding the exact provider/schema
+  // failures this gate exists to catch. Exit 2 ("couldn't run"), listing what
+  // went unmeasured. (The all-errored case already exited 2 above.)
+  const outcome = decideCompareOutcome(scores, regressions);
+  if (outcome.kind === "unmeasured") {
+    console.error(
+      color(
+        `\nINCOMPLETE — ${outcome.unmeasured.length} fixture(s) went ` +
+          `unmeasured (errored): ${outcome.unmeasured.join(", ")}. Cannot ` +
+          `certify no regression when part of the suite didn't run — exiting 2 ` +
+          `("couldn't run"), not 0.`,
+        "red",
+      ),
+    );
+    process.exit(2);
+  }
+  if (outcome.kind === "regressed") {
     console.log(color(`\nFAILED — ${regressions.length} regression(s)`, "red"));
     process.exit(1);
   }

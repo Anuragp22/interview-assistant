@@ -132,3 +132,37 @@ export function aggregateOf(scores: FixtureScore[]): number {
   if (scored.length === 0) return 0;
   return scored.reduce((sum, s) => sum + s.aggregate, 0) / scored.length;
 }
+
+export type CompareOutcome =
+  | { kind: "ok" }
+  | { kind: "regressed"; regressions: Regression[] }
+  | { kind: "unmeasured"; unmeasured: string[] };
+
+/**
+ * The COMPARE-mode exit decision, as a pure function of the run's scores and
+ * the regressions found among the fixtures that actually scored.
+ *
+ * Precedence — unmeasured beats regressed beats ok:
+ *   1. ANY errored fixture → "unmeasured" (run.ts exits 2, "couldn't run").
+ *      compareToBaselines() and aggregateOf() both EXCLUDE errored fixtures,
+ *      so a partially-errored run whose scored fixtures happen not to regress
+ *      would otherwise exit 0 with passedRegression: true — silently dropping
+ *      regression coverage for exactly the provider/schema failures this gate
+ *      exists to catch. A run that didn't fully execute cannot certify "no
+ *      regression", so it must not pass.
+ *   2. Regressions among scored fixtures → "regressed" (exit 1).
+ *   3. Otherwise → "ok" (exit 0).
+ *
+ * Baseline (--baseline) mode does NOT use this: it carries errored fixtures
+ * forward from the prior baseline and never treats them as fatal (see
+ * buildBaselinePayload).
+ */
+export function decideCompareOutcome(
+  scores: FixtureScore[],
+  regressions: Regression[],
+): CompareOutcome {
+  const unmeasured = erroredOf(scores).map((s) => s.fixtureId);
+  if (unmeasured.length > 0) return { kind: "unmeasured", unmeasured };
+  if (regressions.length > 0) return { kind: "regressed", regressions };
+  return { kind: "ok" };
+}

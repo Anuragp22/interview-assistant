@@ -11,7 +11,9 @@ import {
   aggregateOf,
   buildBaselinePayload,
   compareToBaselines,
+  decideCompareOutcome,
   type BaselineFile,
+  type Regression,
 } from "../eval/report-model";
 import type { FixtureScore } from "../eval/types";
 
@@ -241,5 +243,56 @@ describe("aggregateOf", () => {
     // Callers must treat this as 'no measurement' (run.ts exits 2), but it
     // must at least not poison report.json with NaN.
     expect(aggregateOf([errored("a", "boom"), errored("b", "boom")])).toBe(0);
+  });
+});
+
+describe("decideCompareOutcome", () => {
+  const drop: Regression = {
+    fixtureId: "data-engineer-mid",
+    metric: "aggregate",
+    baseline: 0.85,
+    current: 0.6,
+  };
+
+  it("exits 2 (unmeasured) when a fixture errored even if the rest didn't regress", () => {
+    // The bug this gate closes: aggregateOf/compareToBaselines exclude the
+    // errored fixture, so its dropped coverage would otherwise let the run
+    // exit 0. A partial run cannot certify "no regression".
+    const outcome = decideCompareOutcome(
+      [healthy("a", 0.9), errored("ios-mobile-mid", "boom")],
+      [], // scored fixtures produced no regression
+    );
+    expect(outcome).toEqual({
+      kind: "unmeasured",
+      unmeasured: ["ios-mobile-mid"],
+    });
+  });
+
+  it("unmeasured wins even when the scored fixtures ALSO regressed", () => {
+    // "Couldn't fully run" is the more severe signal than "regressed": you
+    // can't trust a regression verdict from a suite that didn't finish.
+    const outcome = decideCompareOutcome(
+      [healthy("data-engineer-mid", 0.6), errored("b", "boom")],
+      [drop],
+    );
+    expect(outcome).toEqual({ kind: "unmeasured", unmeasured: ["b"] });
+  });
+
+  it("lists every unmeasured fixture", () => {
+    const outcome = decideCompareOutcome(
+      [errored("a", "boom"), healthy("c", 0.9), errored("b", "boom")],
+      [],
+    );
+    expect(outcome).toEqual({ kind: "unmeasured", unmeasured: ["a", "b"] });
+  });
+
+  it("exits 1 (regressed) when everything measured but a fixture dropped", () => {
+    const outcome = decideCompareOutcome([healthy("data-engineer-mid", 0.6)], [drop]);
+    expect(outcome).toEqual({ kind: "regressed", regressions: [drop] });
+  });
+
+  it("exits 0 (ok) when every fixture scored and none regressed", () => {
+    const outcome = decideCompareOutcome([healthy("a", 0.9), healthy("b", 0.85)], []);
+    expect(outcome).toEqual({ kind: "ok" });
   });
 });
