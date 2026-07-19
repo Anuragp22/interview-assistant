@@ -107,6 +107,22 @@ def test_verdict_advance_language_flagged():
     assert len(check_no_verdict_language(["[ADAM] That's enough to advance you."])) == 1
 
 
+def test_verdict_advance_you_language_flagged():
+    # The verdict sense — advancing the CANDIDATE — must still trip.
+    assert len(check_no_verdict_language(["[ADAM] I'd advance you to the next stage."])) == 1
+    assert len(check_no_verdict_language(["[SARAH] We're going to advance the candidate."])) == 1
+
+
+def test_advance_to_next_round_not_flagged():
+    # Advancing the PANEL to the next round is the panel's own job — the
+    # next_round tool is literally described as "Advance the panel to the next
+    # round". This ordinary hand-off wording is not a hiring verdict and must
+    # not false-positive.
+    assert check_no_verdict_language(["[SARAH] Let's advance to the technical round."]) == []
+    assert check_no_verdict_language(["[ADAM] Great, let's advance to the next round."]) == []
+    assert check_no_verdict_language(["[BELLA] I'll advance the panel to system design now."]) == []
+
+
 def test_recommender_system_topic_not_flagged():
     # A recommender SYSTEM is a common interview topic, not a hiring verdict.
     # The bare word "recommendation" must not false-positive on it.
