@@ -200,7 +200,18 @@ def run_simulation(
             ]
         panel_msgs.append(assistant_msg)
 
+        # Index of THIS turn's spoken text (or the last prior utterance when
+        # the turn was tool-only) — used for the informational guard-refusal /
+        # end_interview records.
         turn_idx = len(out.assistant_texts) - 1
+        # Index the NEXT assistant utterance will occupy = the first utterance
+        # of the round a next_round opens. Recording the boundary here (rather
+        # than at turn_idx = len-1) keeps segmentation correct even when the
+        # advancing turn carried no text: a tool-only next_round (content null,
+        # common for OpenAI-compatible tool calls) would otherwise record -1
+        # (dropped by segment_texts_by_round) or the PREVIOUS utterance's index,
+        # scoring the new round's utterances under the old round's leader.
+        next_round_boundary = len(out.assistant_texts)
         ended = False
         for tc in tcs:
             name = tc.function.name
@@ -232,7 +243,7 @@ def run_simulation(
                                 intensity, current_round=current_round
                             ),
                         }
-                        out.tool_calls.append((turn_idx, "next_round"))
+                        out.tool_calls.append((next_round_boundary, "next_round"))
                         tool_content = "Round advanced."
             else:  # end_interview — unguarded in the sim; production's
                 # end_interview guard is out of scope for this eval.
@@ -313,20 +324,21 @@ def segment_texts_by_round(
 ) -> list[list[str]]:
     """Split the flat utterance list into per-round segments.
 
-    A ``next_round`` tool call recorded at assistant-turn index ``k`` means
-    everything up to and including ``assistant_texts[k]`` belongs to the
-    round being left; the next utterance opens the following round. Only
-    ``next_round`` boundaries split — ``end_interview`` does not open a new
-    round. Segment i is what the panel said while round i's leader
+    A ``next_round`` tool call is recorded at index ``b`` = the index of the
+    FIRST utterance of the round it opens (the first thing spoken after the
+    advance). So ``assistant_texts[:b]`` closed the previous round and
+    ``assistant_texts[b:]`` opens the next. Recording the boundary at the new
+    round's first utterance — rather than the old round's last — is what keeps
+    a tool-only advance (which appended no text of its own) from losing the
+    boundary. Only ``next_round`` boundaries split — ``end_interview`` does not
+    open a new round. Segment i is what the panel said while round i's leader
     (``LEADERS_IN_ORDER[i]``) was driving.
     """
-    boundaries = sorted(
-        idx for idx, name in tool_calls if name == "next_round" and idx >= 0
-    )
+    boundaries = sorted(idx for idx, name in tool_calls if name == "next_round")
     segments: list[list[str]] = []
     start = 0
     for b in boundaries:
-        segments.append(assistant_texts[start : b + 1])
-        start = b + 1
+        segments.append(assistant_texts[start:b])
+        start = b
     segments.append(assistant_texts[start:])
     return segments

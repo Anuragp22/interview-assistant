@@ -150,9 +150,9 @@ def test_panel_tags_and_leaders_match_the_big_tech_roster():
 
 def test_segment_texts_splits_at_next_round_boundaries():
     texts = ["[SARAH] r1a", "[SARAH] r1b", "[ADAM] r2a", "[BELLA] r3a"]
-    # next_round fired on the assistant turn that produced index 1, and again
-    # on the one that produced index 2.
-    tool_calls = [(1, "next_round"), (2, "next_round")]
+    # A boundary is the index of the FIRST utterance of the round it opens:
+    # round 2 opens at index 2 (r2a), round 3 at index 3 (r3a).
+    tool_calls = [(2, "next_round"), (3, "next_round")]
     segments = segment_texts_by_round(texts, tool_calls)
     assert segments == [
         ["[SARAH] r1a", "[SARAH] r1b"],
@@ -168,8 +168,21 @@ def test_segment_texts_single_round_when_no_advance():
 
 def test_segment_texts_ignores_end_interview_calls():
     texts = ["[SARAH] a", "[BELLA] b"]
-    tool_calls = [(0, "next_round"), (1, "end_interview")]
+    # next_round opens round 2 at index 1 (b); end_interview never splits.
+    tool_calls = [(1, "next_round"), (1, "end_interview")]
     assert segment_texts_by_round(texts, tool_calls) == [["[SARAH] a"], ["[BELLA] b"]]
+
+
+def test_segment_texts_tool_only_advance_keeps_new_round_boundary():
+    # The Fix-4 case: the advancing turn carried NO text (a tool-only
+    # next_round, content null), so the FIRST utterance of the new round is at
+    # index 0. Recording the boundary at the new round's first utterance keeps
+    # it from being dropped as a -1 and scoring Adam under Sarah's round.
+    texts = ["[ADAM] Design a rate limiter."]
+    assert segment_texts_by_round(texts, [(0, "next_round")]) == [
+        [],
+        ["[ADAM] Design a rate limiter."],
+    ]
 
 
 # ── round-advancing re-render (Fix 2) ────────────────────────────────────
@@ -347,3 +360,44 @@ def test_run_simulation_next_round_advances_after_enough_user_turns():
     assert any(
         "CURRENT ROUND: technical" in p for p in client.panel_system_prompts
     )
+
+
+def test_run_simulation_tool_only_next_round_segments_into_new_round():
+    # Fix 4: the panel advances with a TOOL-ONLY next_round (content null —
+    # common for OpenAI-compatible tool calls) after two silent warmup turns,
+    # then the first spoken utterance of the run arrives. That utterance must
+    # be segmented into the NEW round (Adam), not the old one (Sarah).
+    # Before the fix the boundary was recorded at len-1 == -1 and dropped, so
+    # every later utterance scored under Sarah's round.
+    client = _ScriptedPanelClient(
+        [
+            (None, None),  # silent warmup turn 1 (no text, no tool)
+            (None, None),  # silent warmup turn 2 — earns the two candidate turns
+            (None, "next_round"),  # tool-only advance: carries NO spoken text
+            ("[ADAM] Design a rate limiter.", "end_interview"),
+        ]
+    )
+    transcript = run_simulation(
+        client,  # type: ignore[arg-type]
+        intensity="grill",
+        persona=PERSONAS[0],
+        model="stub-model",
+        max_candidate_turns=MIN_USER_TURNS_BEFORE_TRANSFER + 3,
+    )
+
+    # The only spoken utterance is Adam's, spoken AFTER the tool-only advance.
+    assert transcript.assistant_texts == ["[ADAM] Design a rate limiter."]
+    # The advance was allowed (recorded, not refused).
+    assert "next_round" in [name for _, name in transcript.tool_calls]
+    assert transcript.guard_refusals == []
+
+    segments = segment_texts_by_round(
+        transcript.assistant_texts, transcript.tool_calls
+    )
+    # Two segments: round 0 (Sarah) is empty, round 1 (Adam) holds the line.
+    assert len(segments) == 2
+    assert "[ADAM] Design a rate limiter." in segments[1]
+    assert "[ADAM] Design a rate limiter." not in segments[0]
+    # And segment 1 is judged against round 1's leader (Adam), so an [ADAM]
+    # line there is the leader speaking — not an interjection charged to Sarah.
+    assert LEADERS_IN_ORDER[1] == "ADAM"
