@@ -16,6 +16,7 @@ run to that panelist's voice, so the candidate hears the whole panel.
 import pytest
 from livekit.agents.inference import TurnDetector
 from livekit.agents.llm import FallbackAdapter
+from livekit.agents.types import DEFAULT_API_CONNECT_OPTIONS
 from livekit.agents.voice import AgentSession
 from livekit.plugins import deepgram, openai, silero
 
@@ -222,3 +223,25 @@ def test_build_groq_llm_fallback_spreads_distinct_keys(monkeypatch):
         assert isinstance(inst, openai.LLM)
         assert inst.model == llm_model_id()
         assert str(inst._client.base_url).rstrip("/") == GROQ_BASE_URL
+
+
+def test_build_groq_llm_fallback_per_attempt_timeout_matches_single_key(monkeypatch):
+    """Each failover attempt must tolerate a slow-but-healthy first token.
+
+    FallbackAdapter defaults attempt_timeout to 5.0s and applies it as the
+    per-attempt connection timeout, which the OpenAI plugin passes straight
+    into httpx.Timeout(...) — so it caps time-to-FIRST-token, not just TCP
+    connect. A bare single-key openai.LLM runs on DEFAULT_API_CONNECT_OPTIONS
+    (10.0s). Left at 5s, a healthy gpt-oss-120b whose first chunk lands after
+    5s would trip every key and fail the turn on latency alone. Pin that the
+    multi-key path is no more eager to fail over than the single-key path is
+    to time out.
+    """
+    monkeypatch.setenv("GROQ_API_KEY1", "gsk_a")
+    monkeypatch.setenv("GROQ_API_KEY2", "gsk_b")
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+
+    built = _build_groq_llm()
+    assert isinstance(built, FallbackAdapter)
+    assert built._attempt_timeout == DEFAULT_API_CONNECT_OPTIONS.timeout
+    assert built._attempt_timeout >= 10.0

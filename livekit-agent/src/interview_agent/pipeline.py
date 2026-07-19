@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from livekit.agents.inference import TurnDetector
 from livekit.agents.llm import FallbackAdapter
+from livekit.agents.types import DEFAULT_API_CONNECT_OPTIONS
 from livekit.agents.voice import AgentSession
 from livekit.plugins import deepgram, openai, silero
 
@@ -68,7 +69,20 @@ def _build_groq_llm() -> openai.LLM | FallbackAdapter:
         return instances[0]
     # Mirrors the audit runner's RotatingGroqClient, but at the SDK layer
     # so the voice loop benefits too.
-    return FallbackAdapter(instances)
+    #
+    # attempt_timeout is pinned to the single-key path's effective timeout.
+    # FallbackAdapter defaults it to 5.0s, but a bare openai.LLM runs on
+    # DEFAULT_API_CONNECT_OPTIONS.timeout (10.0s) — and that value becomes the
+    # httpx read timeout on the streaming completion (inference/llm.py:
+    # `timeout=httpx.Timeout(conn_options.timeout)`), so it gates TIME-TO-FIRST-
+    # TOKEN, not just TCP connect. Left at 5s, a healthy gpt-oss-120b whose
+    # first chunk lands after 5s (plausible as the CV + transcript context
+    # grows) would time out on EVERY key, cycle through all of them, and fail
+    # the turn — failover firing on latency, not on a real 429/error. Matching
+    # 10s makes multi-key deploys degrade no more eagerly than single-key ones.
+    return FallbackAdapter(
+        instances, attempt_timeout=DEFAULT_API_CONNECT_OPTIONS.timeout
+    )
 
 
 def build_session(*, vad: silero.VAD | None = None) -> AgentSession:
