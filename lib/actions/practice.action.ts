@@ -194,7 +194,11 @@ export async function createPracticeSession(input: {
         // 2. Phase 1 — questions/rubrics per preset round.
         //    AI SDK experimental_telemetry emits the actual gen_ai.* span
         //    inside generateRoundQuestions — this wrapper just gives us
-        //    our own application-level marker.
+        //    our own application-level marker. That span carries model /
+        //    token / latency telemetry only: every experimental_telemetry
+        //    config sets recordInputs:false + recordOutputs:false, so the
+        //    prompt content (CV + JD) is NOT recorded and never reaches a
+        //    third-party sink.
         const phase1 = await traced(
           "phase1.generate-template",
           {},

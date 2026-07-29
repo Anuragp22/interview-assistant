@@ -6,6 +6,7 @@ import { cookies } from "next/headers";
 
 import { auth } from "@/firebase/admin";
 import LogoutButton from "@/components/LogoutButton";
+import DocsLinks from "@/components/DocsLinks";
 
 const SESSION_COOKIE = "session";
 
@@ -36,6 +37,7 @@ const PracticeLayout = async ({ children }: { children: ReactNode }) => {
             <span className="ml-2 text-xs text-fg-muted">Practice</span>
           </Link>
           <div className="flex items-center gap-3">
+            <DocsLinks />
             <Link
               href="/practice/settings"
               className="text-sm text-fg-muted hover:text-fg-strong transition-colors"

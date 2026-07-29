@@ -40,6 +40,12 @@ export async function generateQuestionsAndRubrics(input: {
           schema: templateGenerationSchema,
           experimental_telemetry: {
             isEnabled: true,
+            // PRIVACY: the AI SDK records prompt inputs/outputs onto the gen_ai
+            // span by default. This prompt carries the job description; a
+            // configured OTLP sink (Langfuse) would ship it to a third party.
+            // Suppress content — model/token/latency telemetry is unaffected.
+            recordInputs: false,
+            recordOutputs: false,
             functionId: "groq.generate-questions-and-rubrics",
             metadata: { role: input.role, level: input.level, count },
           },
@@ -114,6 +120,10 @@ export async function generateRoundQuestions(input: {
           schema: roundsTemplateSchema(roundIds),
           experimental_telemetry: {
             isEnabled: true,
+            // PRIVACY: prompt carries the job description — never record
+            // input/output content onto the span (see above).
+            recordInputs: false,
+            recordOutputs: false,
             functionId: "groq.generate-round-questions",
             metadata: {
               role: input.role,

@@ -36,6 +36,14 @@ export async function regroundQuestions(input: {
           schema: groundingSchema,
           experimental_telemetry: {
             isEnabled: true,
+            // PRIVACY: the AI SDK records prompt inputs and outputs onto the
+            // gen_ai span by default, and this prompt embeds the candidate's
+            // CV and JD. A configured OTLP sink (Langfuse) would then ship that
+            // PII to a third party. Suppress the content; the useful telemetry
+            // (model, token counts, latency) rides on gen_ai.* attributes and
+            // is unaffected.
+            recordInputs: false,
+            recordOutputs: false,
             functionId: "groq.reground-questions",
             metadata: { questionCount: input.questionsBase.length },
           },
@@ -140,6 +148,11 @@ export async function regroundRoundQuestions(input: {
           schema: roundsGroundingSchema(roundIds),
           experimental_telemetry: {
             isEnabled: true,
+            // PRIVACY: prompt embeds the CV + JD — never record input/output
+            // content onto the span (see reground-questions above). Metadata
+            // carries only the CV/JD *lengths*, never the text.
+            recordInputs: false,
+            recordOutputs: false,
             functionId: "groq.reground-round-questions",
             metadata: {
               cvLength: input.cvText.length,

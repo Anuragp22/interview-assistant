@@ -58,6 +58,7 @@ from interview_agent.evals.simulated_candidate import (
     SimTranscript,
     check_interjection_budget,
     check_no_verdict_language,
+    check_round_progression,
     check_speaker_tags,
     run_simulation,
     segment_texts_by_round,
@@ -134,6 +135,15 @@ def check_transcript(transcript: SimTranscript) -> SimResult:
 
     violations.extend(check_speaker_tags(texts, PANEL_TAGS))
     violations.extend(check_no_verdict_language(texts))
+
+    # A run that never leaves round 1 satisfies every checker above yet failed
+    # the panel's core protocol — it must traverse all rounds. Checked against
+    # the round-boundary tool calls, so a panel stuck in Sarah's opening round
+    # (zero allowed next_round) fails even when its tags/budget/language are
+    # clean.
+    violations.extend(
+        check_round_progression(transcript.tool_calls, n_rounds=len(LEADERS_IN_ORDER))
+    )
 
     segments = segment_texts_by_round(texts, transcript.tool_calls)
     budget = INTERJECTION_BUDGET[transcript.intensity]

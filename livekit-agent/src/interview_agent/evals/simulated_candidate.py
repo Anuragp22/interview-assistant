@@ -330,6 +330,37 @@ def check_no_verdict_language(assistant_texts: list[str]) -> list[str]:
     return violations
 
 
+def check_round_progression(
+    tool_calls: list[tuple[int, str]], *, n_rounds: int
+) -> list[str]:
+    """A passing run must traverse every round, not stall in round 1.
+
+    The other three checkers are all satisfied by a panel that never leaves
+    Sarah's opening round: valid speaker tags, within the first round's
+    interjection budget, no verdict language spoken. But being stuck in round 1
+    for a whole conversation IS a protocol failure — the panel is supposed to
+    hand off through the technical and system-design rounds. Visiting all
+    ``n_rounds`` rounds takes ``n_rounds - 1`` ALLOWED ``next_round``
+    transitions (a guard-refused advance never lands in ``tool_calls``), so
+    anything short of that is a run that did not progress.
+
+    Only ``next_round`` counts: ``end_interview`` closes the panel, it does not
+    open a round. A clean end is desirable but not required here — a run can
+    legitimately traverse every round yet exhaust its turn budget before the
+    panel ends, and that still progressed.
+    """
+    advances = sum(1 for _, name in tool_calls if name == "next_round")
+    needed = max(0, n_rounds - 1)
+    if advances < needed:
+        reached = advances + 1
+        return [
+            f"panel did not progress past round {reached} of {n_rounds}: "
+            f"only {advances} of {needed} round transitions occurred "
+            f"(panel never left round {reached})"
+        ]
+    return []
+
+
 def segment_texts_by_round(
     assistant_texts: list[str], tool_calls: list[tuple[int, str]]
 ) -> list[list[str]]:

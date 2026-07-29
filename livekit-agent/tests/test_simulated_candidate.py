@@ -12,12 +12,15 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from interview_agent.evals.run_sim import check_transcript
 from interview_agent.evals.simulated_candidate import (
     LEADERS_IN_ORDER,
     PANEL_TAGS,
     PERSONAS,
+    SimTranscript,
     check_interjection_budget,
     check_no_verdict_language,
+    check_round_progression,
     check_speaker_tags,
     run_simulation,
     segment_texts_by_round,
@@ -139,6 +142,91 @@ def test_hiring_recommendation_still_flagged():
     assert len(
         check_no_verdict_language(["[SARAH] My recommendation is to move you forward."])
     ) == 1
+
+
+# ── check_round_progression ──────────────────────────────────────────────
+#
+# A run that never leaves round 1 satisfies every other checker (valid tags,
+# leader-only budget, no verdict language) yet failed the panel's core
+# protocol: it is supposed to hand off through all three rounds. This checker
+# is what turns "stuck in Sarah's opening round for the whole conversation"
+# into a FAIL instead of a spurious pass.
+
+
+def test_round_progression_zero_advances_flags_did_not_progress():
+    # The bug: no allowed next_round over a whole conversation.
+    v = check_round_progression([], n_rounds=3)
+    assert len(v) == 1
+    assert "did not progress" in v[0]
+    assert "never left round 1" in v[0]
+
+
+def test_round_progression_partial_advance_still_flags():
+    # Reached round 2 (one hop) but never round 3 — two hops are needed.
+    v = check_round_progression([(2, "next_round")], n_rounds=3)
+    assert len(v) == 1
+    assert "never left round 2" in v[0]
+
+
+def test_round_progression_full_traversal_ok():
+    # Two allowed next_round hops visit all three rounds — no violation.
+    v = check_round_progression(
+        [(2, "next_round"), (4, "next_round"), (5, "end_interview")], n_rounds=3
+    )
+    assert v == []
+
+
+def test_round_progression_end_interview_is_not_progress():
+    # end_interview closes the panel; it must not be mistaken for a round hop,
+    # or an early end would mask a panel that never advanced.
+    v = check_round_progression([(3, "end_interview")], n_rounds=3)
+    assert len(v) == 1
+    assert "did not progress" in v[0]
+
+
+# ── check_transcript pass decision (the sim gate) ─────────────────────────
+
+
+def test_check_transcript_fails_when_panel_never_leaves_round_one():
+    # A full-length calm conversation that stayed in Sarah's opening round the
+    # whole time: every legacy checker is clean (valid SARAH tags, calm budget
+    # is leader-only so zero interjections, no verdict language). Before the
+    # progression check this returned passed=True; now the stall is caught.
+    stuck = SimTranscript(
+        intensity="calm",
+        persona_id="strong",
+        assistant_texts=[f"[SARAH] Behavioral question {i}." for i in range(8)],
+        tool_calls=[],  # no ALLOWED next_round ever landed
+    )
+    result = check_transcript(stuck)
+    assert result.passed is False
+    # ...and the ONLY reason it failed is the stall — proving the legacy
+    # checkers really were clean and the new check is doing the work.
+    assert len(result.violations) == 1
+    assert "did not progress" in result.violations[0]
+
+
+def test_check_transcript_passes_when_panel_traverses_all_rounds():
+    texts = [
+        "[SARAH] Tell me about a hard incident.",
+        "[SARAH] What did you learn?",
+        "[ADAM] Walk me through the data structure.",
+        "[ADAM] Why that trade-off?",
+        "[BELLA] Design a rate limiter.",
+        "[BELLA] How would you shard it?",
+    ]
+    # Round 2 opens at index 2, round 3 at index 4, then a clean end: the panel
+    # visited all three rounds, so every checker (including progression) passes.
+    tool_calls = [(2, "next_round"), (4, "next_round"), (5, "end_interview")]
+    full = SimTranscript(
+        intensity="calm",
+        persona_id="strong",
+        assistant_texts=texts,
+        tool_calls=tool_calls,
+    )
+    result = check_transcript(full)
+    assert result.passed is True, result.violations
+    assert result.n_rounds == 3
 
 
 # ── segmentation + roster wiring ─────────────────────────────────────────
