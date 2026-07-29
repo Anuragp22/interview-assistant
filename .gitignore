@@ -24,6 +24,10 @@
 .DS_Store
 *.pem
 
+# Playwright MCP scratch (console logs, DOM snapshots, screenshots) from
+# driving the app locally. The walkthrough sweep is run on demand, not stored.
+/.playwright-mcp/
+
 # debug
 npm-debug.log*
 yarn-debug.log*

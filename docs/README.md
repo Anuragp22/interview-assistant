@@ -15,6 +15,7 @@ These go deeper than the summaries in ARCHITECTURE. Read them when pushed past t
 - **[security.md](security.md)** - full prompt-injection threat model, the 3-layer defense, and the audit harness (the authoritative source for the injection-corpus category breakdown).
 - **[observability.md](observability.md)** - end-to-end OTel tracing, latency-budget gates, cost telemetry.
 - **[resumable-sessions.md](resumable-sessions.md)** - the mid-interview resume design, invariants, and what is deliberately not in v0.1.
+- **[walkthrough.md](walkthrough.md)** - notes on `/walkthrough`, the animated in-app explainer of the whole system (`app/walkthrough/`, `components/walkthrough/`). The page itself is the fastest way in; this doc covers how it is built, served, and re-verified.
 
 ## Also worth reading in the repo root
 
